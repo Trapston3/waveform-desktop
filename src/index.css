@@ -1,0 +1,591 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: 'SF Pro Display';
+  src: url('/src/assets/fonts/sf_pro_display_regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'SF Pro Display';
+  src: url('/src/assets/fonts/sf_pro_display_medium.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'SF Pro Display';
+  src: url('/src/assets/fonts/sf_pro_display_semibold.otf') format('opentype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'SF Pro Display';
+  src: url('/src/assets/fonts/sf_pro_display_bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'SF Pro Display';
+  src: url('/src/assets/fonts/sf_pro_display_heavy.otf') format('opentype');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'SF Pro Display';
+  src: url('/src/assets/fonts/sf_pro_display_heavy.otf') format('opentype');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Vazirmatn';
+  src: url('/src/assets/fonts/vazirmatn_regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-sans: 'SF Pro Display', 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* PROJECT.md M1 ↔ M2 Contract Tokens */
+  --am-acrylic-sidebar: rgba(24, 24, 27, 0.78);
+  --am-text-primary: #D8FFFFFF;
+  --am-text-secondary: #83FFFFFF;
+  --am-text-tertiary: #3FFFFFFF;
+  --am-brand-pink: #FA2D48;
+
+  /* WaveForm Color Tokens: Dark Mode Default (WCAG 2.1 AA Compliant) */
+  --color-bg: #000000;
+  --color-surface: #0D0D0F;
+  --color-surface-variant: #1C1C1E;
+  --color-outline: #2C2C2E;
+  --color-on-surface-variant: #A1A1A6;
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #A1A1A6;
+  --color-text-tertiary: #8E8E93;
+  --color-text-muted: #71717A;
+  --color-scrim-ambient: rgba(0, 0, 0, 0.45);
+  --color-primary: #FFFFFF;
+  --color-on-primary: #000000;
+  --color-accent: #FA2D48;
+
+  /* Dynamic Artwork Palette Tokens (Updated in real-time by Theme.ts on track change, 260ms fade) */
+  --artwork-hue: 352;
+  --artwork-vibrant: #FA2D48;
+  --artwork-edge-wash: #3A1019;
+  --artwork-ambient-bg: #0E0507;
+  --artwork-player-tint: rgba(58, 16, 25, 0.72);
+  --artwork-is-light: 0;
+
+  /* Tier A: Liquid Glass Structural Chrome Tokens */
+  --glass-bg: rgba(18, 18, 22, 0.65);
+  --glass-bg-elevated: rgba(28, 28, 34, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-border-subtle: rgba(255, 255, 255, 0.07);
+  --glass-player: rgba(22, 22, 28, 0.78);
+  --glass-rim-highlight: rgba(255, 255, 255, 0.35);
+  --glass-rim-shadow: rgba(0, 0, 0, 0.40);
+  --glass-blur: saturate(190%) blur(24px);
+  --glass-capsule-blur: saturate(220%) blur(32px);
+
+  /* Tier B: High-Performance Scrollable Acrylic Tokens (60fps locked) */
+  --liquid-acrylic-fill: rgba(255, 255, 255, 0.045);
+  --liquid-acrylic-border: rgba(255, 255, 255, 0.09);
+  --liquid-acrylic-inset: rgba(255, 255, 255, 0.16);
+  --liquid-acrylic-hover-fill: rgba(255, 255, 255, 0.08);
+  --liquid-acrylic-hover-border: rgba(255, 255, 255, 0.22);
+
+  /* Interactive Pill Tokens */
+  --glass-pill-fill: rgba(255, 255, 255, 0.10);
+  --glass-pill-border: rgba(255, 255, 255, 0.18);
+  --glass-pill-active: rgba(250, 45, 72, 0.92);
+
+  /* Elevation Shadows */
+  --shadow-ambient: 0 20px 52px rgba(0, 0, 0, 0.65), 0 4px 16px rgba(0, 0, 0, 0.40);
+  --shadow-card: 0 10px 28px rgba(0, 0, 0, 0.38);
+  --shadow-dock: 0 24px 60px rgba(0, 0, 0, 0.70), 0 6px 20px rgba(0, 0, 0, 0.45);
+
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* macOS Apple Music System Tokens */
+  --ease-macos-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-macos-drawer: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* macOS Traffic Light Color Tokens */
+  --color-traffic-close: #FF5F56;
+  --color-traffic-close-border: #E0443E;
+  --color-traffic-minimize: #FFBD2E;
+  --color-traffic-minimize-border: #DEA123;
+  --color-traffic-maximize: #27C93F;
+  --color-traffic-maximize-border: #1AAB29;
+
+  /* macOS Sidebar Vibrancy Tokens */
+  --sidebar-bg: rgba(18, 18, 22, 0.72);
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-item-active: rgba(255, 255, 255, 0.12);
+  --sidebar-item-hover: rgba(255, 255, 255, 0.06);
+
+  /* macOS Apple Music Crimson Accent */
+  --color-accent-hover: #FB475E;
+  --color-accent-subtle: rgba(250, 45, 72, 0.15);
+
+  color-scheme: dark;
+}
+
+.light {
+  /* PROJECT.md M1 ↔ M2 Contract Tokens (Light) */
+  --am-acrylic-sidebar: rgba(242, 242, 247, 0.88);
+  --am-text-primary: rgba(0, 0, 0, 0.85);
+  --am-text-secondary: rgba(0, 0, 0, 0.50);
+  --am-text-tertiary: rgba(0, 0, 0, 0.25);
+  --am-brand-pink: #FA2D48;
+
+  /* WaveForm Color Tokens: Light Mode */
+  --color-bg: #F5F5F7;
+  --color-surface: #FFFFFF;
+  --color-surface-variant: #EFEFF4;
+  --color-outline: #D8D8DF;
+  --color-on-surface-variant: #52525B;
+  --color-text-primary: #000000;
+  --color-text-secondary: #52525B;
+  --color-text-tertiary: #71717A;
+  --color-text-muted: #71717A;
+  --color-scrim-ambient: rgba(255, 255, 255, 0.70);
+  --color-primary: #000000;
+  --color-on-primary: #FFFFFF;
+  --color-accent: #FA2D48;
+
+  /* Tier A: Liquid Glass Structural Chrome Tokens (Light) */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-bg-elevated: rgba(255, 255, 255, 0.84);
+  --glass-border: rgba(0, 0, 0, 0.09);
+  --glass-border-subtle: rgba(0, 0, 0, 0.05);
+  --glass-player: rgba(252, 252, 254, 0.82);
+  --glass-rim-highlight: rgba(255, 255, 255, 0.95);
+  --glass-rim-shadow: rgba(0, 0, 0, 0.06);
+
+  /* Tier B: High-Performance Acrylic Tokens (Light) */
+  --liquid-acrylic-fill: rgba(0, 0, 0, 0.035);
+  --liquid-acrylic-border: rgba(0, 0, 0, 0.08);
+  --liquid-acrylic-inset: rgba(255, 255, 255, 0.85);
+  --liquid-acrylic-hover-fill: rgba(0, 0, 0, 0.06);
+  --liquid-acrylic-hover-border: rgba(0, 0, 0, 0.15);
+
+  /* macOS Sidebar Vibrancy Tokens (Light) */
+  --sidebar-bg: rgba(242, 242, 247, 0.88);
+  --sidebar-border: rgba(0, 0, 0, 0.08);
+  --sidebar-item-active: rgba(0, 0, 0, 0.08);
+  --sidebar-item-hover: rgba(0, 0, 0, 0.04);
+
+  /* Interactive Pill Tokens (Light) */
+  --glass-pill-fill: rgba(0, 0, 0, 0.06);
+  --glass-pill-border: rgba(0, 0, 0, 0.12);
+  --glass-pill-active: rgba(250, 45, 72, 0.92);
+
+  --shadow-ambient: 0 16px 40px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.06);
+  --shadow-card: 0 8px 20px rgba(0, 0, 0, 0.08);
+  --shadow-dock: 0 18px 45px rgba(0, 0, 0, 0.14), 0 4px 16px rgba(0, 0, 0, 0.08);
+
+  color-scheme: light;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-bg);
+  color: var(--color-primary);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============================================================================
+ * WaveForm Liquid Glass Optical System
+ * ============================================================================ */
+
+/* Authentic macOS Traffic Light Styling */
+.mac-traffic-btn {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 120ms ease, transform 120ms ease;
+  cursor: pointer;
+}
+
+.mac-traffic-btn:active {
+  transform: scale(0.92);
+}
+
+.mac-traffic-btn svg {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.mac-traffic-group:hover .mac-traffic-btn svg {
+  opacity: 0.85;
+}
+
+/* ----------------------------------------------------------------------------
+ * Tier A: Structural Glass Chrome (TitleBar, Sidebar, Inspector, Modals)
+ * GPU promoted via translateZ(0) to eliminate scroll redraw passes
+ * ---------------------------------------------------------------------------- */
+.liquid-glass {
+  position: relative;
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.08) 0%,
+    rgba(255, 255, 255, 0.02) 45%,
+    rgba(14, 14, 18, 0.65) 100%
+  ), var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 0.5px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-rim-highlight),
+    inset 0 -0.5px 0 0 var(--glass-rim-shadow),
+    var(--shadow-ambient);
+  transform: translateZ(0);
+  will-change: transform;
+  backface-visibility: hidden;
+  transition:
+    background 260ms var(--ease-spring),
+    border-color 260ms var(--ease-spring),
+    box-shadow 260ms var(--ease-spring);
+}
+
+.light .liquid-glass {
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.88) 0%,
+    rgba(255, 255, 255, 0.65) 100%
+  ), var(--glass-bg);
+}
+
+/* Specialized Sidebar Chrome (Left Navigation) - WinUI 3 Apple Music Acrylic */
+.liquid-glass-sidebar {
+  position: relative;
+  background: rgba(24, 24, 27, 0.78);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: inset -1px 0 0 0 rgba(255, 255, 255, 0.05);
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+.light .liquid-glass-sidebar {
+  background: rgba(242, 242, 247, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* Floating Liquid Glass Player Dock Capsule */
+.liquid-glass-capsule {
+  position: relative;
+  background:
+    radial-gradient(120% 180% at 15% 0%, rgba(255, 255, 255, 0.16) 0%, transparent 52%),
+    radial-gradient(90% 140% at 85% 100%, var(--artwork-player-tint, rgba(250, 45, 72, 0.16)) 0%, transparent 70%),
+    var(--glass-player);
+  backdrop-filter: var(--glass-capsule-blur);
+  -webkit-backdrop-filter: var(--glass-capsule-blur);
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.35),
+    inset 0 -0.5px 0 0 rgba(0, 0, 0, 0.30),
+    inset 1px 0 0 0 rgba(255, 255, 255, 0.12),
+    var(--shadow-dock);
+  transform: translateZ(0);
+  will-change: transform;
+  transition:
+    background 260ms var(--ease-spring),
+    box-shadow 260ms var(--ease-spring);
+}
+
+.light .liquid-glass-capsule {
+  background:
+    radial-gradient(120% 180% at 15% 0%, rgba(255, 255, 255, 0.95) 0%, transparent 55%),
+    radial-gradient(90% 140% at 85% 100%, rgba(250, 45, 72, 0.08) 0%, transparent 70%),
+    var(--glass-player);
+  border: 0.5px solid rgba(0, 0, 0, 0.10);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.98),
+    var(--shadow-dock);
+}
+
+/* ----------------------------------------------------------------------------
+ * Tier B: Scrollable Content Cards & Grid Tiles (Locked 60fps Scrolling)
+ * NO individual backdrop-filter; uses high-performance acrylic tint + containment
+ * ---------------------------------------------------------------------------- */
+.liquid-glass-card,
+.acrylic-tile {
+  position: relative;
+  background: var(--liquid-acrylic-fill);
+  border: 0.5px solid var(--liquid-acrylic-border);
+  box-shadow:
+    inset 0 1px 0 0 var(--liquid-acrylic-inset),
+    var(--shadow-card);
+  contain: paint layout;
+  transform: translateZ(0);
+  transition:
+    transform 220ms var(--ease-spring),
+    background 220ms var(--ease-spring),
+    border-color 220ms var(--ease-spring),
+    box-shadow 220ms var(--ease-spring);
+}
+
+.liquid-glass-card:hover,
+.acrylic-tile:hover {
+  transform: translateY(-2px);
+  background: var(--liquid-acrylic-hover-fill);
+  border-color: var(--liquid-acrylic-hover-border);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.28),
+    0 16px 36px rgba(0, 0, 0, 0.52);
+}
+
+/* ----------------------------------------------------------------------------
+ * Interactive Controls: Glass Pills & Active Indicators
+ * ---------------------------------------------------------------------------- */
+.liquid-glass-pill {
+  position: relative;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.04) 55%,
+    rgba(255, 255, 255, 0.08) 100%
+  );
+  border: 0.5px solid var(--glass-pill-border);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.28),
+    0 4px 12px rgba(0, 0, 0, 0.22);
+  transition: all 200ms var(--ease-spring);
+}
+
+.liquid-glass-pill:hover {
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.22) 0%,
+    rgba(255, 255, 255, 0.08) 60%,
+    rgba(255, 255, 255, 0.12) 100%
+  );
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+/* Active Selection State: Solid Refined Accent Pill (No harsh neon glow) */
+.liquid-glass-pill-active {
+  background: var(--glass-pill-active, rgba(250, 45, 72, 0.92));
+  border: 0.5px solid var(--color-accent, rgba(255, 180, 190, 0.45));
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.40),
+    0 6px 20px var(--color-accent-subtle, rgba(250, 45, 72, 0.38));
+  color: #FFFFFF;
+}
+
+/* ============================================================================
+ * Hardware-Accelerated View Navigation Transitions & Containment Tokens
+ * ============================================================================ */
+
+/* Lightweight GPU-Promoted Fade/Slide View Transition (180ms ease) */
+.view-transition-container {
+  animation: viewFadeIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: opacity, transform;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+@keyframes viewFadeIn {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) translateZ(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) translateZ(0);
+  }
+}
+
+@keyframes viewFadeSlide {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) translateZ(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) translateZ(0);
+  }
+}
+
+/* Virtualized Tracklist Row Containment (Calibrated 56px standard & 44px compact) */
+.track-row,
+.tracklist-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 56px;
+}
+
+.tracklist-row-compact {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 44px;
+}
+
+/* Queue Row Containment */
+.queue-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 48px;
+}
+
+/* Lyric Line Layout Isolation */
+.lyric-line {
+  contain: layout;
+}
+
+/* Artwork Lockup Frame (0.5px Inner Rim Bevel) */
+.artwork-lockup {
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.18),
+    0 8px 22px rgba(0, 0, 0, 0.45);
+}
+
+.artwork-lockup::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.18);
+  pointer-events: none;
+}
+
+/* Ambient Artwork Mesh Backdrop (Includes 45% Luminance Clamping Scrim) */
+.waveform-ambient-backdrop {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    linear-gradient(var(--color-scrim-ambient, rgba(0, 0, 0, 0.45)), var(--color-scrim-ambient, rgba(0, 0, 0, 0.45))),
+    radial-gradient(65% 55% at 18% 12%, var(--artwork-edge-wash, #3A1019) 0%, transparent 68%),
+    radial-gradient(55% 50% at 82% 88%, var(--artwork-player-tint, rgba(250, 45, 72, 0.18)) 0%, transparent 72%),
+    radial-gradient(45% 45% at 52% 42%, rgba(250, 45, 72, 0.07) 0%, transparent 75%),
+    var(--color-bg);
+  transition: background 260ms ease-out;
+}
+
+.light .waveform-ambient-backdrop {
+  background:
+    linear-gradient(var(--color-scrim-ambient, rgba(255, 255, 255, 0.70)), var(--color-scrim-ambient, rgba(255, 255, 255, 0.70))),
+    radial-gradient(65% 55% at 18% 12%, rgba(250, 45, 72, 0.08) 0%, transparent 68%),
+    radial-gradient(55% 50% at 82% 88%, rgba(250, 45, 72, 0.05) 0%, transparent 72%),
+    var(--color-bg);
+}
+
+/* Spring Press Micro-Interaction */
+.spring-press {
+  transition: transform 180ms var(--ease-bounce), opacity 150ms ease;
+}
+.spring-press:active {
+  transform: scale(0.94);
+}
+
+/* Custom Desktop Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.light ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.45);
+}
+.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.60);
+}
+
+/* Window Drag Regions */
+.app-drag-region {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* High-Contrast Syllable Lyrics Aura (-2px singing lift & white specular aura) */
+.now-playing-lyrics span[style*="translateY(-2px)"] {
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.55), 0 0 2px rgba(255, 255, 255, 0.90) !important;
+  color: #FFFFFF !important;
+}
+
+/* Animated Equalizer Keyframes */
+@keyframes eq-scale-1 {
+  0%, 100% { height: 6px; }
+  50% { height: 14px; }
+}
+@keyframes eq-scale-2 {
+  0%, 100% { height: 14px; }
+  50% { height: 8px; }
+}
+@keyframes eq-scale-3 {
+  0%, 100% { height: 8px; }
+  50% { height: 14px; }
+}
+
+.animate-eq-bar-1 { animation: eq-scale-1 0.85s ease-in-out infinite; }
+.animate-eq-bar-2 { animation: eq-scale-2 0.70s ease-in-out infinite; }
+.animate-eq-bar-3 { animation: eq-scale-3 0.95s ease-in-out infinite; }
+
+/* Settings-Driven Appearance Overrides */
+.no-acrylic-blur .liquid-glass,
+.no-acrylic-blur .liquid-glass-sidebar,
+.no-acrylic-blur .liquid-glass-capsule {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: var(--color-surface) !important;
+}
+
+.no-liquid-glass .liquid-glass-pill,
+.no-liquid-glass .liquid-glass-card,
+.no-liquid-glass .acrylic-tile {
+  background: var(--color-surface-variant) !important;
+  box-shadow: none !important;
+  border-color: var(--color-outline) !important;
+}
+
+.no-dynamic-artwork .waveform-ambient-backdrop {
+  background: var(--color-bg) !important;
+}
+
+.no-ambient-glow .waveform-ambient-backdrop {
+  opacity: 0 !important;
+}
+

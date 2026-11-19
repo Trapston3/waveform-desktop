@@ -7,6 +7,9 @@ import type { AutoEqProfile } from './AutoEqLoader';
 import { DspChain, FACTORY_EQ_PRESETS, EQ_FREQUENCIES_HZ } from './DspChain';
 import { LiveVisualizer } from './LiveVisualizer';
 import { WaveformExtractor } from './WaveformExtractor';
+import type { AudioFrameMetrics } from '../lyricVisualizer/core/models';
+
+export type { AudioFrameMetrics };
 
 export type DeckName = 'active' | 'standby';
 export type PlaybackStatus = 'IDLE' | 'PLAYING' | 'PAUSED' | 'CROSSFADING';
@@ -538,6 +541,10 @@ export class AudioEngine {
   /** Zero-allocation persistent buffer for 32-band visualizer dispatch */
   private readonly liveEnergyBuffer = new Float32Array(32);
   private readonly timeDomainBuffer = new Float32Array(1024);
+  private readonly metricsFreqFloatBuffer = new Float32Array(512);
+  private readonly metricsFreqByteBuffer = new Uint8Array(512);
+  private metricsRollingBass = 0;
+  private metricsLastBeatMs = 0;
   private synthPhase = 0;
   private crossfadeSequence = 0;
 
@@ -1107,5 +1114,188 @@ export class AudioEngine {
     }
 
     this.triggerLivePcmBlock(this.timeDomainBuffer);
+  }
+
+  /**
+   * Alias for seek(positionMs) supporting LyricVisualizer stage click-to-seek.
+   */
+  seekTo(positionMs: number): void {
+    this.seek(positionMs);
+  }
+
+  /**
+   * Sample normalized RMS, Bass (20-250 Hz), Mid (250-4000 Hz), Treble (4-16 kHz),
+   * and beat onset detection from the active Web Audio AnalyserNode / LiveVisualizer
+   * without allocating per-call arrays when `out` is provided.
+   * Gracefully returns zeroed metrics if AudioContext or CORS analyser is inactive.
+   */
+  sampleAudioMetrics(out?: AudioFrameMetrics): AudioFrameMetrics {
+    const target: AudioFrameMetrics = out ?? {
+      rmsLevel: 0,
+      bassEnergy: 0,
+      midEnergy: 0,
+      trebleEnergy: 0,
+      beatDetected: false,
+    };
+
+    target.rmsLevel = 0;
+    target.bassEnergy = 0;
+    target.midEnergy = 0;
+    target.trebleEnergy = 0;
+    target.beatDetected = false;
+
+    const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    const isCtxInactive =
+      !this.ctx ||
+      this.ctx.state === 'suspended' ||
+      this.ctx.state === 'closed' ||
+      activeDeck.usingDirectFallback ||
+      !this.analyserNode;
+
+    if (isCtxInactive) {
+      return target;
+    }
+
+    const analyser = this.analyserNode!;
+    const sampleRate =
+      typeof (this.ctx as any).sampleRate === 'number' && (this.ctx as any).sampleRate > 8000
+        ? (this.ctx as any).sampleRate
+        : 44100;
+    const fftSize = analyser.fftSize || 1024;
+    const binCount = Math.min(
+      this.metricsFreqFloatBuffer.length,
+      analyser.frequencyBinCount || Math.floor(fftSize / 2)
+    );
+    const hzPerBin = sampleRate / fftSize;
+
+    // 1. Time-domain RMS calculation
+    let hasTimeSignal = false;
+    let rms = 0;
+    if (typeof analyser.getFloatTimeDomainData === 'function') {
+      try {
+        this.timeDomainBuffer.fill(0);
+        analyser.getFloatTimeDomainData(this.timeDomainBuffer);
+        let sumSq = 0;
+        const len = this.timeDomainBuffer.length;
+        for (let i = 0; i < len; i++) {
+          const v = this.timeDomainBuffer[i];
+          if (Number.isFinite(v) && Math.abs(v) > 0.0001) {
+            hasTimeSignal = true;
+            sumSq += v * v;
+          }
+        }
+        if (hasTimeSignal && len > 0) {
+          rms = Math.max(0, Math.min(1, Math.sqrt(sumSq / len) * 1.75));
+        }
+      } catch {
+        // Ignore time-domain read failure
+      }
+    }
+
+    // 2. Frequency-domain band integration: Bass (20-250 Hz), Mid (250-4000 Hz), Treble (4000-16000 Hz)
+    const bassStart = Math.max(1, Math.floor(20 / hzPerBin));
+    const bassEnd = Math.min(binCount, Math.max(bassStart + 1, Math.ceil(250 / hzPerBin)));
+    const midStart = bassEnd;
+    const midEnd = Math.min(binCount, Math.max(midStart + 1, Math.ceil(4000 / hzPerBin)));
+    const trebleStart = midEnd;
+    const trebleEnd = Math.min(binCount, Math.max(trebleStart + 1, Math.ceil(16000 / hzPerBin)));
+
+    let hasFreqSignal = false;
+    let bass = 0;
+    let mid = 0;
+    let treble = 0;
+
+    if (typeof analyser.getFloatFrequencyData === 'function' && binCount > 0) {
+      try {
+        this.metricsFreqFloatBuffer.fill(-120);
+        analyser.getFloatFrequencyData(this.metricsFreqFloatBuffer);
+
+        const avgFloatBand = (start: number, end: number): number => {
+          if (end <= start) return 0;
+          let sum = 0;
+          let count = 0;
+          for (let i = start; i < end; i++) {
+            const db = this.metricsFreqFloatBuffer[i];
+            if (Number.isFinite(db) && db > -115) {
+              hasFreqSignal = true;
+              const norm = Math.max(0, Math.min(1, (db + 100) / 70));
+              sum += norm;
+            }
+            count++;
+          }
+          return count > 0 ? sum / count : 0;
+        };
+
+        bass = avgFloatBand(bassStart, bassEnd);
+        mid = avgFloatBand(midStart, midEnd);
+        treble = avgFloatBand(trebleStart, trebleEnd);
+      } catch {
+        // Ignore float frequency failure
+      }
+    }
+
+    if (!hasFreqSignal && typeof analyser.getByteFrequencyData === 'function' && binCount > 0) {
+      try {
+        this.metricsFreqByteBuffer.fill(0);
+        analyser.getByteFrequencyData(this.metricsFreqByteBuffer);
+
+        const avgByteBand = (start: number, end: number): number => {
+          if (end <= start) return 0;
+          let sum = 0;
+          let count = 0;
+          for (let i = start; i < end; i++) {
+            const val = this.metricsFreqByteBuffer[i];
+            if (val > 0) {
+              hasFreqSignal = true;
+              sum += val / 255;
+            }
+            count++;
+          }
+          return count > 0 ? sum / count : 0;
+        };
+
+        bass = avgByteBand(bassStart, bassEnd);
+        mid = avgByteBand(midStart, midEnd);
+        treble = avgByteBand(trebleStart, trebleEnd);
+      } catch {
+        // Ignore byte frequency failure
+      }
+    }
+
+    if (hasTimeSignal && !hasFreqSignal) {
+      this.visualizer.processPcmFrame(this.timeDomainBuffer, 1, sampleRate);
+      bass = Math.max(0, Math.min(1, this.visualizer.bassLevel));
+      mid = Math.max(0, Math.min(1, this.visualizer.midLevel));
+      treble = Math.max(0, Math.min(1, this.visualizer.highLevel));
+    } else if (hasFreqSignal && !hasTimeSignal) {
+      rms = Math.max(0, Math.min(1, Math.sqrt((bass * bass + mid * mid + treble * treble) / 3)));
+    } else if (!hasTimeSignal && !hasFreqSignal && this.playbackState === 'PLAYING') {
+      // Fallback to LiveVisualizer smoothed state if pollLiveVisualizer is driving it
+      rms = Math.max(0, Math.min(1, this.visualizer.rmsLevel));
+      bass = Math.max(0, Math.min(1, this.visualizer.bassLevel));
+      mid = Math.max(0, Math.min(1, this.visualizer.midLevel));
+      treble = Math.max(0, Math.min(1, this.visualizer.highLevel));
+    }
+
+    // 3. Beat onset detection on bass energy
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const prevAvg = this.metricsRollingBass;
+    const isBeat =
+      bass > 0.18 &&
+      bass > Math.max(0.22, prevAvg * 1.28) &&
+      nowMs - this.metricsLastBeatMs > 170;
+
+    if (isBeat) {
+      this.metricsLastBeatMs = nowMs;
+    }
+    this.metricsRollingBass = prevAvg * 0.82 + bass * 0.18;
+
+    target.rmsLevel = rms;
+    target.bassEnergy = bass;
+    target.midEnergy = mid;
+    target.trebleEnergy = treble;
+    target.beatDetected = isBeat;
+
+    return target;
   }
 }

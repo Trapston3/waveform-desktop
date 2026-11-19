@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="src/assets/icons/Logo.png" alt="WaveForm Desktop Logo" width="96" height="96" />
+  <img src="build/icon.png" alt="WaveForm Desktop Logo" width="96" height="96" />
   <h1>WaveForm Desktop</h1>
   <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, Web Audio DSP, local metadata extraction, and personalized streaming.</strong></p>
 
@@ -44,10 +44,16 @@
 - **Deep Audio Tag Extraction (`music-metadata`)**: Recursively scans `.mp3`, `.flac`, `.wav`, `.m4a`, `.aac`, `.ogg`, `.opus`, `.mp4`, and `.webm` folders to extract title, artist, album, year, bitrate, quality badge, real `durationSec`, embedded cover art (`waveform-local://art?key=...`), and embedded synced/unsynced lyrics (`USLT`, `SYLT`, `©lyr`, `LYRICS`).
 - **Non-Blocking Web Enrichment & Disk Cache (`LocalMetadataEnricher.ts`, `lyricsStore.ts`)**: Falls back to iTunes Search / YouTube Music for cover art and LRCLIB / Musixmatch / InnerTube for lyrics without blocking playback, caching results to disk in Electron `userData` by normalized `artist + title + duration`.
 
-### Personalized Streaming & Account Connections (`electron/accountAuth.ts`)
-- **Authenticated YouTube Music (`SAPISIDHASH`)**: Supports persistent sign-in via Electron session cookies, injecting `Cookie`, `Authorization: SAPISIDHASH`, `X-Origin`, and `X-Goog-AuthUser: 0` on InnerTube requests and automatically refreshing personalized Home recommendations on sign-in or sign-out.
+### Personalized Streaming & Account Connections (`electron/accountAuth.ts`, `electron/youtubeSabrStream.ts`)
+- **Full-Track YouTube & Lostwave SABR Streaming (`youtubeSabrStream.ts`)**: Consumes server-driven ABR (`SabrStream` via `googlevideo`) with fresh InnerTube `visitorData`, restricts `SAPISIDHASH` auth injection strictly to `music.youtube.com` so `/youtubei/v1/player` never receives conflicting credentials, serves progressive HTTP `206 Partial Content` byte ranges over `waveform-stream://yt?v=...` past YouTube's 1 MB prefix cutoff, and includes automatic `yt-dlp --js-runtimes node` fallback.
+- **Authenticated YouTube Music (`SAPISIDHASH`)**: Supports persistent sign-in via Electron session cookies, injecting `Cookie`, `Authorization: SAPISIDHASH`, `X-Origin`, and `X-Goog-AuthUser: 0` on Music endpoints and automatically refreshing personalized Home recommendations on sign-in or sign-out.
 - **Spotify Library Playlists Shelf (`SpotifyPlaylistService.ts`)**: Connecting Spotify reveals a dedicated **Spotify Playlists** shelf inside **Library → Playlists**, mapping tracks into WaveForm's stream resolver for seamless playback.
 - **Accurate Track Matching & Artist Detail**: Match scoring (`TrackMatcher.ts`), clickable singer/producer credits (`ArtistCredits`), and iOS-inspired `ArtistDetailView` with stylized artist signatures (`AppleArtistArtService.ts`).
+
+### LyricVisualizer Subsystem (`src/lyricVisualizer/`, `electron/lyricVisualizerPlatform.ts`)
+- **13 Hardware-Accelerated Visual Styles**: `AppleMusicFlow`, `NeonKinetic`, `TypewriterEditorial`, `MinimalSwiss`, `LiquidMetal`, `HoloVaporwave`, `KaraokeStage`, `BrutalistZine`, `GenerativeParticleInk`, `SpectrumRibbon`, `Spatial3DDepth`, `CRTScanline`, and `StarfieldShip3D` powered by Canvas2D + a `WebGlEffectLayer` (with automatic Canvas2D fallback).
+- **Millisecond Word-Level Sync & Album-Art OKLCH Matching**: Monotonic `SyncEngine` with per-song `±2000ms` timing nudges, weighted syllable/punctuation `WordSynthesizer`, ELRC/LRC parser, real-time FFT/RMS `AudioEngine.sampleAudioMetrics()`, and WCAG AA (`>= 4.5:1`) OKLCH color matching.
+- **Three Rendering Surfaces & Windows Guards**: Embeds directly in `NowPlayingScreen`, pops out to multi-monitor click-through Desktop Overlays (`#/overlay`), and launches Fullscreen Ambient Mode (`#/ambient`) with idle trigger, `KeepAwake`, Windows `SHQueryUserNotificationState` fullscreen game suppression, lock-screen `0%` GPU suspend, 7 offline `@fontsource/*` OFL fonts, and an original public-domain `"Starlight Harbor"` sandbox harness. See [DECISIONS.md](DECISIONS.md) for engineering tradeoffs.
 
 ### Liquid Glass Desktop UX (`src/ui/`)
 - **Unified Top-Left Search (`LeftSidebar.tsx`)**: Single search bar in the top-left sidebar with autocomplete suggestions, `Ctrl+K` quick focus, and filterable results (`All`, `Songs`, `Videos`, `Albums`, `Artists`, `Playlists`).
@@ -63,18 +69,22 @@
 ```text
 waveform-desktop/
 ├── build/                      # Generated app branding icons (icon.ico, icon.png)
+├── DECISIONS.md                # LyricVisualizer Electron-native & Windows architecture decisions
 ├── electron/
 │   ├── main.ts                 # Electron main process, protocol handlers, window & tray, IPC
 │   ├── preload.cts             # Context-isolated electronAPI bridge
+│   ├── youtubeSabrStream.ts    # SABR streaming client, visitorData cache, progressive HTTP 206 server
+│   ├── lyricVisualizerPlatform.ts # Multi-monitor overlays, Ambient window, game guard, cache store
 │   ├── localMetadata.ts        # music-metadata scanner, art/lyrics extraction & disk cache
 │   ├── accountAuth.ts          # YouTube Music SAPISIDHASH & Spotify playlist API helpers
 │   └── appIcon.ts              # Cross-platform BrowserWindow & tray icon resolution
 ├── scripts/
 │   ├── dev.mjs                 # Vite + Electron development launcher
 │   ├── start.mjs               # Production launcher
-│   └── generate-icon.mjs       # Multi-resolution .ico & .png generator from Logo.png
+│   └── generate-icon.mjs       # Multi-resolution .ico & .png generator from Logo.svg
 ├── src/
-│   ├── audio/                  # Dual-deck AudioEngine, DSP chain, AutoEQ, visualizer
+│   ├── audio/                  # Dual-deck AudioEngine, DSP chain, AutoEQ, visualizer & FFT/RMS metrics
+│   ├── lyricVisualizer/        # Core sync/OKLCH/pipeline, 13 WebGL2/Canvas2D styles, bridge & UIs
 │   ├── models/                 # Normalized Song, Playlist, Navigation models
 │   ├── services/               # InnerTube, StreamResolver, LyricsService, AccountAuth, Spotify
 │   ├── state/                  # Zustand stores (player, queue, library, lyrics, nav, settings)

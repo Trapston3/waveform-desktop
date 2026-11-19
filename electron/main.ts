@@ -24,6 +24,12 @@ import {
   resolveAppIconPath,
   createTrayIcon,
 } from './appIcon.js';
+import {
+  resolveYoutubeStreamForIpc,
+  resolveYoutubeStreamProtocolRequest,
+  destroyAllSabrStreams,
+} from './youtubeSabrStream.js';
+import { createLyricVisualizerPlatformController } from './lyricVisualizerPlatform.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,6 +42,7 @@ if (process.platform === 'win32') {
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let lyricVisualizerPlatform: ReturnType<typeof createLyricVisualizerPlatformController> | null = null;
 
 const isDev = process.env.NODE_ENV === 'development' || (!app.isPackaged && process.env.NODE_ENV !== 'production');
 
@@ -267,7 +274,9 @@ async function probeServer(url: string, timeoutMs = 1000): Promise<boolean> {
   }
 }
 
-async function loadWindowContent(win: BrowserWindow): Promise<void> {
+async function loadWindowContent(win: BrowserWindow, hashRoute?: string): Promise<void> {
+  const cleanHash = hashRoute ? hashRoute.replace(/^#/, '') : '';
+  const loadOptions = cleanHash ? { hash: cleanHash } : undefined;
   const distCandidatePaths = [
     path.resolve(__dirname, '../dist/index.html'),
     path.resolve(app.getAppPath(), 'dist/index.html'),
@@ -281,13 +290,14 @@ async function loadWindowContent(win: BrowserWindow): Promise<void> {
   });
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+  const targetDevUrl = cleanHash ? `${devServerUrl}#${cleanHash}` : devServerUrl;
 
   // Safety net: catch did-fail-load event and fall back to local dist/index.html
   win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     console.warn(`[WaveForm Main] Page failed to load (${errorCode}: ${errorDescription}) at ${validatedURL}`);
     if (distIndexPath && validatedURL.includes('localhost:5173') && !win.isDestroyed()) {
       console.log('[WaveForm Main] Falling back to pre-built dist/index.html after URL load failure.');
-      win.loadFile(distIndexPath).catch((err) => {
+      win.loadFile(distIndexPath, loadOptions).catch((err) => {
         console.error('[WaveForm Main] Fallback loadFile error:', err);
       });
     }
@@ -302,10 +312,10 @@ async function loadWindowContent(win: BrowserWindow): Promise<void> {
       console.log(`[WaveForm Main] Probing dev server (attempt ${attempt}/${maxAttempts}): ${devServerUrl}`);
       const isActive = await probeServer(devServerUrl, 1000);
       if (isActive) {
-        console.log(`[WaveForm Main] Dev server active at ${devServerUrl}. Loading URL...`);
+        console.log(`[WaveForm Main] Dev server active at ${targetDevUrl}. Loading URL...`);
         try {
-          await win.loadURL(devServerUrl);
-          console.log(`[WaveForm Main] Successfully loaded dev server: ${devServerUrl}`);
+          await win.loadURL(targetDevUrl);
+          console.log(`[WaveForm Main] Successfully loaded dev server: ${targetDevUrl}`);
           return;
         } catch (err: any) {
           console.warn(`[WaveForm Main] win.loadURL failed (${err?.message || err}).`);
@@ -325,7 +335,7 @@ async function loadWindowContent(win: BrowserWindow): Promise<void> {
   if (distIndexPath && !win.isDestroyed()) {
     console.log(`[WaveForm Main] Loading local production bundle: ${distIndexPath}`);
     try {
-      await win.loadFile(distIndexPath);
+      await win.loadFile(distIndexPath, loadOptions);
       return;
     } catch (err) {
       console.error('[WaveForm Main] Failed to load local bundle:', err);
@@ -733,6 +743,7 @@ const AUDIO_MIME: Record<string, string> = {
 
 protocol?.registerSchemesAsPrivileged([
   { scheme: 'waveform-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true, corsEnabled: true } },
+  { scheme: 'waveform-stream', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true, corsEnabled: true } },
 ]);
 
 function registerLocalProtocol(): void {
@@ -780,6 +791,11 @@ function registerLocalProtocol(): void {
       return new Response('Not found', { status: 404, headers: corsHeaders });
     }
   });
+
+  const streamCacheDir = path.join(app.getPath('userData'), 'stream-cache');
+  protocol?.handle('waveform-stream', (request) =>
+    resolveYoutubeStreamProtocolRequest(request, streamCacheDir)
+  );
 }
 
 function resolveDiskCacheKeyArg(
@@ -922,6 +938,11 @@ ipcMain.handle('spotify-get-playlist-tracks', async (_e, playlistId: string) => 
   if (!cookie || !playlistId || typeof playlistId !== 'string') return [];
   return fetchSpotifyPlaylistTracks(cookie, playlistId);
 });
+
+ipcMain.handle('resolve-youtube-stream', async (_e, videoId: string) => {
+  if (!videoId || typeof videoId !== 'string') return null;
+  return resolveYoutubeStreamForIpc(videoId, path.join(app.getPath('userData'), 'stream-cache'));
+});
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
@@ -939,6 +960,18 @@ if (!gotTheLock) {
     mainWindow = createWindow();
     tray = createTray(mainWindow);
 
+    lyricVisualizerPlatform = createLyricVisualizerPlatformController({
+      app,
+      BrowserWindow,
+      ipcMain,
+      userDataDir: app.getPath('userData'),
+      preloadPath: path.join(__dirname, 'preload.cjs'),
+      loadWindowRoute: (win, hashRoute) => {
+        void loadWindowContent(win, hashRoute);
+      },
+    });
+    lyricVisualizerPlatform.registerIpcHandlers();
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         mainWindow = createWindow();
@@ -950,5 +983,11 @@ if (!gotTheLock) {
     if (process.platform !== 'darwin') {
       app.quit();
     }
+  });
+
+  app.on('will-quit', () => {
+    lyricVisualizerPlatform?.dispose();
+    lyricVisualizerPlatform = null;
+    void destroyAllSabrStreams();
   });
 }

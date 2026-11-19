@@ -77,7 +77,7 @@ export function applyYouTubeAuthHeaders(
     return result;
   }
 
-  if (!/(^|\.)youtube\.com$/.test(hostname)) {
+  if (hostname.toLowerCase() !== 'music.youtube.com') {
     return result;
   }
 

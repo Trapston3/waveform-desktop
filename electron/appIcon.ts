@@ -20,13 +20,10 @@ export function resolveAppIconPath(
     platform === 'win32'
       ? [
           path.join('build', 'icon.ico'),
-          path.join('build', 'icon.png'),
-          path.join('src', 'assets', 'icons', 'Logo.png'),
-          path.join('dist', 'assets', 'icons', 'Logo.png')
+          path.join('build', 'icon.png')
         ]
       : [
           path.join('build', 'icon.png'),
-          path.join('src', 'assets', 'icons', 'Logo.png'),
           path.join('build', 'icon.ico')
         ];
 
@@ -56,7 +53,6 @@ export function resolveTrayIconPath(
 
   const relativePaths = [
     path.join('build', 'icon.png'),
-    path.join('src', 'assets', 'icons', 'Logo.png'),
     path.join('build', 'icon.ico')
   ];
 

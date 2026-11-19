@@ -20,8 +20,11 @@ import {
   ListOrdered,
   Maximize2,
   Minimize2,
+  Sparkles,
 } from 'lucide-react';
 import { ArtistCredits } from '../common/ArtistCredits';
+import { LyricStageControl } from '../../lyricVisualizer/ui/LyricStageControl';
+import { useLyricVisualizerStore } from '../../lyricVisualizer/state/lyricVisualizerStore';
 import { useNavigationStore } from '../../state/navigationStore';
 import { resolveArtistTarget } from '../../utils/artistCredits';
 import { usePlayerStore } from '../../state/playerStore';
@@ -53,6 +56,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const [activeSidecar, setActiveSidecar] = useState<'lyrics' | 'queue' | 'none'>('lyrics');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const { lyricsData, isLoading, fetchLyricsForTrack } = useLyricsStore();
+  const nowPlayingLyricsMode = useLyricVisualizerStore((s) => s.nowPlayingLyricsMode);
+  const setNowPlayingLyricsMode = useLyricVisualizerStore((s) => s.setNowPlayingLyricsMode);
 
   const elapsedSpanRef = useRef<HTMLSpanElement>(null);
   const remainingSpanRef = useRef<HTMLSpanElement>(null);
@@ -270,6 +275,24 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              setActiveSidecar('lyrics');
+              setNowPlayingLyricsMode(
+                nowPlayingLyricsMode === 'visualizer' ? 'classic' : 'visualizer'
+              );
+            }}
+            className={`spring-press px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeSidecar === 'lyrics' && nowPlayingLyricsMode === 'visualizer'
+                ? 'liquid-glass-pill-active text-white'
+                : 'liquid-glass-pill text-white/75 hover:text-white'
+            }`}
+            title="Toggle 13-Style GPU Lyric Visualizer Stage"
+          >
+            <Sparkles size={14} />
+            <span>Visualizer</span>
+          </button>
+
           <button
             onClick={() => setActiveSidecar(activeSidecar === 'lyrics' ? 'none' : 'lyrics')}
             className={`spring-press p-2.5 rounded-full transition-all cursor-pointer ${
@@ -505,16 +528,36 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
 
         {/* Right Column: BORDERLESS FLOATING LYRICS or Queue Sidecar */}
         {activeSidecar !== 'none' && (
-          <div className="flex-1 max-w-xl h-full flex flex-col justify-center">
+          <div className="flex-1 max-w-2xl h-full flex flex-col justify-center">
             {activeSidecar === 'lyrics' && (
-              <div className="now-playing-lyrics borderless-floating-lyrics flex-1 h-full flex flex-col justify-center overflow-hidden">
-                <SyllableLyricsEngine
-                  lyricsData={lyricsData}
-                  onSeek={seek}
-                  fontSize={32}
-                  isLoading={isLoading}
-                  className="h-full"
-                />
+              <div className="now-playing-lyrics borderless-floating-lyrics relative flex-1 h-full flex flex-col justify-center overflow-hidden">
+                {nowPlayingLyricsMode === 'visualizer' ? (
+                  <LyricStageControl
+                    className="flex-1 h-full"
+                    onSwitchToClassic={() => setNowPlayingLyricsMode('classic')}
+                  />
+                ) : (
+                  <>
+                    <div className="flex items-center justify-end pb-2">
+                      <button
+                        type="button"
+                        onClick={() => setNowPlayingLyricsMode('visualizer')}
+                        className="liquid-glass-pill px-3 py-1 rounded-full text-[11px] font-semibold text-white/85 hover:text-white flex items-center gap-1.5 cursor-pointer"
+                        title="Switch to 13-Style Canvas/WebGL Lyric Visualizer"
+                      >
+                        <Sparkles size={12} />
+                        <span>13-Style Lyric Visualizer</span>
+                      </button>
+                    </div>
+                    <SyllableLyricsEngine
+                      lyricsData={lyricsData}
+                      onSeek={seek}
+                      fontSize={32}
+                      isLoading={isLoading}
+                      className="h-full"
+                    />
+                  </>
+                )}
               </div>
             )}
 

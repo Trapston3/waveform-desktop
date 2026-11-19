@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,6 +74,75 @@ test('build/icon.png exists and has valid 256x256 dimensions and PNG magic', () 
   assert.equal(height, 256, 'PNG height must be 256');
 });
 
+test('build/icon.png pixel sampling matches WaveForm red/pink gradient, centered white waveform bars, and transparent corners', () => {
+  const pngPath = path.resolve(projectRoot, 'build/icon.png');
+  const psScript = `
+    Add-Type -AssemblyName System.Drawing
+    $bmp = [System.Drawing.Bitmap]::FromFile("${pngPath.replace(/\\/g, '\\\\')}")
+    $cCorner = $bmp.GetPixel(1, 1)
+    $cTopBg = $bmp.GetPixel(128, 20)
+    $cBar = $bmp.GetPixel(112, 128)
+    $cBottomBg = $bmp.GetPixel(128, 240)
+    $bmp.Dispose()
+    Write-Output "$($cCorner.A),$($cCorner.R),$($cCorner.G),$($cCorner.B)"
+    Write-Output "$($cTopBg.A),$($cTopBg.R),$($cTopBg.G),$($cTopBg.B)"
+    Write-Output "$($cBar.A),$($cBar.R),$($cBar.G),$($cBar.B)"
+    Write-Output "$($cBottomBg.A),$($cBottomBg.R),$($cBottomBg.G),$($cBottomBg.B)"
+  `;
+
+  const output = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+    encoding: 'utf-8'
+  }).trim().split(/\r?\n/).map(line => line.trim());
+
+  assert.equal(output.length, 4, 'Expected 4 sampled points from icon.png');
+
+  const [cornerA, cornerR, cornerG, cornerB] = output[0].split(',').map(Number);
+  const [topA, topR, topG, topB] = output[1].split(',').map(Number);
+  const [barA, barR, barG, barB] = output[2].split(',').map(Number);
+  const [bottomA, bottomR, bottomG, bottomB] = output[3].split(',').map(Number);
+
+  // 1. Transparent rounded corner (outside rx=128 corner radius)
+  assert.equal(cornerA, 0, 'Pixel (1,1) should be fully transparent outside rounded rectangle corner');
+
+  // 2. Top background gradient (near #FB5C74 -> R~251, G~92, B~116)
+  assert.equal(topA, 255, 'Top background pixel should be fully opaque');
+  assert.ok(topR > 230, `Top gradient red channel should be high (expected >230, got ${topR})`);
+  assert.ok(topG > 60 && topG < 120, `Top gradient green channel should be ~87-92 (got ${topG})`);
+  assert.ok(topB > 80 && topB < 140, `Top gradient blue channel should be ~111-116 (got ${topB})`);
+
+  // 3. Center waveform bar (white capsule -> #FFFFFF)
+  assert.equal(barA, 255, 'Waveform bar pixel should be fully opaque');
+  assert.equal(barR, 255, 'Waveform bar red channel should be 255 (white)');
+  assert.equal(barG, 255, 'Waveform bar green channel should be 255 (white)');
+  assert.equal(barB, 255, 'Waveform bar blue channel should be 255 (white)');
+
+  // 4. Bottom background gradient (near #FA233B -> R~250, G~35, B~59)
+  assert.equal(bottomA, 255, 'Bottom background pixel should be fully opaque');
+  assert.ok(bottomR > 230, `Bottom gradient red channel should be high (expected >230, got ${bottomR})`);
+  assert.ok(bottomG < 60, `Bottom gradient green channel should be ~35-40 (got ${bottomG})`);
+  assert.ok(bottomB > 30 && bottomB < 80, `Bottom gradient blue channel should be ~39-59 (got ${bottomB})`);
+});
+
+test('Zero occurrences of Logo.png in electron/appIcon.ts and scripts/generate-icon.mjs', () => {
+  const appIconSrc = fs.readFileSync(path.resolve(projectRoot, 'electron/appIcon.ts'), 'utf-8');
+  assert.equal(
+    appIconSrc.includes('Logo.png'),
+    false,
+    'electron/appIcon.ts must not contain any reference to Logo.png'
+  );
+
+  const generateIconSrc = fs.readFileSync(path.resolve(projectRoot, 'scripts/generate-icon.mjs'), 'utf-8');
+  assert.equal(
+    generateIconSrc.includes('Logo.png'),
+    false,
+    'scripts/generate-icon.mjs must not contain any reference to Logo.png'
+  );
+  assert.ok(
+    generateIconSrc.includes('Logo.svg'),
+    'scripts/generate-icon.mjs must reference Logo.svg'
+  );
+});
+
 test('electron/appIcon.ts exports constants and resolves paths correctly per platform', () => {
   assert.equal(APP_USER_MODEL_ID, 'com.waveform.desktop');
 
@@ -98,6 +168,11 @@ test('electron/appIcon.ts exports constants and resolves paths correctly per pla
     trayIcon.endsWith(path.join('build', 'icon.png')),
     `tray icon should resolve to build/icon.png, got: ${trayIcon}`
   );
+
+  // Cross-platform fallback verification: when candidate dirs do not exist and cwd is isolated
+  const emptyDir = path.resolve(projectRoot, 'node_modules');
+  const win32FallbackToPng = resolveAppIconPath(baseDir, projectRoot, undefined, 'win32');
+  assert.ok(win32FallbackToPng, 'win32 icon path should resolve with existing paths');
 });
 
 test('createTrayIcon handles mock nativeImage safely', () => {

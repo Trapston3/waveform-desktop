@@ -4,13 +4,13 @@ import { execFileSync } from 'node:child_process';
 
 const SIZES = [16, 32, 48, 64, 128, 256];
 const projectRoot = process.cwd();
-const srcLogo = path.resolve(projectRoot, 'src/assets/icons/Logo.png');
+const srcSvg = path.resolve(projectRoot, 'src/assets/icons/Logo.svg');
 const buildDir = path.resolve(projectRoot, 'build');
 const outPng = path.resolve(buildDir, 'icon.png');
 const outIco = path.resolve(buildDir, 'icon.ico');
 
-if (!fs.existsSync(srcLogo)) {
-  console.error(`Source logo not found at: ${srcLogo}`);
+if (!fs.existsSync(srcSvg)) {
+  console.error(`Source SVG logo not found at: ${srcSvg}`);
   process.exit(1);
 }
 
@@ -24,13 +24,75 @@ if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir, { recursive: true });
 }
 
-// Generate square resized PNGs preserving aspect ratio centered on transparent ARGB canvas
+// Render high-DPI 1024x1024 WaveForm logo from exact vector geometry in Logo.svg,
+// then downsample into square transparent canvases for [16, 32, 48, 64, 128, 256].
 const psScript = `
 Add-Type -AssemblyName System.Drawing
-$srcPath = "${srcLogo.replace(/\\/g, '\\\\')}"
-$tempDir = "${tempDir.replace(/\\/g, '\\\\')}"
-$src = [System.Drawing.Image]::FromFile($srcPath)
 
+function Add-RoundedRect($path, $rect, $rx, $ry) {
+    $d = $rx * 2
+    $path.AddArc($rect.X, $rect.Y, $d, $d, 180, 90)
+    $path.AddArc($rect.Right - $d, $rect.Y, $d, $d, 270, 90)
+    $path.AddArc($rect.Right - $d, $rect.Bottom - $d, $d, $d, 0, 90)
+    $path.AddArc($rect.X, $rect.Bottom - $d, $d, $d, 90, 90)
+    $path.CloseFigure()
+}
+
+function Add-Capsule($path, $x, $y, $w, $h, $r) {
+    $d = $r * 2
+    $path.AddArc([float]$x, [float]$y, [float]$d, [float]$d, [float]180, [float]180)
+    $path.AddArc([float]$x, [float]($y + $h - $d), [float]$d, [float]$d, [float]0, [float]180)
+    $path.CloseFigure()
+}
+
+# 1. Render master 1024x1024 bitmap from Logo.svg vector geometry
+$masterBmp = New-Object System.Drawing.Bitmap(1024, 1024, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+$mg = [System.Drawing.Graphics]::FromImage($masterBmp)
+$mg.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+$mg.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+$mg.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+$mg.Clear([System.Drawing.Color]::Transparent)
+
+# Rounded rectangle background: rx="128"
+$bgPath = New-Object System.Drawing.Drawing2D.GraphicsPath
+$bgRect = New-Object System.Drawing.RectangleF(0, 0, 1024, 1024)
+Add-RoundedRect $bgPath $bgRect 128 128
+
+# Vertical linear gradient: #FB5C74 -> #FA233B
+$cTop = [System.Drawing.ColorTranslator]::FromHtml("#FB5C74")
+$cBottom = [System.Drawing.ColorTranslator]::FromHtml("#FA233B")
+$gradBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
+    (New-Object System.Drawing.PointF(512, 0)),
+    (New-Object System.Drawing.PointF(512, 1024)),
+    $cTop,
+    $cBottom
+)
+$mg.FillPath($gradBrush, $bgPath)
+$gradBrush.Dispose()
+$bgPath.Dispose()
+
+# 6 white waveform capsule bars: width=80, rx=40
+$bars = @(
+    @(162, 380, 80, 264),
+    @(286, 260, 80, 504),
+    @(410, 180, 80, 664),
+    @(534, 300, 80, 424),
+    @(658, 220, 80, 584),
+    @(782, 360, 80, 304)
+)
+
+$barsPath = New-Object System.Drawing.Drawing2D.GraphicsPath
+foreach ($bar in $bars) {
+    Add-Capsule $barsPath $bar[0] $bar[1] $bar[2] $bar[3] 40
+}
+$whiteBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
+$mg.FillPath($whiteBrush, $barsPath)
+$whiteBrush.Dispose()
+$barsPath.Dispose()
+$mg.Dispose()
+
+# 2. Downsample master into target sizes [16, 32, 48, 64, 128, 256]
+$tempDir = "${tempDir.replace(/\\/g, '\\\\')}"
 $sizes = @(16, 32, 48, 64, 128, 256)
 
 foreach ($size in $sizes) {
@@ -42,14 +104,8 @@ foreach ($size in $sizes) {
     $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
     $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
 
-    $scale = [Math]::Min($size / $src.Width, $size / $src.Height)
-    $w = [int][Math]::Round($src.Width * $scale)
-    $h = [int][Math]::Round($src.Height * $scale)
-    $x = [int][Math]::Round(($size - $w) / 2)
-    $y = [int][Math]::Round(($size - $h) / 2)
-
-    $rect = New-Object System.Drawing.Rectangle($x, $y, $w, $h)
-    $g.DrawImage($src, $rect)
+    $destRect = New-Object System.Drawing.Rectangle(0, 0, $size, $size)
+    $g.DrawImage($masterBmp, $destRect, 0, 0, 1024, 1024, [System.Drawing.GraphicsUnit]::Pixel)
     $g.Dispose()
 
     $outPath = Join-Path $tempDir "icon_$size.png"
@@ -57,7 +113,7 @@ foreach ($size in $sizes) {
     $bmp.Dispose()
 }
 
-$src.Dispose()
+$masterBmp.Dispose()
 `;
 
 try {

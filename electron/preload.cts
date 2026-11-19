@@ -27,6 +27,19 @@ export interface ElectronAPI {
   logoutAccount: (provider: 'ytmusic' | 'spotify') => Promise<void>;
   getSpotifyPlaylists: () => Promise<any[]>;
   getSpotifyPlaylistTracks: (playlistId: string) => Promise<any[]>;
+  resolveYoutubeStream: (videoId: string) => Promise<{ streamUrl: string; mimeType: string; durationSec: number; sourceClient: string; cached: boolean } | null>;
+  lvGetMonitors: () => Promise<Array<{ id: string; label: string; bounds: any; workArea: any; scaleFactor: number; isPrimary: boolean }>>;
+  lvSetOverlayConfig: (config: { enabled?: boolean; monitorIds?: string[]; opacity?: number; locked?: boolean }) => Promise<any>;
+  lvOpenAmbient: (keepAwake?: boolean) => Promise<boolean>;
+  lvCloseAmbient: () => Promise<boolean>;
+  lvSetAmbientSettings: (settings: { keepAwake?: boolean; keepAwakeInAmbient?: boolean; idleAmbientSeconds?: number; gameGuardEnabled?: boolean }) => Promise<any>;
+  lvGetLyricsCache: (trackKey: string) => Promise<any>;
+  lvSetLyricsCache: (trackKey: string, lyrics: any) => Promise<boolean>;
+  lvGetSongOffset: (trackKey: string) => Promise<number>;
+  lvSetSongOffset: (trackKey: string, offsetMs: number) => Promise<number>;
+  lvBroadcastState: (payload: any) => void;
+  onLvStateBroadcast: (callback: (payload: any) => void) => () => void;
+  onLvPlatformEvent: (callback: (evt: { type: string; data?: any }) => void) => () => void;
   platform: string;
 }
 
@@ -59,6 +72,33 @@ const electronAPI: ElectronAPI = {
   logoutAccount: (provider) => ipcRenderer.invoke('account-logout', provider),
   getSpotifyPlaylists: () => ipcRenderer.invoke('spotify-get-playlists'),
   getSpotifyPlaylistTracks: (playlistId: string) => ipcRenderer.invoke('spotify-get-playlist-tracks', playlistId),
+  resolveYoutubeStream: (videoId: string) => ipcRenderer.invoke('resolve-youtube-stream', videoId),
+  lvGetMonitors: () => ipcRenderer.invoke('lv-get-monitors'),
+  lvSetOverlayConfig: (config) => ipcRenderer.invoke('lv-set-overlay-config', config),
+  lvOpenAmbient: (keepAwake) => ipcRenderer.invoke('lv-open-ambient', keepAwake),
+  lvCloseAmbient: () => ipcRenderer.invoke('lv-close-ambient'),
+  lvSetAmbientSettings: (settings) => ipcRenderer.invoke('lv-set-ambient-settings', settings),
+  lvGetLyricsCache: (trackKey) => ipcRenderer.invoke('lv-get-lyrics-cache', trackKey),
+  lvSetLyricsCache: (trackKey, lyrics) => ipcRenderer.invoke('lv-set-lyrics-cache', trackKey, lyrics),
+  lvGetSongOffset: (trackKey) => ipcRenderer.invoke('lv-get-song-offset', trackKey),
+  lvSetSongOffset: (trackKey, offsetMs) => ipcRenderer.invoke('lv-set-song-offset', trackKey, offsetMs),
+  lvBroadcastState: (payload) => {
+    ipcRenderer.send('lv-broadcast-state', payload);
+  },
+  onLvStateBroadcast: (callback: (payload: any) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: any) => callback(payload);
+    ipcRenderer.on('lv-state-broadcast', handler);
+    return () => {
+      ipcRenderer.removeListener('lv-state-broadcast', handler);
+    };
+  },
+  onLvPlatformEvent: (callback: (evt: { type: string; data?: any }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, evt: { type: string; data?: any }) => callback(evt);
+    ipcRenderer.on('lv-platform-event', handler);
+    return () => {
+      ipcRenderer.removeListener('lv-platform-event', handler);
+    };
+  },
   platform: process.platform,
 };
 

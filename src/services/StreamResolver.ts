@@ -289,6 +289,34 @@ export class StreamResolver {
     return existing || undefined;
   }
 
+  private async resolveViaElectronSabr(videoId: string): Promise<ResolvedStream | null> {
+    if (typeof window === 'undefined') return null;
+    const api = (window as any).electronAPI;
+    if (!api || typeof api.resolveYoutubeStream !== 'function') return null;
+
+    try {
+      const res = await api.resolveYoutubeStream(videoId);
+      if (res && typeof res.streamUrl === 'string' && res.streamUrl.length > 0) {
+        const mime = typeof res.mimeType === 'string' && res.mimeType ? res.mimeType : 'audio/webm';
+        const isOpus = mime.toLowerCase().includes('webm') || mime.toLowerCase().includes('opus');
+        return {
+          url: res.streamUrl,
+          quality: isOpus ? '160kbps Opus' : '128kbps AAC',
+          format: mime,
+          bitrate: isOpus ? 160000 : 128000,
+          durationMs:
+            typeof res.durationSec === 'number' && res.durationSec > 0
+              ? res.durationSec * 1000
+              : undefined,
+          expiresAtMs: Date.now() + StreamResolver.TTL_MS,
+        };
+      }
+    } catch {
+      // Fall back to direct client resolution if IPC fails
+    }
+    return null;
+  }
+
   private async resolveViaDirectClients(videoId: string): Promise<ResolvedStream | null> {
     const visitorData = await this.ensureVisitorData();
 
@@ -401,17 +429,26 @@ export class StreamResolver {
         if (target) {
           const ranked = TrackMatcher.rankCandidates(candidates, target);
           if (ranked.length > 0 && ranked[0].videoId) {
-            return await this.resolveViaDirectClients(ranked[0].videoId);
+            return (
+              (await this.resolveViaElectronSabr(ranked[0].videoId)) ||
+              (await this.resolveViaDirectClients(ranked[0].videoId))
+            );
           }
         } else if (candidates[0].videoId) {
-          return await this.resolveViaDirectClients(candidates[0].videoId);
+          return (
+            (await this.resolveViaElectronSabr(candidates[0].videoId)) ||
+            (await this.resolveViaDirectClients(candidates[0].videoId))
+          );
         }
       }
 
       const jsonStr = JSON.stringify(searchRes || {});
       const match = jsonStr.match(/"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"/);
       if (match && match[1] && !target) {
-        return await this.resolveViaDirectClients(match[1]);
+        return (
+          (await this.resolveViaElectronSabr(match[1])) ||
+          (await this.resolveViaDirectClients(match[1]))
+        );
       }
     } catch {
       // Ignore search fallback error
@@ -565,6 +602,11 @@ export class StreamResolver {
 
     // 1. Direct YouTube videoId preservation (priority 1 if songId is an 11-char YouTube ID and not a test fixture)
     if (isDirectYtId && !mappedFixture) {
+      const sabrStream = await this.resolveViaElectronSabr(targetVideoId);
+      if (sabrStream) {
+        this.cache.set(songId, { stream: sabrStream, cachedAt: Date.now() });
+        return sabrStream;
+      }
       const direct = await this.resolveViaDirectClients(targetVideoId);
       if (direct) {
         this.cache.set(songId, { stream: direct, cachedAt: Date.now() });
@@ -620,9 +662,11 @@ export class StreamResolver {
       }
     }
 
-    // 3. Secondary resolution via direct YouTube InnerTube clients (ANDROID_VR / IOS / VISIONOS)
+    // 3. Secondary resolution via Electron SABR or direct YouTube InnerTube clients (ANDROID_VR / IOS / VISIONOS)
     if (isDirectYtId) {
-      const direct = await this.resolveViaDirectClients(targetVideoId);
+      const direct =
+        (await this.resolveViaElectronSabr(targetVideoId)) ||
+        (await this.resolveViaDirectClients(targetVideoId));
       if (direct) {
         // Preserve '160kbps Opus' label for yt_track_001 contract test F14-I11
         if (songId === 'yt_track_001') {

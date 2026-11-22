@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/trapston3/waveform-desktop/releases/download/v1.0.0/WaveForm-Portable-1.0.0.exe#/WaveForm.exe",
-      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      "hash": "f38e31518a29e9c6479bf47b085c72e4de2c16415296abc82d64ec18ab1f9b77"
     }
   },
   "bin": "WaveForm.exe",

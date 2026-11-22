@@ -16,19 +16,46 @@
 
 ## Screenshots
 
-> Drop screenshots into `docs/screenshots/` using the filenames below to populate this showcase:
-
-| Home & Personalized Picks | Now Playing & 60fps Lyrics |
+| Now Playing & Apple Music Fluid Mesh | iOS Messages Tapback & Magic Word Lyrics |
 | :---: | :---: |
-| ![WaveForm Home View](docs/screenshots/home.png) | ![Now Playing & Smooth Synced Lyrics](docs/screenshots/now-playing-lyrics.png) |
+| ![Now Playing & Apple Music Fluid Mesh](docs/screenshots/01-now-playing-apple-mesh.png) | ![iOS Messages Tapback & Magic Word Lyrics](docs/screenshots/02-visualizer-ios-chat.png) |
 
-| Library, 3D Cover Flow & Spotify Playlists | 10-Band Equalizer & AutoEQ |
+| Code Editor Kinetic Visualizer | 3D Spaceship & Beat-Synced Asteroid Run |
 | :---: | :---: |
-| ![Library & 3D Album Cover Flow](docs/screenshots/library-coverflow.png) | ![Equalizer, AutoEQ & Spatial DSP](docs/screenshots/equalizer-dsp.png) |
+| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship & Beat-Synced Asteroid Run](docs/screenshots/04-visualizer-spaceship-3d.png) |
 
-| Local Media Library & Embedded Metadata |
-| :---: |
-| ![Local Media Scanner & Metadata](docs/screenshots/local-media.png) |
+| Centered Lyric Mode (Minimal Controls) | 3D Cover Flow & Library |
+| :---: | :---: |
+| ![Centered Lyric Mode](docs/screenshots/05-centered-lyrics-mode.png) | ![3D Cover Flow & Library](docs/screenshots/06-cover-flow-library.png) |
+
+---
+
+## Install (Windows x64)
+
+### One-Line PowerShell CLI Installer (Recommended)
+
+Downloads the latest Windows `.exe` from [GitHub Releases](https://github.com/Trapston3/waveform-desktop/releases/latest), verifies its SHA-256 checksum against `SHA256SUMS.txt`, and installs WaveForm Desktop:
+
+```powershell
+irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1 | iex
+```
+
+**Additional CLI flags** (`scripts/install.ps1`):
+
+```powershell
+# Portable mode (no installer wizard, installs to %LOCALAPPDATA%\Programs\WaveForm + Start Menu shortcut)
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Portable
+
+# Silent NSIS setup
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Silent
+
+# Pin a specific release tag
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.0.0 -Portable
+```
+
+### Direct `.exe` Download
+
+Grab `WaveForm-Setup-1.0.0.exe` (NSIS installer) or `WaveForm-Portable-1.0.0.exe` (standalone executable) directly from the [Releases page](https://github.com/Trapston3/waveform-desktop/releases/latest).
 
 ---
 
@@ -51,7 +78,7 @@
 - **Accurate Track Matching & Artist Detail**: Match scoring (`TrackMatcher.ts`), clickable singer/producer credits (`ArtistCredits`), and iOS-inspired `ArtistDetailView` with stylized artist signatures (`AppleArtistArtService.ts`).
 
 ### LyricVisualizer Subsystem (`src/lyricVisualizer/`, `electron/lyricVisualizerPlatform.ts`)
-- **13 Hardware-Accelerated Visual Styles**: `AppleMusicFlow`, `NeonKinetic`, `TypewriterEditorial`, `MinimalSwiss`, `LiquidMetal`, `HoloVaporwave`, `KaraokeStage`, `BrutalistZine`, `GenerativeParticleInk`, `SpectrumRibbon`, `Spatial3DDepth`, `CRTScanline`, and `StarfieldShip3D` powered by Canvas2D + a `WebGlEffectLayer` (with automatic Canvas2D fallback).
+- **12 Hardware-Accelerated Visual Styles (with Variations)**: `AppleMusicFlow`, `TypewriterEditorial`, `MinimalSwiss`, `LiquidMetal`, `KaraokeStage`, `BrutalistZine`, `GenerativeParticleInk`, `Spatial3DDepth`, `CRTScanline`, `StarfieldShip3D`, `iOSTextingMotion`, and `CodeEditorKinetic` powered by Canvas2D + a `WebGlEffectLayer` (with automatic Canvas2D fallback).
 - **Millisecond Word-Level Sync & Album-Art OKLCH Matching**: Monotonic `SyncEngine` with per-song `±2000ms` timing nudges, weighted syllable/punctuation `WordSynthesizer`, ELRC/LRC parser, real-time FFT/RMS `AudioEngine.sampleAudioMetrics()`, and WCAG AA (`>= 4.5:1`) OKLCH color matching.
 - **Three Rendering Surfaces & Windows Guards**: Embeds directly in `NowPlayingScreen`, pops out to multi-monitor click-through Desktop Overlays (`#/overlay`), and launches Fullscreen Ambient Mode (`#/ambient`) with idle trigger, `KeepAwake`, Windows `SHQueryUserNotificationState` fullscreen game suppression, lock-screen `0%` GPU suspend, 7 offline `@fontsource/*` OFL fonts, and an original public-domain `"Starlight Harbor"` sandbox harness. See [DECISIONS.md](DECISIONS.md) for engineering tradeoffs.
 

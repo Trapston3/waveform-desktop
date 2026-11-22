@@ -119,7 +119,7 @@ function buildShowcaseLrc() {
     '[00:33.20] We turn back through the broken glass to find the spark',
     '[00:36.80] Never let the signal fade away into the void',
     '[00:40.40] Starfighter engines burning through the deep space asteroid belt',
-    '[00:44.20] Hyperdrive velocity locked onto thedistant nebula core',
+    '[00:44.20] Hyperdrive velocity locked onto the distant nebula core',
     '[00:48.00] Banking past the cosmic debris into starlight harbor',
     '[00:52.50] Golden horizon rising over the crystal ocean tide',
     '[00:57.00] Echoes of the chorus floating in the midnight air',
@@ -715,18 +715,37 @@ async function runElectronScreenshotHarness() {
   }
 
   async function openNowPlayingAndSeek(targetSec, seekClicks = []) {
-    await win.webContents.executeJavaScript(`
+    const opened = await win.webContents.executeJavaScript(`
       (async () => {
         if (document.fonts && document.fonts.ready) {
           await document.fonts.ready;
         }
-        // Open NowPlayingScreen via 'F' shortcut
-        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', code: 'KeyF', bubbles: true }));
+        // Wait for BottomPlayerBar artwork lockup to mount after session hydration
+        for (let i = 0; i < 30; i++) {
+          if (document.querySelector('.artwork-lockup')) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        const lockup = document.querySelector('.artwork-lockup');
+        if (lockup) {
+          lockup.click();
+        }
+        await new Promise((r) => setTimeout(r, 150));
+        if (!document.querySelector('[data-fullscreen]')) {
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', code: 'KeyF', bubbles: true }));
+        }
+        for (let i = 0; i < 20; i++) {
+          if (document.querySelector('[data-fullscreen]')) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
         // Start playback via 'Space' shortcut so visualizers & fluid mesh animate live
         window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true }));
+        return Boolean(document.querySelector('[data-fullscreen]'));
       })()
     `);
-    await new Promise((r) => setTimeout(r, 350));
+    if (!opened) {
+      throw new Error('NowPlayingScreen ([data-fullscreen]) failed to open! Cannot capture Now Playing screenshot.');
+    }
+    await new Promise((r) => setTimeout(r, 400));
 
     // Apply deterministic relative seek keystrokes + sync <audio> currentTime directly
     await win.webContents.executeJavaScript(`

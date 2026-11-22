@@ -2,17 +2,32 @@
 
 import type {
   LyricLine,
+  LyricTextAlign,
   MeasuredLineLayout,
   StyleFrameContext,
   VisualStyleId,
 } from '../core/models';
 import type { WebGlEffectMode } from './webGlEffectLayer';
 
+export type WebGlEffectKind = WebGlEffectMode;
+
+export interface StyleMeasurementSpec {
+  readonly fontWeight?: number;
+  readonly fontSizeMultiplier?: number;
+  readonly fontFamilyOverride?: string;
+  readonly textTransform?: 'none' | 'uppercase' | 'lowercase';
+  readonly letterSpacing?: string;
+  readonly maxLineWidthRatio?: number;
+}
+
 export interface ILyricVisualStyle {
   readonly id: VisualStyleId;
   readonly name: string;
   readonly webGlEffect: WebGlEffectMode;
   readonly usesShip3D?: boolean;
+  getVariationIndex?(variationId: string): number;
+  getWebGlEffect?(frame: StyleFrameContext): WebGlEffectKind;
+  getMeasurementSpec?(frame: StyleFrameContext): StyleMeasurementSpec;
   render(
     ctx: CanvasRenderingContext2D,
     frame: StyleFrameContext,
@@ -21,6 +36,89 @@ export interface ILyricVisualStyle {
   ): void;
   reset?(): void;
   dispose?(): void;
+}
+
+export interface FocalRect {
+  readonly left: number;
+  readonly width: number;
+  readonly centerX: number;
+}
+
+export function getFocalRect(frame: StyleFrameContext, width: number): FocalRect {
+  const safeWidth = Math.max(1, Number.isFinite(width) ? width : 1);
+  const raw =
+    typeof frame.contentInsetLeft === 'number' && Number.isFinite(frame.contentInsetLeft)
+      ? frame.contentInsetLeft
+      : 0;
+  const left = Math.max(0, Math.min(safeWidth * 0.62, raw));
+  const focalWidth = Math.max(220, safeWidth - left);
+  const centerX = left + focalWidth * 0.5;
+  return { left, width: focalWidth, centerX };
+}
+
+export function clipToFocalStage(
+  ctx: CanvasRenderingContext2D,
+  frame: StyleFrameContext,
+  width: number,
+  height: number
+): FocalRect {
+  const focal = getFocalRect(frame, width);
+  if (focal.left > 2 && typeof ctx.rect === 'function' && typeof ctx.clip === 'function') {
+    ctx.beginPath();
+    ctx.rect(focal.left, 0, Math.max(1, width - focal.left), Math.max(1, height));
+    ctx.clip();
+  }
+  return focal;
+}
+
+export function computeAlignedX(
+  focalWidth: number,
+  contentWidth: number,
+  textAlign: LyricTextAlign | undefined = 'center',
+  leftPad = 36
+): number {
+  if (textAlign === 'left') {
+    return Math.max(16, Math.min(leftPad, focalWidth * 0.1));
+  }
+  return Math.max(0, (focalWidth - contentWidth) * 0.5);
+}
+
+export function drawBackdropVignette(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  strength = 0.55,
+  edgeColor = '#020408'
+): void {
+  const s = clamp01(Number.isFinite(strength) ? strength : 0.55);
+  if (s <= 0.01) return;
+  ctx.save();
+  const vig = ctx.createRadialGradient(
+    width * 0.5,
+    height * 0.48,
+    Math.min(width, height) * 0.26,
+    width * 0.5,
+    height * 0.5,
+    Math.max(width, height) * 0.78
+  );
+  vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  vig.addColorStop(0.62, 'rgba(2, 4, 8, 0.35)');
+  vig.addColorStop(1, edgeColor);
+  ctx.globalAlpha = s * 0.88;
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+}
+
+export function isTransparentStage(frame: StyleFrameContext): boolean {
+  return Boolean(frame.isOverlayMode || frame.isEmbeddedTransparent);
+}
+
+export function setCanvasLetterSpacing(ctx: CanvasRenderingContext2D, letterSpacing: string): void {
+  const target = ctx as unknown as { letterSpacing?: string };
+  if ('letterSpacing' in target || typeof target === 'object') {
+    target.letterSpacing = letterSpacing;
+  }
 }
 
 export function clamp01(v: number): number {
@@ -75,7 +173,7 @@ export function drawEmptyState(
   height: number,
   subtitle = 'Waiting for synchronized lyrics'
 ): void {
-  const cx = width * 0.5;
+  const cx = getFocalRect(frame, width).centerX;
   const cy = height * 0.5;
   const pulse = frame.reduceMotion
     ? 0.5

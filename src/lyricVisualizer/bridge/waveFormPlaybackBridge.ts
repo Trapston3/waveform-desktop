@@ -14,13 +14,25 @@ import {
   STARLIGHT_HARBOR_TRACK,
   type TrackInfo,
 } from '../core/models';
-import { usePlayerStore } from '../../state/playerStore';
+import { snapAllSyncEngines } from '../core/syncEngine';
+import { registerPlayerBridgeResync, usePlayerStore } from '../../state/playerStore';
 import { useLyricsStore } from '../../state/lyricsStore';
 import type { Song } from '../../models/Song';
 import type { ParsedLyrics } from '../../services/LyricsService';
 
 function nowMs(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+function getMatchingLyricsData(song: Song | null): ParsedLyrics | null {
+  if (!song) return null;
+  const trackId = song.videoId || (song as any).id || null;
+  const lState = useLyricsStore.getState();
+  if (!lState.lyricsData) return null;
+  if (lState.currentTrackId && trackId && lState.currentTrackId !== trackId) {
+    return null;
+  }
+  return lState.lyricsData;
 }
 
 /**
@@ -221,7 +233,7 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
     const pState = usePlayerStore.getState();
     this.lastObservedTrackId = pState.currentTrack?.videoId ?? null;
     this.lastObservedIsPlaying = pState.playbackState === 'PLAYING';
-    this.lastObservedPositionSec = (pState.positionMs || 0) / 1000;
+    this.lastObservedPositionSec = this.getLivePositionSeconds();
     this.lastObservedTimestampMs = nowMs();
 
     this.unsubscribePlayer = usePlayerStore.subscribe((state) => {
@@ -230,15 +242,18 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
       const nextTrackId = state.currentTrack?.videoId ?? null;
       const nextIsPlaying = state.playbackState === 'PLAYING';
       const engine = state.audioEngine;
-      const rawPosMs = engine ? engine.getCurrentPositionMs() : state.positionMs;
-      const nextPosSec = Math.max(0, (rawPosMs || 0) / 1000);
+      const nextPosSec = engine
+        ? typeof engine.getCurrentTime === 'function'
+          ? Math.max(0, engine.getCurrentTime())
+          : Math.max(0, (engine.getCurrentPositionMs?.() || 0) / 1000)
+        : Math.max(0, (state.positionMs || 0) / 1000);
       const currentTs = nowMs();
 
       if (nextTrackId !== this.lastObservedTrackId) {
         this.lastObservedTrackId = nextTrackId;
         this.lastObservedPositionSec = nextPosSec;
         this.lastObservedTimestampMs = currentTs;
-        const lyricsData = useLyricsStore.getState().lyricsData;
+        const lyricsData = getMatchingLyricsData(state.currentTrack);
         const trackInfo = songToTrackInfo(state.currentTrack, lyricsData, state.durationMs);
         this.emitTrackChanged(trackInfo);
       } else {
@@ -262,10 +277,11 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
 
     this.unsubscribeLyrics = useLyricsStore.subscribe((lState, prevLState) => {
       if (this.sandboxMode) return;
-      if (lState.lyricsData !== prevLState.lyricsData) {
+      if (lState.lyricsData !== prevLState.lyricsData || lState.currentTrackId !== prevLState.currentTrackId) {
         const p = usePlayerStore.getState();
         if (p.currentTrack) {
-          const trackInfo = songToTrackInfo(p.currentTrack, lState.lyricsData, p.durationMs);
+          const matching = getMatchingLyricsData(p.currentTrack);
+          const trackInfo = songToTrackInfo(p.currentTrack, matching, p.durationMs);
           this.emitTrackChanged(trackInfo);
         }
       }
@@ -293,8 +309,8 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
       this.emitSeeked(0);
     } else {
       const pState = usePlayerStore.getState();
-      const lState = useLyricsStore.getState();
-      const trackInfo = songToTrackInfo(pState.currentTrack, lState.lyricsData, pState.durationMs);
+      const matchingLyrics = getMatchingLyricsData(pState.currentTrack);
+      const trackInfo = songToTrackInfo(pState.currentTrack, matchingLyrics, pState.durationMs);
       const isPlaying = pState.playbackState === 'PLAYING';
       const posSec = this.getLivePositionSeconds();
       this.lastObservedTrackId = pState.currentTrack?.videoId ?? null;
@@ -320,8 +336,15 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
   private getLivePositionSeconds(): number {
     const pState = usePlayerStore.getState();
     const engine = pState.audioEngine;
-    const posMs = engine ? engine.getCurrentPositionMs() : pState.positionMs;
-    return Math.max(0, (posMs || 0) / 1000);
+    if (engine) {
+      if (typeof engine.getCurrentTime === 'function') {
+        return Math.max(0, engine.getCurrentTime());
+      }
+      if (typeof engine.getCurrentPositionMs === 'function') {
+        return Math.max(0, (engine.getCurrentPositionMs() || 0) / 1000);
+      }
+    }
+    return Math.max(0, (pState.positionMs || 0) / 1000);
   }
 
   get currentSnapshot(): PlaybackSnapshot {
@@ -341,8 +364,8 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
     }
 
     const pState = usePlayerStore.getState();
-    const lState = useLyricsStore.getState();
-    const track = songToTrackInfo(pState.currentTrack, lState.lyricsData, pState.durationMs);
+    const matchingLyrics = getMatchingLyricsData(pState.currentTrack);
+    const track = songToTrackInfo(pState.currentTrack, matchingLyrics, pState.durationMs);
     const isPlaying = pState.playbackState === 'PLAYING';
     const positionSeconds = this.getLivePositionSeconds();
 
@@ -363,7 +386,8 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
     if (this.sandboxMode) {
       return STARLIGHT_HARBOR_LYRICS;
     }
-    return convertParsedLyricsToVisualizerLyrics(useLyricsStore.getState().lyricsData);
+    const pState = usePlayerStore.getState();
+    return convertParsedLyricsToVisualizerLyrics(getMatchingLyricsData(pState.currentTrack));
   }
 
   play(): void {
@@ -419,15 +443,51 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
     this.pendingDidSeek = true;
     this.lastObservedPositionSec = targetMs / 1000;
     this.lastObservedTimestampMs = nowMs();
-    if (pState.audioEngine && typeof (pState.audioEngine as any).seekTo === 'function') {
-      (pState.audioEngine as any).seekTo(targetMs);
+
+    if (pState && typeof pState.seek === 'function') {
+      pState.seek(targetMs);
+      const updatedMs = usePlayerStore.getState().positionMs;
+      const syncedSec = Math.max(0, (Number.isFinite(updatedMs) ? updatedMs : targetMs) / 1000);
+      this.lastObservedPositionSec = syncedSec;
+      this.lastObservedTimestampMs = nowMs();
+      this.emitSeeked(syncedSec);
+      return;
     }
-    pState.seek(targetMs);
+
+    if (pState?.audioEngine) {
+      if (typeof (pState.audioEngine as any).seek === 'function') {
+        (pState.audioEngine as any).seek(targetMs);
+      } else if (typeof (pState.audioEngine as any).seekTo === 'function') {
+        (pState.audioEngine as any).seekTo(targetMs);
+      }
+    }
     this.emitSeeked(targetMs / 1000);
   }
 
   seekMs(positionMs: number): void {
     this.seek(positionMs / 1000);
+  }
+
+  forceResync(positionSeconds: number): void {
+    const liveSec =
+      typeof positionSeconds === 'number' && Number.isFinite(positionSeconds)
+        ? Math.max(0, positionSeconds)
+        : this.sandboxMode
+        ? this.getSandboxPositionSeconds()
+        : this.getLivePositionSeconds();
+
+    this.pendingDidSeek = true;
+    this.lastObservedPositionSec = liveSec;
+    this.lastObservedTimestampMs = nowMs();
+
+    if (this.sandboxMode) {
+      const dur = STARLIGHT_HARBOR_TRACK.durationSeconds || 42;
+      this.sandboxBasePositionSec = Math.max(0, Math.min(dur, liveSec));
+      this.sandboxResumeTimestampMs = this.lastObservedTimestampMs;
+    }
+
+    snapAllSyncEngines(liveSec, this.getCurrentLyrics());
+    this.emitSeeked(liveSec);
   }
 
   onTrackChanged(cb: (track: TrackInfo | null) => void): () => void {
@@ -451,8 +511,8 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
     };
   }
 
-  sampleAudioMetrics(out?: AudioFrameMetrics): AudioFrameMetrics {
-    const target: AudioFrameMetrics = out ?? {
+  sampleAudioMetrics(outAudio?: AudioFrameMetrics): AudioFrameMetrics {
+    const target: AudioFrameMetrics = outAudio ?? {
       rmsLevel: 0,
       bassEnergy: 0,
       midEnergy: 0,
@@ -467,12 +527,14 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
         target.midEnergy = 0;
         target.trebleEnergy = 0;
         target.beatDetected = false;
+        (target as any).estimatedBpm = 118;
+        (target as any).beatStrength = 0;
         return target;
       }
 
-      // Deterministic 108 BPM atmospheric wave synthesizer for Starlight Harbor sandbox demo
+      // Deterministic ~118 BPM atmospheric wave synthesizer for Starlight Harbor sandbox demo
       const t = this.getSandboxPositionSeconds();
-      const beatPeriod = 60 / 108; // ~0.555s per beat
+      const beatPeriod = 60 / 118; // ~0.508s per beat
       const beatIndex = Math.floor(t / beatPeriod);
       const beatPhase = (t % beatPeriod) / beatPeriod;
       const kickEnv = Math.exp(-beatPhase * 5.2);
@@ -492,12 +554,24 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
       target.midEnergy = mid;
       target.trebleEnergy = treble;
       target.beatDetected = isNewBeat;
+      (target as any).estimatedBpm = 118;
+      (target as any).beatStrength = Math.max(0, Math.min(1, kickEnv));
       return target;
     }
 
     const engine = usePlayerStore.getState().audioEngine;
     if (engine && typeof engine.sampleAudioMetrics === 'function') {
-      return engine.sampleAudioMetrics(target);
+      const sampled = engine.sampleAudioMetrics(target);
+      const viz = (engine as any).visualizer;
+      if (typeof (sampled as any).estimatedBpm !== 'number' || !Number.isFinite((sampled as any).estimatedBpm)) {
+        (sampled as any).estimatedBpm =
+          viz && typeof viz.getEstimatedBpm === 'function' ? viz.getEstimatedBpm() : 120;
+      }
+      if (typeof (sampled as any).beatStrength !== 'number' || !Number.isFinite((sampled as any).beatStrength)) {
+        (sampled as any).beatStrength =
+          viz && typeof viz.getBeatStrength === 'function' ? viz.getBeatStrength() : 0;
+      }
+      return sampled;
     }
 
     target.rmsLevel = 0;
@@ -505,6 +579,8 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
     target.midEnergy = 0;
     target.trebleEnergy = 0;
     target.beatDetected = false;
+    (target as any).estimatedBpm = 120;
+    (target as any).beatStrength = 0;
     return target;
   }
 
@@ -558,6 +634,9 @@ let sharedPlaybackBridge: WaveFormPlaybackBridge | null = null;
 export function getSharedWaveFormPlaybackBridge(): WaveFormPlaybackBridge {
   if (!sharedPlaybackBridge) {
     sharedPlaybackBridge = new WaveFormPlaybackBridge(false);
+    registerPlayerBridgeResync((sec: number) => {
+      sharedPlaybackBridge?.forceResync(sec);
+    });
   }
   return sharedPlaybackBridge;
 }

@@ -25,6 +25,8 @@ import { NowPlayingScreen } from './ui/player/NowPlayingScreen';
 import { ReplayStoriesModal } from './ui/player/ReplayStoriesModal';
 import { EqualizerModal } from './ui/player/EqualizerModal';
 import { ContextMenu } from './ui/common/ContextMenu';
+import { AmbientViewportApp } from './lyricVisualizer/ui/AmbientViewportApp';
+import { useLyricVisualizerStore } from './lyricVisualizer/state/lyricVisualizerStore';
 
 export const App: React.FC = () => {
   // 1. Initialize stores and background services on app mount
@@ -67,8 +69,9 @@ export const App: React.FC = () => {
   const togglePlay = usePlayerStore((s) => s.togglePlay);
   const isPlaying = playbackState === 'PLAYING';
 
-  // 5. Library store state
+  // 5. Library & Ambient portal store state
   const monthlyStats = useLibraryStore((s) => s.monthlyStats);
+  const isAmbientOpen = useLyricVisualizerStore((s) => s.isAmbientOpen);
 
   // Inspector is open if either lyrics or queue is toggled and not in compact mode
   const isInspectorOpen = (isLyricsDrawerOpen || isQueueDrawerOpen) && dimensions.layoutMode !== 'compact';
@@ -189,6 +192,9 @@ export const App: React.FC = () => {
         track={menuState.track}
         onClose={closeContextMenu}
       />
+
+      {/* 5. In-App Fullscreen Ambient Mode Portal (100% live AudioEngine/Store sync) */}
+      {isAmbientOpen && <AmbientViewportApp inAppPortal />}
     </div>
   );
 };

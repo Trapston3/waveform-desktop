@@ -1,18 +1,27 @@
 // LyricStageRenderer: 60fps zero-allocation render coordinator owning Canvas2D,
-// optional WebGlEffectLayer, Ship3DScene, LyricsMeasurer, and StyleRegistry.
+// optional WebGlEffectLayer, Ship3DScene, LyricsMeasurer, StyleRegistry,
+// spring-damped manual scroll, and preallocated hit-rect pool for hover/click-to-seek.
 
-import type {
-  AudioFrameMetrics,
-  LyricPalette,
-  Lyrics,
-  LyricsLayout,
-  StyleFrameContext,
-  VisualStyleId,
+import {
+  resolveStyleVariationId,
+  SF_PRO_DISPLAY_STACK,
+  type AudioFrameMetrics,
+  type LyricPalette,
+  type Lyrics,
+  type LyricsLayout,
+  type LyricTextAlign,
+  type MotionIntensity,
+  type StyleFrameContext,
+  type StyleTrackMetadata,
+  type VisualStyleId,
 } from '../core/models';
+import { ensurePaletteContrast } from '../core/oklchPalette';
 import { LyricsMeasurer } from './lyricsMeasurer';
-import { Ship3DScene } from './ship3dScene';
-import { StyleRegistry } from './styleRegistry';
+import { setShip3DSceneHint, Ship3DScene } from './ship3dScene';
+import { mapLegacyStyleId, StyleRegistry } from './styleRegistry';
 import { WebGlEffectLayer, type WebGlEffectParams } from './webGlEffectLayer';
+
+const HIT_RECT_CAP = 256;
 
 const FALLBACK_PALETTE: LyricPalette = {
   bgDeep: '#0a0d16',
@@ -41,14 +50,23 @@ export interface LyricStageRendererOptions {
   canvas: HTMLCanvasElement;
   webGlCanvas?: HTMLCanvasElement | null;
   styleId?: VisualStyleId;
+  variationId?: string;
   fontFamily?: string;
   fontSizeScale?: number;
   palette?: LyricPalette;
   reduceMotion?: boolean;
   isAmbientMode?: boolean;
   isOverlayMode?: boolean;
+  isEmbeddedTransparent?: boolean;
+  contentInsetLeft?: number;
+  motionIntensity?: MotionIntensity;
   audioReactive?: boolean;
+  backgroundOpacity?: number;
+  vignetteStrength?: number;
+  textAlign?: LyricTextAlign;
+  trackMetadata?: StyleTrackMetadata | null;
   onSampleFrame?: (outAudio: AudioFrameMetrics) => LyricStageFrameInput | void;
+  onFollowStateChange?: (isFollowing: boolean) => void;
 }
 
 // Mutable internal mirror of StyleFrameContext to guarantee zero per-frame allocations
@@ -69,7 +87,26 @@ interface MutableStyleFrameContext {
   reduceMotion: boolean;
   isAmbientMode: boolean;
   isOverlayMode: boolean;
+  isEmbeddedTransparent: boolean;
+  hasWebGlBackdrop: boolean;
+  contentInsetLeft: number;
+  motionIntensity: MotionIntensity;
   didSeekThisFrame: boolean;
+  variationId: string;
+  manualScrollY: number;
+  isFollowingPlayback: boolean;
+  hoveredLineIndex: number;
+  backgroundOpacity: number;
+  vignetteStrength: number;
+  textAlign: LyricTextAlign;
+  trackMetadata: StyleTrackMetadata | null;
+  recordHitRect: (
+    lineIndex: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ) => void;
 }
 
 export class LyricStageRenderer {
@@ -80,17 +117,37 @@ export class LyricStageRenderer {
   private readonly measurer: LyricsMeasurer;
   private readonly registry: StyleRegistry;
   private readonly onSampleFrame?: (outAudio: AudioFrameMetrics) => LyricStageFrameInput | void;
+  private readonly onFollowStateChange?: (isFollowing: boolean) => void;
 
   private styleId: VisualStyleId;
+  private variationId: string;
+  private hasExplicitVariation = false;
   private audioReactive: boolean;
   private width = 800;
   private height = 600;
   private dpr = 1;
+  private targetContentInsetLeft = 0;
+  private currentContentInsetLeft = 0;
   private running = false;
   private locked = false;
   private disposed = false;
   private rafId: number | null = null;
   private lastFrameMs = 0;
+  private boundFontsLoadingDone: (() => void) | null = null;
+
+  // Interactive manual scroll & hover hit-testing state (zero per-frame heap allocations)
+  private manualScrollY = 0;
+  private targetManualScrollY = 0;
+  private manualScrollVel = 0;
+  private isFollowingPlayback = true;
+  private hoveredLineIndex = -1;
+  private pointerX = -1;
+  private pointerY = -1;
+
+  // Preallocated hit-rect pool (zero per-frame allocations)
+  private readonly hitRectLineIndices = new Int32Array(HIT_RECT_CAP);
+  private readonly hitRectBounds = new Float32Array(HIT_RECT_CAP * 4);
+  private hitRectCount = 0;
 
   // Pre-allocated reusable objects (zero heap garbage inside 60fps loop)
   private readonly audioMetrics: AudioFrameMetrics = {
@@ -99,6 +156,8 @@ export class LyricStageRenderer {
     midEnergy: 0,
     trebleEnergy: 0,
     beatDetected: false,
+    estimatedBpm: 120,
+    beatStrength: 0,
   };
 
   private readonly frameContext: MutableStyleFrameContext;
@@ -116,9 +175,18 @@ export class LyricStageRenderer {
     bgMidHex: FALLBACK_PALETTE.bgMid,
     accentPrimaryHex: FALLBACK_PALETTE.accentPrimary,
     accentSecondaryHex: FALLBACK_PALETTE.accentSecondary,
+    variationIndex: 0,
+    backgroundOpacity: 0.95,
   };
 
   private readonly boundTick: (nowMs: number) => void;
+  private readonly boundRecordHitRect: (
+    lineIndex: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ) => void;
 
   constructor(options: LyricStageRendererOptions) {
     this.canvas = options.canvas;
@@ -128,9 +196,45 @@ export class LyricStageRenderer {
     this.measurer = new LyricsMeasurer();
     this.registry = new StyleRegistry();
     this.onSampleFrame = options.onSampleFrame;
+    this.onFollowStateChange = options.onFollowStateChange;
 
-    this.styleId = options.styleId ?? 'AppleMusicFlow';
+    const rawStyleId = options.styleId ?? 'AppleMusicFlow';
+    this.styleId = mapLegacyStyleId(rawStyleId);
+    this.hasExplicitVariation = typeof options.variationId === 'string' && options.variationId.length > 0;
+    this.variationId = this.hasExplicitVariation
+      ? options.variationId!
+      : resolveStyleVariationId(rawStyleId, undefined);
     this.audioReactive = options.audioReactive ?? true;
+
+    const initialInset = Math.max(
+      0,
+      typeof options.contentInsetLeft === 'number' && Number.isFinite(options.contentInsetLeft)
+        ? options.contentInsetLeft
+        : 0
+    );
+    this.targetContentInsetLeft = initialInset;
+    this.currentContentInsetLeft = initialInset;
+
+    this.boundRecordHitRect = (
+      lineIndex: number,
+      x: number,
+      y: number,
+      width: number,
+      height: number
+    ): void => {
+      if (this.hitRectCount >= HIT_RECT_CAP) return;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || width <= 0 || height <= 0) return;
+      const slot = this.hitRectCount;
+      this.hitRectLineIndices[slot] = lineIndex | 0;
+      const base = slot * 4;
+      const inset = this.currentContentInsetLeft;
+      const globalX = inset > 2 && x < inset ? x + inset : x;
+      this.hitRectBounds[base] = globalX;
+      this.hitRectBounds[base + 1] = y;
+      this.hitRectBounds[base + 2] = width;
+      this.hitRectBounds[base + 3] = height;
+      this.hitRectCount = slot + 1;
+    };
 
     this.frameContext = {
       lyrics: null,
@@ -141,15 +245,34 @@ export class LyricStageRenderer {
       activeWordIndex: -1,
       wordProgress: 0,
       lineFadeAlpha: 1,
-      palette: options.palette ?? FALLBACK_PALETTE,
+      palette: ensurePaletteContrast(options.palette ?? FALLBACK_PALETTE),
       audio: this.audioMetrics,
-      fontFamily: options.fontFamily ?? 'Inter, sans-serif',
+      fontFamily: options.fontFamily ?? SF_PRO_DISPLAY_STACK,
       fontSizeScale: options.fontSizeScale ?? 1.0,
       dpiScale: 1,
       reduceMotion: options.reduceMotion ?? false,
       isAmbientMode: options.isAmbientMode ?? false,
       isOverlayMode: options.isOverlayMode ?? false,
+      isEmbeddedTransparent: options.isEmbeddedTransparent ?? false,
+      hasWebGlBackdrop: false,
+      contentInsetLeft: initialInset,
+      motionIntensity: options.motionIntensity ?? 'normal',
       didSeekThisFrame: false,
+      variationId: this.variationId,
+      manualScrollY: 0,
+      isFollowingPlayback: true,
+      hoveredLineIndex: -1,
+      backgroundOpacity:
+        typeof options.backgroundOpacity === 'number' && Number.isFinite(options.backgroundOpacity)
+          ? Math.max(0.2, Math.min(1.0, options.backgroundOpacity))
+          : 0.95,
+      vignetteStrength:
+        typeof options.vignetteStrength === 'number' && Number.isFinite(options.vignetteStrength)
+          ? Math.max(0.0, Math.min(1.0, options.vignetteStrength))
+          : 0.55,
+      textAlign: options.textAlign === 'left' ? 'left' : 'center',
+      trackMetadata: options.trackMetadata ?? null,
+      recordHitRect: this.boundRecordHitRect,
     };
 
     this.boundTick = (nowMs: number) => {
@@ -160,6 +283,43 @@ export class LyricStageRenderer {
         this.scheduleNextFrame();
       }
     };
+
+    if (typeof document !== 'undefined' && document.fonts) {
+      const fonts = document.fonts;
+      this.boundFontsLoadingDone = () => this.handleFontsLoaded();
+      fonts.addEventListener?.('loadingdone', this.boundFontsLoadingDone);
+      const weights = ['400', '500', '700', '800'];
+      const loads =
+        typeof fonts.load === 'function'
+          ? weights.map((w) =>
+              Promise.resolve(fonts.load(`${w} 32px "SF Pro Display"`)).catch(() => [])
+            )
+          : [];
+      Promise.all([Promise.resolve(fonts.ready).catch(() => undefined), ...loads]).then(() => {
+        this.handleFontsLoaded();
+      });
+    }
+  }
+
+  private handleFontsLoaded(): void {
+    if (this.disposed) return;
+    this.measurer.invalidate();
+    this.frameContext.layout = null;
+    this.registry.get(this.styleId).reset?.();
+    if (this.running && !this.locked) {
+      this.renderFrame();
+    }
+  }
+
+  private updateFollowingState(nextFollowing: boolean): void {
+    if (this.isFollowingPlayback === nextFollowing) return;
+    this.isFollowingPlayback = nextFollowing;
+    this.frameContext.isFollowingPlayback = nextFollowing;
+    try {
+      this.onFollowStateChange?.(nextFollowing);
+    } catch {
+      // Ignore callback error
+    }
   }
 
   get isLocked(): boolean {
@@ -182,20 +342,143 @@ export class LyricStageRenderer {
     return this.webGlLayer;
   }
 
-  setStyle(styleId: VisualStyleId): void {
-    if (this.styleId === styleId) return;
-    this.styleId = this.registry.has(styleId) ? styleId : 'AppleMusicFlow';
+  isFollowing(): boolean {
+    return this.isFollowingPlayback;
+  }
+
+  scrollBy(deltaY: number): void {
+    if (!Number.isFinite(deltaY) || Math.abs(deltaY) < 0.01) return;
+    const layout = this.frameContext.layout;
+    let minOffset = -3200;
+    let maxOffset = 3200;
+    if (layout && layout.lines.length > 0) {
+      const activeIdx = Math.max(
+        0,
+        Math.min(layout.lines.length - 1, this.frameContext.activeLineIndex)
+      );
+      const activeY = layout.lines[activeIdx].y;
+      minOffset = -activeY - 180;
+      maxOffset = Math.max(0, layout.totalHeight - activeY) + 180;
+    }
+
+    this.targetManualScrollY = Math.max(
+      minOffset,
+      Math.min(maxOffset, this.targetManualScrollY + deltaY)
+    );
+    if (this.frameContext.reduceMotion) {
+      this.manualScrollY = this.targetManualScrollY;
+      this.manualScrollVel = 0;
+      this.frameContext.manualScrollY = this.manualScrollY;
+    }
+    this.updateFollowingState(false);
+  }
+
+  resumeFollowPlayback(): void {
+    this.targetManualScrollY = 0;
+    if (this.frameContext.reduceMotion) {
+      this.manualScrollY = 0;
+      this.manualScrollVel = 0;
+      this.frameContext.manualScrollY = 0;
+    }
+    this.updateFollowingState(true);
+  }
+
+  setPointerPosition(x: number, y: number): number {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
+      this.pointerX = -1;
+      this.pointerY = -1;
+      this.hoveredLineIndex = -1;
+      this.frameContext.hoveredLineIndex = -1;
+      return -1;
+    }
+    this.pointerX = x;
+    this.pointerY = y;
+    const hit = this.findLineAtPoint(x, y);
+    const idx = hit !== null ? hit : -1;
+    this.hoveredLineIndex = idx;
+    this.frameContext.hoveredLineIndex = idx;
+    return idx;
+  }
+
+  clearPointerPosition(): void {
+    this.setPointerPosition(-1, -1);
+  }
+
+  setStyle(styleId: VisualStyleId | string): void {
+    const mapped = mapLegacyStyleId(styleId);
+    const nextId = this.registry.has(mapped) ? mapped : 'AppleMusicFlow';
+    const legacyChanged = styleId === 'HoloVaporwave' || styleId === 'SpectrumRibbon';
+    if (this.styleId === nextId && !legacyChanged) return;
+    this.styleId = nextId;
+    if (!this.hasExplicitVariation || legacyChanged) {
+      this.variationId = resolveStyleVariationId(styleId, undefined);
+      this.frameContext.variationId = this.variationId;
+    }
     this.registry.get(this.styleId).reset?.();
   }
 
+  setVariation(variationId: string): void {
+    if (typeof variationId !== 'string' || variationId.trim().length === 0) return;
+    this.hasExplicitVariation = true;
+    const resolved = resolveStyleVariationId(this.styleId, {
+      [this.styleId]: variationId.trim(),
+    });
+    if (this.variationId === resolved) return;
+    this.variationId = resolved;
+    this.frameContext.variationId = resolved;
+  }
+
+  setVisualSettings(settings: {
+    backgroundOpacity?: number;
+    vignetteStrength?: number;
+    textAlign?: LyricTextAlign;
+  }): void {
+    if (
+      typeof settings.backgroundOpacity === 'number' &&
+      Number.isFinite(settings.backgroundOpacity)
+    ) {
+      this.frameContext.backgroundOpacity = Math.max(
+        0.2,
+        Math.min(1.0, settings.backgroundOpacity)
+      );
+    }
+    if (
+      typeof settings.vignetteStrength === 'number' &&
+      Number.isFinite(settings.vignetteStrength)
+    ) {
+      this.frameContext.vignetteStrength = Math.max(
+        0.0,
+        Math.min(1.0, settings.vignetteStrength)
+      );
+    }
+    if (settings.textAlign === 'left' || settings.textAlign === 'center') {
+      this.frameContext.textAlign = settings.textAlign;
+    }
+  }
+
+  setTrackMetadata(meta: StyleTrackMetadata | null): void {
+    this.frameContext.trackMetadata = meta;
+  }
+
   setLyrics(lyrics: Lyrics | null): void {
+    const changed = this.frameContext.lyrics !== lyrics;
     this.frameContext.lyrics = lyrics;
-    this.frameContext.layout = null;
-    this.measurer.invalidate();
+    if (changed) {
+      this.frameContext.layout = null;
+      this.measurer.invalidate();
+      this.manualScrollY = 0;
+      this.targetManualScrollY = 0;
+      this.manualScrollVel = 0;
+      this.frameContext.manualScrollY = 0;
+      this.hoveredLineIndex = -1;
+      this.frameContext.hoveredLineIndex = -1;
+      this.hitRectCount = 0;
+      this.updateFollowingState(true);
+    }
   }
 
   setPalette(palette: LyricPalette): void {
-    this.frameContext.palette = palette;
+    this.frameContext.palette = ensurePaletteContrast(palette);
   }
 
   setTypography(fontFamily: string, fontSizeScale: number): void {
@@ -207,12 +490,30 @@ export class LyricStageRenderer {
     reduceMotion?: boolean;
     isAmbientMode?: boolean;
     isOverlayMode?: boolean;
+    isEmbeddedTransparent?: boolean;
+    motionIntensity?: MotionIntensity;
     audioReactive?: boolean;
   }): void {
     if (modes.reduceMotion !== undefined) this.frameContext.reduceMotion = modes.reduceMotion;
     if (modes.isAmbientMode !== undefined) this.frameContext.isAmbientMode = modes.isAmbientMode;
     if (modes.isOverlayMode !== undefined) this.frameContext.isOverlayMode = modes.isOverlayMode;
+    if (modes.isEmbeddedTransparent !== undefined) {
+      this.frameContext.isEmbeddedTransparent = modes.isEmbeddedTransparent;
+    }
+    if (modes.motionIntensity !== undefined) {
+      this.frameContext.motionIntensity = modes.motionIntensity;
+    }
     if (modes.audioReactive !== undefined) this.audioReactive = modes.audioReactive;
+  }
+
+  setContentInsetLeft(px: number): void {
+    const next = Math.max(0, Number.isFinite(px) ? px : 0);
+    if (this.targetContentInsetLeft === next) return;
+    this.targetContentInsetLeft = next;
+    if (this.frameContext.reduceMotion || Math.abs(next - this.currentContentInsetLeft) < 0.5) {
+      this.currentContentInsetLeft = next;
+      this.frameContext.contentInsetLeft = next;
+    }
   }
 
   setSyncState(state: LyricStageFrameInput): void {
@@ -222,6 +523,13 @@ export class LyricStageRenderer {
     this.frameContext.wordProgress = state.wordProgress;
     this.frameContext.lineFadeAlpha = state.lineFadeAlpha ?? 1;
     this.frameContext.didSeekThisFrame = Boolean(state.didSeekThisFrame);
+    if (this.frameContext.didSeekThisFrame) {
+      this.manualScrollY = 0;
+      this.targetManualScrollY = 0;
+      this.manualScrollVel = 0;
+      this.frameContext.manualScrollY = 0;
+      this.updateFollowingState(true);
+    }
   }
 
   setAudioMetrics(audio: Partial<AudioFrameMetrics>): void {
@@ -230,6 +538,8 @@ export class LyricStageRenderer {
     if (audio.midEnergy !== undefined) this.audioMetrics.midEnergy = audio.midEnergy;
     if (audio.trebleEnergy !== undefined) this.audioMetrics.trebleEnergy = audio.trebleEnergy;
     if (audio.beatDetected !== undefined) this.audioMetrics.beatDetected = audio.beatDetected;
+    if (audio.estimatedBpm !== undefined) this.audioMetrics.estimatedBpm = audio.estimatedBpm;
+    if (audio.beatStrength !== undefined) this.audioMetrics.beatStrength = audio.beatStrength;
   }
 
   setLocked(locked: boolean): void {
@@ -276,6 +586,7 @@ export class LyricStageRenderer {
     this.running = true;
     this.lastFrameMs = 0;
     if (!this.locked) {
+      this.renderFrame();
       this.scheduleNextFrame();
     }
   }
@@ -322,6 +633,15 @@ export class LyricStageRenderer {
     }
     this.lastFrameMs = timestamp;
 
+    const dt = this.frameContext.deltaSeconds;
+    const insetDiff = this.targetContentInsetLeft - this.currentContentInsetLeft;
+    if (this.frameContext.reduceMotion || Math.abs(insetDiff) < 0.5) {
+      this.currentContentInsetLeft = this.targetContentInsetLeft;
+    } else {
+      this.currentContentInsetLeft += insetDiff * (1 - Math.exp(-dt * 10));
+    }
+    this.frameContext.contentInsetLeft = this.currentContentInsetLeft;
+
     // Optional per-frame pull from playback bridge
     if (this.onSampleFrame) {
       const sampled = this.onSampleFrame(this.audioMetrics);
@@ -335,29 +655,70 @@ export class LyricStageRenderer {
       }
     }
 
+    if (this.frameContext.didSeekThisFrame) {
+      this.manualScrollY = 0;
+      this.targetManualScrollY = 0;
+      this.manualScrollVel = 0;
+      this.updateFollowingState(true);
+    }
+
+    // Spring-damped manual scroll physics
+    if (this.frameContext.reduceMotion) {
+      this.manualScrollY = this.targetManualScrollY;
+      this.manualScrollVel = 0;
+    } else {
+      const disp = this.targetManualScrollY - this.manualScrollY;
+      if (Math.abs(disp) < 0.15 && Math.abs(this.manualScrollVel) < 0.5) {
+        this.manualScrollY = this.targetManualScrollY;
+        this.manualScrollVel = 0;
+      } else {
+        const accel = disp * 180 - this.manualScrollVel * 26;
+        this.manualScrollVel += accel * dt;
+        this.manualScrollY += this.manualScrollVel * dt;
+      }
+    }
+    this.frameContext.manualScrollY = this.manualScrollY;
+    this.frameContext.isFollowingPlayback = this.isFollowingPlayback;
+
     if (!this.audioReactive) {
       this.audioMetrics.rmsLevel = 0;
       this.audioMetrics.bassEnergy = 0;
       this.audioMetrics.midEnergy = 0;
       this.audioMetrics.trebleEnergy = 0;
       this.audioMetrics.beatDetected = false;
+      this.audioMetrics.beatStrength = 0;
     }
 
-    // Cached layout measurement (0 allocations when lyrics/size/font unchanged)
+    const style = this.registry.get(this.styleId);
+    const measurementSpec = style.getMeasurementSpec?.(this.frameContext as StyleFrameContext);
+
+    // Cached layout measurement (0 allocations when lyrics/size/font/spec unchanged)
+    const measureWidth = Math.max(240, this.width - Math.round(this.targetContentInsetLeft));
     this.frameContext.layout = this.measurer.measure(
       this.ctx,
       this.frameContext.lyrics,
-      this.width,
+      measureWidth,
       this.height,
       this.frameContext.fontFamily,
-      this.frameContext.fontSizeScale
+      this.frameContext.fontSizeScale,
+      undefined,
+      measurementSpec
     );
 
-    const style = this.registry.get(this.styleId);
+    const isTransparent = Boolean(
+      this.frameContext.isOverlayMode || this.frameContext.isEmbeddedTransparent
+    );
+
+    const activeWebGlEffect = style.getWebGlEffect
+      ? style.getWebGlEffect(this.frameContext as StyleFrameContext)
+      : style.webGlEffect;
+    const variationIndex = style.getVariationIndex
+      ? style.getVariationIndex(this.frameContext.variationId)
+      : 0;
 
     // 1. Optional WebGL2 effect layer
     if (this.webGlLayer) {
-      if (style.webGlEffect === 'none' || this.frameContext.isOverlayMode) {
+      if (activeWebGlEffect === 'none' || isTransparent) {
         this.webGlLayer.clear();
       } else {
         this.webGlParams.timeSeconds = this.frameContext.timeSeconds;
@@ -367,20 +728,34 @@ export class LyricStageRenderer {
         this.webGlParams.trebleEnergy = this.audioMetrics.trebleEnergy;
         this.webGlParams.beatDetected = this.audioMetrics.beatDetected;
         this.webGlParams.reduceMotion = this.frameContext.reduceMotion;
-        this.webGlParams.isOverlayMode = this.frameContext.isOverlayMode;
+        this.webGlParams.isOverlayMode = isTransparent;
         this.webGlParams.bgDeepHex = this.frameContext.palette.bgDeep;
         this.webGlParams.bgMidHex = this.frameContext.palette.bgMid;
         this.webGlParams.accentPrimaryHex = this.frameContext.palette.accentPrimary;
         this.webGlParams.accentSecondaryHex = this.frameContext.palette.accentSecondary;
-        this.webGlLayer.render(style.webGlEffect, this.webGlParams);
+        this.webGlParams.variationIndex = variationIndex;
+        this.webGlParams.backgroundOpacity = this.frameContext.backgroundOpacity;
+        this.webGlLayer.render(activeWebGlEffect, this.webGlParams);
       }
     }
+    this.frameContext.hasWebGlBackdrop = Boolean(
+      this.webGlLayer && activeWebGlEffect !== 'none' && !isTransparent
+    );
 
-    // 2. Clear Canvas2D transparently (critical for Overlay mode & WebGL2 compositing)
+    // 2. Clear Canvas2D transparently (critical for Overlay/Embedded mode & WebGL2 compositing)
     this.ctx.clearRect(0, 0, this.width, this.height);
 
     // 3. Optional 3D Starfield + Ship scene (StarfieldShip3D)
     if (style.usesShip3D) {
+      setShip3DSceneHint(
+        this.frameContext.variationId,
+        this.frameContext.backgroundOpacity,
+        this.frameContext.vignetteStrength
+      );
+      const focalCenterX =
+        this.currentContentInsetLeft > 2
+          ? this.currentContentInsetLeft + Math.max(220, this.width - this.currentContentInsetLeft) * 0.5
+          : this.width * 0.5;
       this.ship3dScene.render(
         this.ctx,
         this.width,
@@ -390,35 +765,84 @@ export class LyricStageRenderer {
         this.audioMetrics,
         this.frameContext.palette,
         this.frameContext.reduceMotion,
-        this.frameContext.isOverlayMode
+        isTransparent,
+        undefined,
+        undefined,
+        focalCenterX
       );
     }
 
-    // 4. Render active visual style
+    // 4. Reset hit-rect pool and render active visual style
+    this.hitRectCount = 0;
+    this.ctx.save();
     style.render(
       this.ctx,
       this.frameContext as StyleFrameContext,
       this.width,
       this.height
     );
+    this.ctx.restore();
+
+    // In transparent embedded/overlay split-view, enforce clean focal boundary at x < contentInsetLeft
+    if (isTransparent && this.currentContentInsetLeft > 2) {
+      this.ctx.clearRect(0, 0, Math.floor(this.currentContentInsetLeft), this.height);
+    }
+
+    // Refresh hover hit-test if pointer is active over canvas
+    if (this.pointerX >= 0 && this.pointerY >= 0) {
+      const hit = this.findLineAtPoint(this.pointerX, this.pointerY);
+      this.hoveredLineIndex = hit !== null ? hit : -1;
+      this.frameContext.hoveredLineIndex = this.hoveredLineIndex;
+    }
 
     this.frameContext.didSeekThisFrame = false;
     return true;
   }
 
-  // Click-to-seek hit-testing against current measured layout
+  // Click-to-seek and hover hit-testing against recorded style hit-rects and measured layout
   findLineAtPoint(x: number, y: number): number | null {
     const layout = this.frameContext.layout;
     if (!layout || layout.lines.length === 0) return null;
-    if (x < 0 || x > this.width || y < 0 || y > this.height) return null;
+    if (x < 0 || x < this.currentContentInsetLeft || x > this.width || y < 0 || y > this.height) {
+      return null;
+    }
 
+    // 1. Exact 2D bounding-box hit test against style-recorded hit rects (topmost first)
+    for (let i = this.hitRectCount - 1; i >= 0; i--) {
+      const base = i * 4;
+      const rx = this.hitRectBounds[base];
+      const ry = this.hitRectBounds[base + 1];
+      const rw = this.hitRectBounds[base + 2];
+      const rh = this.hitRectBounds[base + 3];
+      if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
+        const lineIdx = this.hitRectLineIndices[i];
+        if (lineIdx >= 0 && lineIdx < layout.lines.length) {
+          return lineIdx;
+        }
+      }
+    }
+
+    // 2. Vertical row band hit test against recorded hit rects within the focal column
+    for (let i = this.hitRectCount - 1; i >= 0; i--) {
+      const base = i * 4;
+      const ry = this.hitRectBounds[base + 1];
+      const rh = this.hitRectBounds[base + 3];
+      if (y >= ry - 4 && y <= ry + rh + 4) {
+        const lineIdx = this.hitRectLineIndices[i];
+        if (lineIdx >= 0 && lineIdx < layout.lines.length) {
+          return lineIdx;
+        }
+      }
+    }
+
+    // 3. Fallback layout-based vertical hit test (incorporating manualScrollY)
     const activeIdx = Math.max(
       0,
       Math.min(layout.lines.length - 1, this.frameContext.activeLineIndex)
     );
     const activeLine = layout.lines[activeIdx];
     const anchorY = this.height * (this.frameContext.isOverlayMode ? 0.52 : 0.46);
-    const scrollY = activeLine.y + activeLine.height * 0.5;
+    const scrollY = activeLine.y + activeLine.height * 0.5 + this.manualScrollY;
     const hitPad = 14;
 
     for (let i = 0; i < layout.lines.length; i++) {
@@ -437,6 +861,10 @@ export class LyricStageRenderer {
     if (this.disposed) return;
     this.stop();
     this.disposed = true;
+    if (this.boundFontsLoadingDone && typeof document !== 'undefined' && document.fonts) {
+      document.fonts.removeEventListener?.('loadingdone', this.boundFontsLoadingDone);
+      this.boundFontsLoadingDone = null;
+    }
     this.registry.disposeAll();
     this.webGlLayer?.dispose();
     this.measurer.invalidate();

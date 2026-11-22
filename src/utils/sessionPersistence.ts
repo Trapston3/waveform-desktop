@@ -57,6 +57,26 @@ function getStorageBackend(): { getItem(k: string): string | null; setItem(k: st
   };
 }
 
+export function sanitizeResumePositionMs(positionMs: number, durationMs = 0): number {
+  if (typeof positionMs !== 'number' || !Number.isFinite(positionMs) || positionMs <= 0) {
+    return 0;
+  }
+  const safePos = Math.max(0, Math.round(positionMs));
+  const safeDur =
+    typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs > 0
+      ? Math.round(durationMs)
+      : 0;
+
+  if (safeDur > 5000) {
+    const maxAllowed = Math.max(0, safeDur - 2001);
+    return safePos >= safeDur - 2000 ? maxAllowed : safePos;
+  }
+  if (safeDur > 0 && safePos > safeDur) {
+    return safeDur;
+  }
+  return safePos;
+}
+
 export function loadSyncSession(): PersistedPlaybackSession | null {
   try {
     const storage = getStorageBackend();
@@ -64,6 +84,13 @@ export function loadSyncSession(): PersistedPlaybackSession | null {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && parsed.version === 1 && parsed.player) {
+        const track = parsed.player.currentTrack;
+        const durationMs =
+          parsed.player.durationMs ||
+          track?.totalPlayTimeMs ||
+          (track?.durationSec ? track.durationSec * 1000 : 0) ||
+          0;
+        parsed.player.positionMs = sanitizeResumePositionMs(parsed.player.positionMs, durationMs);
         return parsed as PersistedPlaybackSession;
       }
     }

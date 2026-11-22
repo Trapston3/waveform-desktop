@@ -4,7 +4,7 @@
 // - 60fps requestAnimationFrame audio element currentTime reader & sub-frame interpolator
 // - 3-dot pulsating countdown beat dots for breaks >= 4.0s (InstrumentalDotsRow)
 // - Second-order harmonic oscillator spring ODE solver for auto-scrolling
-// - 3.5s detention auto-center snap-back to active line
+// - 3.0s detention auto-center snap-back to active line
 // - Support for backing vocals / parenthetical words and Romanization/Translation toggles
 // - Memoized LyricLineRow skipping unchanged lines for 0Hz playback re-render isolation
 
@@ -13,6 +13,9 @@ import { Languages, Globe, ArrowDownCircle } from 'lucide-react';
 import { LyricsService } from '../../services/LyricsService';
 import type { ParsedLyrics, LyricLine, LyricSyllable } from '../../services/LyricsService';
 import { usePlayerStore } from '../../state/playerStore';
+import { useSettingsStore } from '../../state/settingsStore';
+import { useThemeStore } from '../theme/Theme';
+import { getSyncButtonTheme } from '../../lyricVisualizer/rendering/syncButtonTheme';
 import { InstrumentalDotsRow } from './InstrumentalDotsRow';
 
 export interface SyllableLyricsEngineProps {
@@ -22,7 +25,9 @@ export interface SyllableLyricsEngineProps {
   onSeek: (positionMs: number) => void;
   className?: string;
   fontSize?: number;
+  alignment?: 'left' | 'center';
   isLoading?: boolean;
+  bottomOffsetClass?: string;
 }
 
 const ROW_GPU_TRANSITION =
@@ -102,8 +107,9 @@ interface LyricLineRowProps {
   isUnsynced: boolean;
   currentPositionMs: number;
   fontSize: number;
+  alignment: 'left' | 'center';
   canSeek: boolean;
-  onSeek: (ms: number) => void;
+  onSeek: (ms: number, lineIndex?: number) => void;
   showRomanization: boolean;
   showTranslation: boolean;
 }
@@ -123,18 +129,24 @@ const LyricLineRow = React.memo<LyricLineRowProps>(({
   isUnsynced,
   currentPositionMs,
   fontSize,
+  alignment,
   canSeek,
   onSeek,
   showRomanization,
   showTranslation,
 }) => {
   const isRtl = line.isRtl || LyricsService.isRtlText(line.text);
+  const isCentered = alignment === 'center';
   const [isHovered, setIsHovered] = useState(false);
 
   // Render metadata / credit footer in unsynced mode
   if (isUnsynced && /^(source|written by|lyrics licensed by|provided by):/i.test(line.text)) {
     return (
-      <p className="lyric-line text-xs text-white/40 italic pt-4 mt-6 border-t border-white/10 select-text">
+      <p
+        className={`lyric-line text-xs text-white/40 italic pt-4 mt-6 border-t border-white/10 select-text ${
+          isCentered ? 'text-center' : ''
+        }`}
+      >
         {line.text}
       </p>
     );
@@ -205,13 +217,14 @@ const LyricLineRow = React.memo<LyricLineRowProps>(({
   return (
     <div
       id={`lyric-line-${lIndex}`}
-      onClick={canSeek ? () => onSeek(line.startTimeMs) : undefined}
+      onClick={canSeek ? () => onSeek(line.startTimeMs, lIndex) : undefined}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       style={{
         direction: isRtl ? 'rtl' : 'ltr',
-        textAlign: isRtl ? 'right' : 'left',
-        fontFamily: isRtl ? "'Vazirmatn', sans-serif" : undefined,
+        textAlign: isCentered ? 'center' : isRtl ? 'right' : 'left',
+        transformOrigin: isCentered ? 'center center' : isRtl ? 'right center' : 'left center',
+        fontFamily: isRtl ? "'Vazirmatn', sans-serif" : "'SF Pro Display', var(--font-sans)",
         opacity: visuals.opacity,
         transform: visuals.transform,
         transition: ROW_GPU_TRANSITION,
@@ -222,17 +235,21 @@ const LyricLineRow = React.memo<LyricLineRowProps>(({
         isUnsynced
           ? 'font-medium text-white/85 hover:text-white'
           : isActiveLine
-          ? 'text-white font-bold'
+          ? 'text-white font-extrabold tracking-tight'
           : isPassedLine
-          ? 'text-white/80'
-          : 'text-white/80'
+          ? 'text-white font-bold tracking-tight'
+          : 'text-white font-bold tracking-tight'
       }`}
     >
       {/* Syllable-level rendering if available and not unsynced, else line-level */}
       {!isUnsynced && line.syllables && line.syllables.length > 0 ? (
         <div
           style={{ fontSize: `${fontSize}px` }}
-          className="flex flex-wrap items-baseline gap-x-1 leading-relaxed"
+          className={`flex flex-wrap items-baseline gap-x-1 leading-snug tracking-tight ${
+            isCentered ? 'justify-center' : ''
+          } ${
+            isActiveLine ? 'font-extrabold' : 'font-bold'
+          }`}
         >
           {line.syllables.map((syl: LyricSyllable, sIndex: number) => {
             const isWhitespace = /^\s+$/.test(syl.text);
@@ -279,12 +296,12 @@ const LyricLineRow = React.memo<LyricLineRowProps>(({
             fontSize: `${fontSize}px`,
             textShadow: visuals.textShadow,
           }}
-          className={`leading-relaxed ${
+          className={`leading-snug tracking-tight ${
             isUnsynced
-              ? 'text-white/90 font-medium'
+              ? 'text-white/90 font-medium leading-relaxed'
               : isActiveLine
-              ? 'text-white font-bold'
-              : 'text-[var(--color-on-surface-variant)]'
+              ? 'text-white font-extrabold'
+              : 'text-white font-bold'
           }`}
         >
           {line.text}
@@ -331,6 +348,7 @@ const LyricLineRow = React.memo<LyricLineRowProps>(({
     prev.showRomanization === next.showRomanization &&
     prev.showTranslation === next.showTranslation &&
     prev.fontSize === next.fontSize &&
+    prev.alignment === next.alignment &&
     prev.line === next.line &&
     prev.isUnsynced === next.isUnsynced &&
     prev.canSeek === next.canSeek
@@ -351,9 +369,18 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
   onSeek,
   className = '',
   fontSize = 24,
+  alignment,
   isLoading = false,
+  bottomOffsetClass = 'bottom-6',
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const settingsAlignment = useSettingsStore((s) => s.settings?.lyricsAlignment);
+  const artworkPalette = useThemeStore((s) => s.artworkPalette);
+  const effectiveAlignment: 'left' | 'center' = alignment ?? settingsAlignment ?? 'left';
+  const syncTheme = useMemo(
+    () => getSyncButtonTheme('Classic', undefined, artworkPalette),
+    [artworkPalette]
+  );
 
   const [rafPositionMs, setRafPositionMs] = useState<number>(() =>
     propCurrentPositionMs !== undefined
@@ -383,8 +410,41 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
   const lastSamplePerfMsRef = useRef<number>(0);
   const lastCommittedLineIdxRef = useRef<number>(-1);
   const lastCommittedSyllableIdxRef = useRef<number>(-1);
+  const lastCommittedPositionMsRef = useRef<number>(currentPositionMs);
   const lastStateCommitPerfRef = useRef<number>(0);
   const pendingSeekScrollRef = useRef<boolean>(false);
+
+  const readLiveAudioPosition = useCallback(() => {
+    const storeState = usePlayerStore.getState();
+    const engine = storeState.audioEngine as any;
+    const el = engine?.getActiveAudioElement?.() ?? null;
+    const hasBoundSrc = Boolean(el && (el.src || el.getAttribute?.('src')));
+
+    let measuredMs = storeState.positionMs;
+    let isPaused = storeState.playbackState !== 'PLAYING';
+
+    if (hasBoundSrc) {
+      measuredMs =
+        typeof engine.getCurrentTime === 'function'
+          ? engine.getCurrentTime() * 1000
+          : typeof engine.getCurrentPositionMs === 'function'
+          ? engine.getCurrentPositionMs()
+          : (engine?.getPlaybackOffsetMs?.() || 0) +
+            (Number.isFinite(el.currentTime) ? el.currentTime * 1000 : 0);
+      if (!engine?.isSeeking?.() && typeof el.paused === 'boolean') {
+        isPaused = el.paused;
+      }
+    } else if (engine?.isSeeking?.()) {
+      measuredMs =
+        typeof engine.getCurrentPositionMs === 'function'
+          ? engine.getCurrentPositionMs()
+          : storeState.positionMs;
+    } else if (engine && typeof engine.getCurrentPositionMs === 'function') {
+      measuredMs = engine.getCurrentPositionMs();
+    }
+
+    return { measuredMs, isPaused, storePositionMs: storeState.positionMs };
+  }, []);
 
   // Check if lyrics are unsynchronized
   const isUnsynced = useMemo(() => {
@@ -392,6 +452,50 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     if (lyricsData.type === 'UNSYNCED' || lyricsData.isSynced === false) return true;
     return lyricsData.lines.every((l) => l.startTimeMs === 0 && l.endTimeMs === 0);
   }, [lyricsData]);
+
+  const hasRomanization = useMemo(
+    () => Boolean(lyricsData?.lines?.some((l) => Boolean(l.romanization && l.romanization.trim()))),
+    [lyricsData]
+  );
+
+  const hasTranslation = useMemo(
+    () => Boolean(lyricsData?.lines?.some((l) => Boolean(l.translation && l.translation.trim()))),
+    [lyricsData]
+  );
+
+  // Reset line/syllable commit caches and user scroll state whenever track lyrics change
+  useEffect(() => {
+    if (detentionTimerRef.current) {
+      clearTimeout(detentionTimerRef.current);
+      detentionTimerRef.current = null;
+    }
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    isProgrammaticScrollRef.current = false;
+    isUserScrolledRef.current = false;
+    setIsUserScrolled(false);
+    setShowRomanization(false);
+    setShowTranslation(false);
+    lastCommittedLineIdxRef.current = -2;
+    lastCommittedSyllableIdxRef.current = -2;
+    lastCommittedPositionMsRef.current = -1;
+    lastStateCommitPerfRef.current = 0;
+    pendingSeekScrollRef.current = true;
+
+    if (propCurrentPositionMs === undefined) {
+      const { measuredMs } = readLiveAudioPosition();
+      interpolatedRef.current = measuredMs;
+      lastSampledMediaMsRef.current = measuredMs;
+      lastSamplePerfMsRef.current = typeof performance !== 'undefined' ? performance.now() : 0;
+      setRafPositionMs(Math.round(measuredMs));
+    }
+    if (containerRef.current) {
+      containerRef.current.scrollTop = 0;
+    }
+    springScrollerRef.current.reset(0);
+  }, [lyricsData, propCurrentPositionMs, readLiveAudioPosition]);
 
   // Instrumental breaks calculation (>4.0s gap between lines)
   const instrumentalBreaks = useMemo(() => {
@@ -434,6 +538,32 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     }
   }, [propCurrentPositionMs]);
 
+  // Immediately sync when paused whenever store positionMs changes (e.g. seekbar scrub while paused)
+  useEffect(() => {
+    if (!isActive || isUnsynced || propCurrentPositionMs !== undefined) {
+      return;
+    }
+
+    return usePlayerStore.subscribe((state, prevState) => {
+      if (state.positionMs === prevState.positionMs) return;
+      const { measuredMs, isPaused } = readLiveAudioPosition();
+      if (!isPaused && state.playbackState === 'PLAYING') return;
+
+      const targetMs = Math.round(
+        Math.abs(measuredMs - prevState.positionMs) > 1 ? measuredMs : state.positionMs
+      );
+      if (Math.abs(targetMs - interpolatedRef.current) > 1200) {
+        pendingSeekScrollRef.current = true;
+      }
+      interpolatedRef.current = targetMs;
+      lastSampledMediaMsRef.current = targetMs;
+      lastSamplePerfMsRef.current = typeof performance !== 'undefined' ? performance.now() : 0;
+      lastCommittedPositionMsRef.current = targetMs;
+      lastCommittedLineIdxRef.current = LyricsService.getActiveLineIndex(lyricsData, targetMs);
+      setRafPositionMs(targetMs);
+    });
+  }, [isActive, isUnsynced, lyricsData, propCurrentPositionMs, readLiveAudioPosition]);
+
   // 60fps requestAnimationFrame loop reading real HTMLAudioElement currentTime
   useEffect(() => {
     if (
@@ -449,19 +579,7 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     let timingRafId: number | null = null;
 
     const tick = (now: number) => {
-      const storeState = usePlayerStore.getState();
-      const audioEngine = storeState.audioEngine;
-      const el = audioEngine?.getActiveAudioElement?.() ?? null;
-
-      let measuredMs = storeState.positionMs;
-      let isPaused = storeState.playbackState !== 'PLAYING';
-
-      if (el && el.readyState >= 1 && Number.isFinite(el.currentTime)) {
-        measuredMs = el.currentTime * 1000;
-        isPaused = Boolean(el.paused);
-      } else if (audioEngine && typeof audioEngine.getCurrentPositionMs === 'function') {
-        measuredMs = audioEngine.getCurrentPositionMs();
-      }
+      const { measuredMs, isPaused } = readLiveAudioPosition();
 
       const jumpDelta = Math.abs(measuredMs - interpolatedRef.current);
       if (jumpDelta > 600) {
@@ -510,14 +628,22 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
 
       const lineChanged = nextLineIndex !== lastCommittedLineIdxRef.current;
       const syllableChanged = nextSyllableIndex !== lastCommittedSyllableIdxRef.current;
+      const pausedPositionChanged = isPaused && currentMs !== lastCommittedPositionMsRef.current;
       const throttledSingingUpdate =
         !isPaused &&
         (hasActiveSyllables || inInstrumentalBreak) &&
-        now - lastStateCommitPerfRef.current >= 120;
+        now - lastStateCommitPerfRef.current >= 16;
 
-      if (lineChanged || syllableChanged || throttledSingingUpdate || jumpDelta > 600) {
+      if (
+        lineChanged ||
+        syllableChanged ||
+        pausedPositionChanged ||
+        throttledSingingUpdate ||
+        jumpDelta > 600
+      ) {
         lastCommittedLineIdxRef.current = nextLineIndex;
         lastCommittedSyllableIdxRef.current = nextSyllableIndex;
+        lastCommittedPositionMsRef.current = currentMs;
         lastStateCommitPerfRef.current = now;
         setRafPositionMs(currentMs);
       }
@@ -531,7 +657,7 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
         cancelAnimationFrame(timingRafId);
       }
     };
-  }, [isActive, isUnsynced, lyricsData, propCurrentPositionMs, instrumentalBreaks]);
+  }, [isActive, isUnsynced, lyricsData, propCurrentPositionMs, instrumentalBreaks, readLiveAudioPosition]);
 
   // Active line index via binary search (bypassed if unsynced)
   const activeLineIndex = useMemo(() => {
@@ -562,19 +688,28 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     const lineHeight = lineRect.height || lineElem.clientHeight;
 
     // Apple Music centers active line around 42-45% of viewport
-    const targetScrollTop = Math.max(0, currentRelativeTop - containerHeight * 0.42 + lineHeight / 2);
+    const maxScrollTop =
+      container.scrollHeight > containerHeight
+        ? container.scrollHeight - containerHeight
+        : Number.POSITIVE_INFINITY;
+    const targetScrollTop = Math.max(
+      0,
+      Math.min(maxScrollTop, currentRelativeTop - containerHeight * 0.42 + lineHeight / 2)
+    );
 
     isProgrammaticScrollRef.current = true;
     if (programmaticScrollTimeoutRef.current) {
       clearTimeout(programmaticScrollTimeoutRef.current);
+      programmaticScrollTimeoutRef.current = null;
     }
-    programmaticScrollTimeoutRef.current = setTimeout(() => {
-      isProgrammaticScrollRef.current = false;
-    }, 650);
 
     // Fallback only if requestAnimationFrame is unavailable in headless mocks
     if (typeof container.scrollTo === 'function' && typeof requestAnimationFrame === 'undefined') {
       container.scrollTo({ top: targetScrollTop });
+      programmaticScrollTimeoutRef.current = setTimeout(() => {
+        programmaticScrollTimeoutRef.current = null;
+        isProgrammaticScrollRef.current = false;
+      }, 120);
       return;
     }
 
@@ -584,45 +719,60 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     const intervalMs = curLine && nextLine ? nextLine.startTimeMs - curLine.startTimeMs : undefined;
 
     const scroller = springScrollerRef.current;
-    scroller.reset(container.scrollTop);
+    if (rafIdRef.current === null) {
+      scroller.reset(container.scrollTop);
+    }
     scroller.setTarget(targetScrollTop, intervalMs, isSeek);
 
-    if (rafIdRef.current) {
+    if (rafIdRef.current !== null) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
 
     let lastTime = performance.now();
     const animateSpring = (now: number) => {
-      if (isUserScrolledRef.current || !containerRef.current) return;
+      if (isUserScrolledRef.current || !containerRef.current) {
+        rafIdRef.current = null;
+        return;
+      }
       const dt = Math.min((now - lastTime) / 1000, 0.05);
       lastTime = now;
 
-      const { position, isSettled } = scroller.step(dt);
-      containerRef.current.scrollTop = position;
+      isProgrammaticScrollRef.current = true;
+      const res = scroller.step(dt);
+      containerRef.current.scrollTop = res.position;
 
-      if (!isSettled) {
+      if (!res.isSettled) {
         rafIdRef.current = requestAnimationFrame(animateSpring);
       } else {
         rafIdRef.current = null;
-        isProgrammaticScrollRef.current = false;
+        if (programmaticScrollTimeoutRef.current) {
+          clearTimeout(programmaticScrollTimeoutRef.current);
+        }
+        programmaticScrollTimeoutRef.current = setTimeout(() => {
+          programmaticScrollTimeoutRef.current = null;
+          isProgrammaticScrollRef.current = false;
+        }, 120);
       }
     };
 
     rafIdRef.current = requestAnimationFrame(animateSpring);
   }, [isUnsynced, lyricsData]);
 
-  // Listen for native DOM 'scrollend' to clear programmatic scroll flag cleanly
+  // Listen for native DOM 'scrollend' (never clear mid-flight while spring rAF is running)
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const handleScrollEnd = () => {
-      isProgrammaticScrollRef.current = false;
+      if (rafIdRef.current !== null) return;
       if (programmaticScrollTimeoutRef.current) {
         clearTimeout(programmaticScrollTimeoutRef.current);
-        programmaticScrollTimeoutRef.current = null;
       }
+      programmaticScrollTimeoutRef.current = setTimeout(() => {
+        programmaticScrollTimeoutRef.current = null;
+        isProgrammaticScrollRef.current = false;
+      }, 120);
     };
 
     container.addEventListener('scrollend', handleScrollEnd);
@@ -651,6 +801,24 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     scrollToActiveLine(activeLineIndex, isSeek);
   }, [activeLineIndex, isUserScrolled, isUnsynced, scrollToActiveLine]);
 
+  // Shared 3.0s user scroll detention timer before snapping back to active line
+  const armUserScrollDetention = useCallback(() => {
+    isUserScrolledRef.current = true;
+    setIsUserScrolled(true);
+
+    if (detentionTimerRef.current) {
+      clearTimeout(detentionTimerRef.current);
+    }
+    detentionTimerRef.current = setTimeout(() => {
+      detentionTimerRef.current = null;
+      isUserScrolledRef.current = false;
+      setIsUserScrolled(false);
+      if (activeLineIndexRef.current >= 0) {
+        scrollToActiveLine(activeLineIndexRef.current);
+      }
+    }, 3000);
+  }, [scrollToActiveLine]);
+
   // Physical user gesture detection (wheel, touch)
   const handleUserGesture = () => {
     if (rafIdRef.current) {
@@ -662,44 +830,14 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
       clearTimeout(programmaticScrollTimeoutRef.current);
       programmaticScrollTimeoutRef.current = null;
     }
-    isUserScrolledRef.current = true;
-    setIsUserScrolled(true);
-
-    if (detentionTimerRef.current) {
-      clearTimeout(detentionTimerRef.current);
-    }
-    // 3.5s detention timer: auto-center snap-back when timer elapses!
-    detentionTimerRef.current = setTimeout(() => {
-      isUserScrolledRef.current = false;
-      setIsUserScrolled(false);
-      if (activeLineIndexRef.current >= 0) {
-        scrollToActiveLine(activeLineIndexRef.current);
-      }
-    }, 3500);
+    armUserScrollDetention();
   };
 
   // Scroll event handler: suppresses programmatic scroll, handles manual scrollbar drags
   const handleScroll = () => {
-    if (isProgrammaticScrollRef.current) return;
+    if (isProgrammaticScrollRef.current || rafIdRef.current !== null) return;
 
-    if (rafIdRef.current) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-    }
-    isUserScrolledRef.current = true;
-    setIsUserScrolled(true);
-
-    if (detentionTimerRef.current) {
-      clearTimeout(detentionTimerRef.current);
-    }
-    // 3.5s detention timer: auto-center snap-back when timer elapses!
-    detentionTimerRef.current = setTimeout(() => {
-      isUserScrolledRef.current = false;
-      setIsUserScrolled(false);
-      if (activeLineIndexRef.current >= 0) {
-        scrollToActiveLine(activeLineIndexRef.current);
-      }
-    }, 3500);
+    armUserScrollDetention();
   };
 
   const handleResumeSync = () => {
@@ -713,6 +851,44 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
       scrollToActiveLine(activeLineIndexRef.current);
     }
   };
+
+  const handleLineSeek = useCallback((ms: number, lineIdx?: number) => {
+    if (detentionTimerRef.current) {
+      clearTimeout(detentionTimerRef.current);
+      detentionTimerRef.current = null;
+    }
+    isUserScrolledRef.current = false;
+    setIsUserScrolled(false);
+    pendingSeekScrollRef.current = true;
+
+    let visualMs = ms;
+    if (
+      typeof lineIdx === 'number' &&
+      lyricsData?.lines?.[lineIdx] &&
+      LyricsService.getActiveLineIndex(lyricsData, ms) !== lineIdx
+    ) {
+      const clickedLine = lyricsData.lines[lineIdx];
+      if (clickedLine.endTimeMs > ms + 1) {
+        visualMs = ms + 1;
+      }
+    }
+
+    interpolatedRef.current = visualMs;
+    lastSampledMediaMsRef.current = visualMs;
+    lastSamplePerfMsRef.current = typeof performance !== 'undefined' ? performance.now() : 0;
+    if (typeof lineIdx === 'number') {
+      lastCommittedLineIdxRef.current = lineIdx;
+    }
+    lastCommittedSyllableIdxRef.current = -2;
+    lastCommittedPositionMsRef.current = visualMs;
+    if (propCurrentPositionMs === undefined) {
+      setRafPositionMs(visualMs);
+    }
+    if (typeof lineIdx === 'number' && lineIdx >= 0) {
+      scrollToActiveLine(lineIdx, true);
+    }
+    onSeek(ms);
+  }, [lyricsData, onSeek, propCurrentPositionMs, scrollToActiveLine]);
 
   if (isLoading) {
     return (
@@ -740,37 +916,41 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
   }
 
   return (
-    <div className={`relative flex flex-col h-full select-none ${className}`}>
-      {/* Top Floating Control Bar: Romanization & Translation toggles */}
-      <div className="flex items-center justify-end gap-2 px-6 py-2.5 shrink-0 z-10 border-b border-white/5 bg-transparent">
-        {/* Romanization Toggle */}
-        <button
-          onClick={() => setShowRomanization(!showRomanization)}
-          title="Toggle Romanization (Pronunciation)"
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
-            showRomanization
-              ? 'bg-white/15 text-white shadow-sm border border-white/20'
-              : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
-          }`}
-        >
-          <Languages size={13} />
-          <span>Rom</span>
-        </button>
+    <div className={`relative flex flex-col h-full overflow-x-hidden select-none ${className}`}>
+      {/* Top Floating Control Bar: Romanization & Translation toggles (shown only when available) */}
+      {(hasRomanization || hasTranslation) && (
+        <div className="flex items-center justify-end gap-2 px-6 py-2.5 shrink-0 z-10 border-b border-white/5 bg-transparent">
+          {hasRomanization && (
+            <button
+              onClick={() => setShowRomanization(!showRomanization)}
+              title="Toggle Romanization (Pronunciation)"
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                showRomanization
+                  ? 'bg-white/15 text-white shadow-sm border border-white/20'
+                  : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
+              }`}
+            >
+              <Languages size={13} />
+              <span>Rom</span>
+            </button>
+          )}
 
-        {/* Translation Toggle */}
-        <button
-          onClick={() => setShowTranslation(!showTranslation)}
-          title="Toggle English Translation"
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
-            showTranslation
-              ? 'bg-white/15 text-[var(--color-accent)] shadow-sm border border-white/20'
-              : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
-          }`}
-        >
-          <Globe size={13} />
-          <span>Trans</span>
-        </button>
-      </div>
+          {hasTranslation && (
+            <button
+              onClick={() => setShowTranslation(!showTranslation)}
+              title="Toggle English Translation"
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                showTranslation
+                  ? 'bg-white/15 text-[var(--color-accent)] shadow-sm border border-white/20'
+                  : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
+              }`}
+            >
+              <Globe size={13} />
+              <span>Trans</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Main Lyrics Scroll Area (driven exclusively by SpringScroller rAF) */}
       <div
@@ -778,7 +958,7 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
         onScroll={handleScroll}
         onWheel={handleUserGesture}
         onTouchMove={handleUserGesture}
-        className="relative flex-1 overflow-y-auto px-6 py-24 space-y-7"
+        className="no-scrollbar relative flex-1 overflow-y-auto overflow-x-hidden px-6 py-24 space-y-7"
       >
         {/* Intro instrumental break */}
         {instrumentalBreaks.some((b) => b.afterIndex === -1) && (
@@ -786,15 +966,16 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
             startTimeMs={0}
             endTimeMs={lyricsData.lines[0].startTimeMs}
             currentPositionMs={currentPositionMs}
-            onSeek={onSeek}
+            onSeek={handleLineSeek}
             fontSize={fontSize}
+            className={effectiveAlignment === 'center' ? 'justify-center' : ''}
           />
         )}
 
         {lyricsData.lines.map((line: LyricLine, lIndex: number) => {
           const isActiveLine = !isUnsynced && lIndex === activeLineIndex;
           const isPassedLine = !isUnsynced && lIndex < activeLineIndex;
-          const canSeek = !isUnsynced && line.startTimeMs > 0;
+          const canSeek = !isUnsynced && line.startTimeMs >= 0;
           const clampedDistance = !isUnsynced && activeLineIndex >= 0
             ? Math.min(3, Math.abs(lIndex - activeLineIndex))
             : 1;
@@ -813,10 +994,11 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
                 isUnsynced={isUnsynced}
                 currentPositionMs={currentPositionMs}
                 fontSize={fontSize}
+                alignment={effectiveAlignment}
                 canSeek={canSeek}
-                onSeek={onSeek}
-                showRomanization={showRomanization}
-                showTranslation={showTranslation}
+                onSeek={handleLineSeek}
+                showRomanization={hasRomanization && showRomanization}
+                showTranslation={hasTranslation && showTranslation}
               />
 
               {/* Mid-song instrumental break */}
@@ -825,8 +1007,9 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
                   startTimeMs={breakAfter.startTimeMs}
                   endTimeMs={breakAfter.endTimeMs}
                   currentPositionMs={currentPositionMs}
-                  onSeek={onSeek}
+                  onSeek={handleLineSeek}
                   fontSize={fontSize}
+                  className={effectiveAlignment === 'center' ? 'justify-center' : ''}
                 />
               )}
             </React.Fragment>
@@ -835,7 +1018,11 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
 
         {/* Source attribution footer */}
         {lyricsData.sourceAttribution && (
-          <p className="text-[11px] text-white/35 italic pt-6 border-t border-white/5 select-text">
+          <p
+            className={`text-[11px] text-white/35 italic pt-6 border-t border-white/5 select-text ${
+              effectiveAlignment === 'center' ? 'text-center' : ''
+            }`}
+          >
             {lyricsData.sourceAttribution}
           </p>
         )}
@@ -843,12 +1030,23 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
 
       {/* Floating "Sync with playback" Pill when user has manually scrolled */}
       {isUserScrolled && !isUnsynced && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 animate-in fade-in zoom-in-95">
+        <div className={`absolute ${bottomOffsetClass} left-1/2 -translate-x-1/2 z-20 animate-in fade-in zoom-in-95 duration-200`}>
           <button
+            type="button"
             onClick={handleResumeSync}
-            className="flex items-center gap-2 px-4 py-2 rounded-full bg-[var(--color-accent)] hover:brightness-110 text-white text-xs font-semibold shadow-xl shadow-red-500/30 transition-all cursor-pointer"
+            style={syncTheme.style}
+            className="flex items-center gap-2 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
           >
-            <ArrowDownCircle size={15} />
+            {syncTheme.showDot && (
+              <span
+                style={{
+                  backgroundColor: syncTheme.dotColor,
+                  boxShadow: `0 0 10px ${syncTheme.dotColor}`,
+                }}
+                className="w-2 h-2 rounded-full shrink-0"
+              />
+            )}
+            <ArrowDownCircle size={15} style={{ color: syncTheme.accentColor }} />
             <span>Sync with playback</span>
           </button>
         </div>

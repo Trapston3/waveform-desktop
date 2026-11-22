@@ -49,49 +49,52 @@ export const DesktopTitleBar: React.FC = () => {
   const handleMinimize = () => window.electronAPI?.minimize();
   const handleMaximize = () => window.electronAPI?.maximize();
   const handleClose = () => window.electronAPI?.close();
+  const isMac = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin';
 
   return (
     <header className="relative app-drag-region flex items-center justify-between h-10 md:h-12 pl-3 pr-0 border-b border-[var(--glass-border-subtle)] bg-[rgba(242,242,247,0.85)] dark:bg-[rgba(16,16,20,0.75)] backdrop-blur-xl text-[var(--color-primary)] select-none z-[60]">
-      {/* 1. Left Cluster: macOS Traffic Lights & Navigation History */}
+      {/* 1. Left Cluster: macOS Traffic Lights (darwin only) & Navigation History */}
       <div className="flex items-center gap-3">
         {/* macOS Traffic Lights (12px circular with hover micro-glyphs) */}
-        <div className="app-no-drag mac-traffic-group flex items-center gap-2 pl-0.5 pr-1">
-          {/* Close (Red) */}
-          <button
-            onClick={handleClose}
-            title="Close Window"
-            aria-label="Close"
-            className="mac-traffic-btn bg-[#FF5F56] border border-[#E0443E] shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
-          >
-            <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke="#4C0000" strokeWidth="1.2">
-              <path d="M1 1L5 5M5 1L1 5" />
-            </svg>
-          </button>
+        {isMac && (
+          <div className="app-no-drag mac-traffic-group flex items-center gap-2 pl-0.5 pr-1">
+            {/* Close (Red) */}
+            <button
+              onClick={handleClose}
+              title="Close Window"
+              aria-label="Close"
+              className="mac-traffic-btn bg-[#FF5F56] border border-[#E0443E] shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
+            >
+              <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke="#4C0000" strokeWidth="1.2">
+                <path d="M1 1L5 5M5 1L1 5" />
+              </svg>
+            </button>
 
-          {/* Minimize (Yellow) */}
-          <button
-            onClick={handleMinimize}
-            title="Minimize Window"
-            aria-label="Minimize"
-            className="mac-traffic-btn bg-[#FFBD2E] border border-[#DEA123] shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
-          >
-            <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke="#664600" strokeWidth="1.2">
-              <path d="M0.5 3H5.5" />
-            </svg>
-          </button>
+            {/* Minimize (Yellow) */}
+            <button
+              onClick={handleMinimize}
+              title="Minimize Window"
+              aria-label="Minimize"
+              className="mac-traffic-btn bg-[#FFBD2E] border border-[#DEA123] shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
+            >
+              <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke="#664600" strokeWidth="1.2">
+                <path d="M0.5 3H5.5" />
+              </svg>
+            </button>
 
-          {/* Maximize / Zoom (Green) */}
-          <button
-            onClick={handleMaximize}
-            title={isMaximized ? 'Restore' : 'Zoom'}
-            aria-label="Zoom"
-            className="mac-traffic-btn bg-[#27C93F] border border-[#1AAB29] shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
-          >
-            <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke="#004D11" strokeWidth="1.2">
-              <path d="M1 3H5M3 1V5" />
-            </svg>
-          </button>
-        </div>
+            {/* Maximize / Zoom (Green) */}
+            <button
+              onClick={handleMaximize}
+              title={isMaximized ? 'Restore' : 'Zoom'}
+              aria-label="Zoom"
+              className="mac-traffic-btn bg-[#27C93F] border border-[#1AAB29] shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
+            >
+              <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke="#004D11" strokeWidth="1.2">
+                <path d="M1 3H5M3 1V5" />
+              </svg>
+            </button>
+          </div>
+        )}
 
         {/* 28x28px History Hitboxes */}
         <div className="app-no-drag flex items-center gap-1 ml-1.5">

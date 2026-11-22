@@ -1,4 +1,4 @@
-// Registry for all 13 LyricVisualizer visual styles.
+// Registry for all 12 consolidated LyricVisualizer visual styles.
 
 import type { VisualStyleId } from '../core/models';
 import type { ILyricVisualStyle } from './styleInterface';
@@ -7,32 +7,37 @@ import {
   BrutalistZineStyle,
   CRTScanlineStyle,
   GenerativeParticleInkStyle,
-  HoloVaporwaveStyle,
+  IosTextingMotionStyle,
   KaraokeStageStyle,
   LiquidMetalStyle,
   MinimalSwissStyle,
-  NeonKineticStyle,
   Spatial3DDepthStyle,
-  SpectrumRibbonStyle,
   StarfieldShip3DStyle,
   TypewriterEditorialStyle,
 } from './styles';
+import { CodeEditorKineticStyle } from './styles/codeEditorKinetic';
 
 export const ALL_VISUAL_STYLE_IDS: readonly VisualStyleId[] = [
   'AppleMusicFlow',
-  'NeonKinetic',
   'TypewriterEditorial',
   'MinimalSwiss',
   'LiquidMetal',
-  'HoloVaporwave',
   'KaraokeStage',
   'BrutalistZine',
   'GenerativeParticleInk',
-  'SpectrumRibbon',
   'Spatial3DDepth',
   'CRTScanline',
   'StarfieldShip3D',
+  'IosTextingMotion',
+  'CodeEditorKinetic',
 ] as const;
+
+export function mapLegacyStyleId(id: VisualStyleId | string): VisualStyleId {
+  if (id === 'NeonKinetic') return 'AppleMusicFlow';
+  if (id === 'HoloVaporwave') return 'LiquidMetal';
+  if (id === 'SpectrumRibbon') return 'GenerativeParticleInk';
+  return id as VisualStyleId;
+}
 
 export class StyleRegistry {
   private readonly styles: Map<VisualStyleId, ILyricVisualStyle>;
@@ -41,18 +46,17 @@ export class StyleRegistry {
   constructor() {
     const instances: ILyricVisualStyle[] = [
       new AppleMusicFlowStyle(),
-      new NeonKineticStyle(),
       new TypewriterEditorialStyle(),
       new MinimalSwissStyle(),
       new LiquidMetalStyle(),
-      new HoloVaporwaveStyle(),
       new KaraokeStageStyle(),
       new BrutalistZineStyle(),
       new GenerativeParticleInkStyle(),
-      new SpectrumRibbonStyle(),
       new Spatial3DDepthStyle(),
       new CRTScanlineStyle(),
       new StarfieldShip3DStyle(),
+      new IosTextingMotionStyle(),
+      new CodeEditorKineticStyle(),
     ];
 
     this.styles = new Map<VisualStyleId, ILyricVisualStyle>();
@@ -66,8 +70,9 @@ export class StyleRegistry {
     return this.styles.has(id as VisualStyleId);
   }
 
-  get(id: VisualStyleId): ILyricVisualStyle {
-    return this.styles.get(id) ?? this.styles.get('AppleMusicFlow')!;
+  get(id: VisualStyleId | string): ILyricVisualStyle {
+    const mapped = mapLegacyStyleId(id);
+    return this.styles.get(mapped) ?? this.styles.get('AppleMusicFlow')!;
   }
 
   listIds(): readonly VisualStyleId[] {

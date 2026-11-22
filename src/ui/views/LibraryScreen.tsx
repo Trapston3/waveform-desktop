@@ -29,11 +29,18 @@ import {
   ChevronRight,
   Music2,
 } from 'lucide-react';
-import { useLibraryStore } from '../../state/libraryStore';
+import {
+  useLibraryStore,
+  selectUnifiedSongs,
+  selectUnifiedAlbums,
+  selectUnifiedArtists,
+  DEFAULT_LOCAL_ALBUM_ART_SVG,
+  type UnifiedAlbum,
+} from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
-import { AlbumCoverFlow } from '../player/AlbumCoverFlow';
+import { AlbumCoverFlow, type CoverFlowAlbum } from '../player/AlbumCoverFlow';
 import { PlayerPlayIcon } from '../common/WaveFormIcons';
 import { DesktopTrackTable } from '../components/DesktopTrackTable';
 import { LocalMediaView } from './LocalMediaView';
@@ -77,6 +84,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
   // Filters & Subview States
   const [songFilter, setSongFilter] = useState('');
   const [artistFilter, setArtistFilter] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'local' | 'online'>('all');
   const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null);
 
   // Spotify Playlists state
@@ -152,6 +160,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
   const {
     playlists,
     favorites,
+    localSongs = [],
     listeningHistory,
     monthlyStats,
     deletePlaylist,
@@ -181,8 +190,35 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
     'History',
   ];
 
-  // Filtered saved songs for Songs subtab
+  // Unified library songs (favorites + scanned local tracks)
+  const unifiedSongs = useMemo(
+    () => selectUnifiedSongs(favorites, localSongs),
+    [favorites, localSongs]
+  );
+
+  // Source-filtered unified songs (All | Local | Online)
+  const sourceFilteredSongs = useMemo(() => {
+    if (sourceFilter === 'all') return unifiedSongs;
+    return unifiedSongs.filter((s) => {
+      const isLoc = Boolean(s.source === 'local' || s.isLocal || s.playbackSourceType === 'LOCAL');
+      return sourceFilter === 'local' ? isLoc : !isLoc;
+    });
+  }, [unifiedSongs, sourceFilter]);
+
+  // Filtered unified songs for Songs subtab
   const filteredSongs = useMemo(() => {
+    if (!songFilter.trim()) return sourceFilteredSongs;
+    const q = songFilter.toLowerCase().trim();
+    return sourceFilteredSongs.filter(
+      (s) =>
+        s.title.toLowerCase().includes(q) ||
+        s.artist.toLowerCase().includes(q) ||
+        (s.albumName && s.albumName.toLowerCase().includes(q))
+    );
+  }, [sourceFilteredSongs, songFilter]);
+
+  // Filtered favorited songs for dedicated Favorites subtab
+  const filteredFavoriteSongs = useMemo(() => {
     if (!songFilter.trim()) return favorites;
     const q = songFilter.toLowerCase().trim();
     return favorites.filter(
@@ -193,91 +229,65 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
     );
   }, [favorites, songFilter]);
 
-  // Derived albums from favorite songs
-  const derivedAlbums = useMemo(() => {
-    const map = new Map<
-      string,
-      { id: string; title: string; artist: string; coverUrl: string; year?: string; dateAdded?: number }
-    >();
-    for (const song of favorites) {
-      const albumTitle = song.albumName || song.album || 'Single Collection';
-      if (!map.has(albumTitle)) {
-        map.set(albumTitle, {
-          id: song.albumId || `alb_${albumTitle}`,
-          title: albumTitle,
-          artist: song.artist,
-          year: song.year || '2026',
-          coverUrl:
-            song.thumbnailUrl ||
-            song.artworkUrl ||
-            'https://i.ytimg.com/vi/5dNP-a-XXx0/hqdefault.jpg',
-          dateAdded: song.lastPlayedTimeMs || Date.now(),
-        });
-      }
-    }
-    const list = Array.from(map.values());
-    if (list.length === 0) {
+  // Derived unified albums (favorites + local)
+  const derivedAlbums: UnifiedAlbum[] = useMemo(() => {
+    const list = selectUnifiedAlbums(sourceFilteredSongs);
+    if (list.length === 0 && unifiedSongs.length === 0 && sourceFilter === 'all') {
       return [
         {
           id: 'demo_1',
           title: 'The New Abnormal',
           artist: 'The Strokes',
+          albumArtist: 'The Strokes',
           year: '2020',
           coverUrl: 'https://i.ytimg.com/vi/5dNP-a-XXx0/hqdefault.jpg',
           dateAdded: Date.now(),
+          source: 'online',
+          isLocal: false,
+          songs: [],
         },
         {
           id: 'demo_2',
           title: 'Redline',
           artist: 'Lazerhawk',
+          albumArtist: 'Lazerhawk',
           year: '2010',
           coverUrl: 'https://i.ytimg.com/vi/DCas2ZWGwl4/hqdefault.jpg',
           dateAdded: Date.now() - 1000000,
+          source: 'online',
+          isLocal: false,
+          songs: [],
         },
       ];
     }
     return list;
-  }, [favorites]);
+  }, [sourceFilteredSongs, unifiedSongs.length, sourceFilter]);
 
-  // Derived artists from favorite songs
+  // Derived unified artists (favorites + local)
   const derivedArtists = useMemo(() => {
-    const map = new Map<
-      string,
-      { id: string; name: string; trackCount: number; avatarUrl?: string }
-    >();
-    for (const song of favorites) {
-      const artistName = song.artist || 'Unknown Artist';
-      const existing = map.get(artistName);
-      if (existing) {
-        existing.trackCount++;
-      } else {
-        map.set(artistName, {
-          id: song.artistIds?.[0] || song.artistId || `art_${artistName}`,
-          name: artistName,
-          trackCount: 1,
-          avatarUrl: song.thumbnailUrl || song.artworkUrl,
-        });
-      }
-    }
-    const list = Array.from(map.values());
-    if (list.length === 0) {
+    const list = selectUnifiedArtists(sourceFilteredSongs);
+    if (list.length === 0 && unifiedSongs.length === 0 && sourceFilter === 'all') {
       return [
         {
           id: 'art_the_strokes',
           name: 'The Strokes',
           trackCount: 3,
           avatarUrl: 'https://i.ytimg.com/vi/5dNP-a-XXx0/hqdefault.jpg',
+          source: 'online' as const,
+          isLocal: false,
         },
         {
           id: 'art_lazerhawk',
           name: 'Lazerhawk',
           trackCount: 2,
           avatarUrl: 'https://i.ytimg.com/vi/DCas2ZWGwl4/hqdefault.jpg',
+          source: 'online' as const,
+          isLocal: false,
         },
       ];
     }
     return list;
-  }, [favorites]);
+  }, [sourceFilteredSongs, unifiedSongs.length, sourceFilter]);
 
   // Filtered artists for Two-Pane master list
   const filteredArtists = useMemo(() => {
@@ -286,9 +296,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
     return derivedArtists.filter((a) => a.name.toLowerCase().includes(q));
   }, [derivedArtists, artistFilter]);
 
-  // Set default selected artist if none selected
+  // Set default selected artist if none selected or filter changed
   useEffect(() => {
-    if (!selectedArtistId && filteredArtists.length > 0) {
+    if (filteredArtists.length > 0 && !filteredArtists.some((a) => a.id === selectedArtistId)) {
       setSelectedArtistId(filteredArtists[0].id);
     }
   }, [selectedArtistId, filteredArtists]);
@@ -305,32 +315,38 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
 
   const currentArtistSongs = useMemo(() => {
     if (!currentArtist) return [];
-    const matched = favorites.filter(
+    const normName = currentArtist.name.trim().toLowerCase();
+    const matched = sourceFilteredSongs.filter(
       (s) =>
-        s.artist === currentArtist.name ||
+        (s.artist || '').trim().toLowerCase() === normName ||
         s.artistId === currentArtist.id ||
         (s.artistIds && s.artistIds.includes(currentArtist.id))
     );
-    return matched.length > 0
-      ? matched
-      : [
-          {
-            videoId: '5dNP-a-XXx0',
-            title: 'Ode to the Mets',
-            artist: currentArtist.name,
-            liked: true,
-            totalPlayTimeMs: 351000,
-            playCount: 1,
-            artistIds: [currentArtist.id],
-            artists: [{ id: currentArtist.id, name: currentArtist.name }],
-            isExplicit: false,
-          },
-        ];
-  }, [favorites, currentArtist]);
+    if (matched.length > 0) return matched;
+    if (unifiedSongs.length > 0) return [];
+    return [
+      {
+        videoId: '5dNP-a-XXx0',
+        title: 'Ode to the Mets',
+        artist: currentArtist.name,
+        liked: true,
+        totalPlayTimeMs: 351000,
+        playCount: 1,
+        artistIds: [currentArtist.id],
+        artists: [{ id: currentArtist.id, name: currentArtist.name }],
+        isExplicit: false,
+      },
+    ];
+  }, [sourceFilteredSongs, unifiedSongs.length, currentArtist]);
 
   const currentArtistAlbums = useMemo(() => {
     if (!currentArtist) return [];
-    return derivedAlbums.filter((a) => a.artist === currentArtist.name);
+    const normName = currentArtist.name.trim().toLowerCase();
+    return derivedAlbums.filter(
+      (a) =>
+        a.artist.trim().toLowerCase() === normName ||
+        a.albumArtist.trim().toLowerCase() === normName
+    );
   }, [derivedAlbums, currentArtist]);
 
   // Recently Added items grouped chronologically
@@ -363,6 +379,45 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
     loadTrack(song, 'active', true);
   };
 
+  const handlePlayOrOpenAlbum = (alb: UnifiedAlbum | CoverFlowAlbum, forcePlay = false) => {
+    const albumSongs = Array.isArray(alb.songs) ? alb.songs : [];
+    const isLocalAlb = Boolean(alb.isLocal || alb.source === 'local' || alb.id.startsWith('local_alb_'));
+    if (albumSongs.length > 0 && (forcePlay || isLocalAlb)) {
+      setContextQueue(albumSongs, 0, {
+        id: alb.id,
+        browseId: alb.id,
+        title: alb.title,
+        type: 'album',
+        currentIndex: 0,
+      });
+      loadTrack(albumSongs[0], 'active', true);
+      return;
+    }
+    navigateToRelease(alb.id, 'album');
+  };
+
+  const renderSourceFilterPill = () => (
+    <div className="flex items-center gap-1 p-1 rounded-full bg-white/[0.06] border border-white/10">
+      {(['all', 'local', 'online'] as const).map((mode) => {
+        const active = sourceFilter === mode;
+        const label = mode === 'all' ? 'All' : mode === 'local' ? 'Local' : 'Online';
+        return (
+          <button
+            key={mode}
+            onClick={() => setSourceFilter(mode)}
+            className={`spring-press px-3 py-1 rounded-full text-[11px] font-semibold transition-all cursor-pointer ${
+              active
+                ? 'bg-white/15 text-white shadow-sm'
+                : 'text-[#A1A1A6] hover:text-white'
+            }`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="space-y-6 max-w-6xl mx-auto pb-12 select-none animate-in fade-in duration-200">
       {/* Header & Sub-Tabs Navigation */}
@@ -372,7 +427,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
             Your Library
           </h1>
           <p className="text-xs text-[#A1A1A6] pt-1">
-            {favorites.length} saved tracks • {derivedAlbums.length} albums • {derivedArtists.length} artists
+            {unifiedSongs.length} tracks{localSongs.length > 0 ? ` (${localSongs.length} local)` : ''} • {derivedAlbums.length} albums • {derivedArtists.length} artists
           </p>
         </div>
 
@@ -406,67 +461,83 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
       {/* ========================================================================= */}
       {activeTab === 'Recently Added' && (
         <div className="space-y-6">
-          {recentlyAddedGroups.map((group, gIdx) => (
-            <section key={gIdx} className="space-y-3.5">
-              <h2 className="text-xs font-bold tracking-wider text-[#8E8E93] uppercase">
-                {group.name} ({group.items.length})
-              </h2>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-bold uppercase tracking-wider text-[#8E8E93]">
+              {derivedAlbums.length} Releases in Library
+            </span>
+            {renderSourceFilterPill()}
+          </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                {group.items.map((alb) => (
-                  <div
-                    key={alb.id}
-                    onClick={() => navigateToRelease(alb.id, 'album')}
-                    className="acrylic-tile group p-3 rounded-2xl transition-all cursor-pointer"
-                  >
-                    <div className="artwork-lockup relative aspect-square rounded-xl overflow-hidden mb-2.5 bg-neutral-900">
-                      <img
-                        src={alb.coverUrl}
-                        alt={alb.title}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                      />
-                      {/* macOS Dual-Hover Overlay */}
-                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-end justify-between p-2 transition-opacity">
-                        <div
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            navigateToRelease(alb.id, 'album');
+          {recentlyAddedGroups.length === 0 ? (
+            <div className="acrylic-tile rounded-3xl py-16 text-center text-xs text-[#8E8E93]">
+              No albums match the current source filter.
+            </div>
+          ) : (
+            recentlyAddedGroups.map((group, gIdx) => (
+              <section key={gIdx} className="space-y-3.5">
+                <h2 className="text-xs font-bold tracking-wider text-[#8E8E93] uppercase">
+                  {group.name} ({group.items.length})
+                </h2>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                  {group.items.map((alb) => (
+                    <div
+                      key={alb.id}
+                      onClick={() => handlePlayOrOpenAlbum(alb)}
+                      className="acrylic-tile group p-3 rounded-2xl transition-all cursor-pointer"
+                    >
+                      <div className="artwork-lockup relative aspect-square rounded-xl overflow-hidden mb-2.5 bg-neutral-900">
+                        <img
+                          src={alb.coverUrl || DEFAULT_LOCAL_ALBUM_ART_SVG}
+                          alt={alb.title}
+                          onError={(e) => {
+                            (e.currentTarget as HTMLImageElement).src = DEFAULT_LOCAL_ALBUM_ART_SVG;
                           }}
-                          className="w-8 h-8 rounded-full bg-white text-black shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-transform cursor-pointer"
-                          title="Play"
-                        >
-                          <PlayerPlayIcon size={14} className="ml-0.5 text-black" />
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        />
+                        {/* macOS Dual-Hover Overlay */}
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-end justify-between p-2 transition-opacity">
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePlayOrOpenAlbum(alb, true);
+                            }}
+                            className="w-8 h-8 rounded-full bg-white text-black shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-transform cursor-pointer"
+                            title="Play"
+                          >
+                            <PlayerPlayIcon size={14} className="ml-0.5 text-black" />
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (onOpenContextMenu) {
+                                onOpenContextMenu(e, (alb.songs?.[0] || {
+                                  videoId: alb.id,
+                                  title: alb.title,
+                                  artist: alb.artist,
+                                  liked: true,
+                                }) as any);
+                              }
+                            }}
+                            className="w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white/90 border border-white/20 flex items-center justify-center transition-all cursor-pointer"
+                            title="More Options"
+                          >
+                            <MoreHorizontal size={13} />
+                          </button>
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (onOpenContextMenu) {
-                              onOpenContextMenu(e, {
-                                videoId: alb.id,
-                                title: alb.title,
-                                artist: alb.artist,
-                                liked: true,
-                              } as any);
-                            }
-                          }}
-                          className="w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white/90 border border-white/20 flex items-center justify-center transition-all cursor-pointer"
-                          title="More Options"
-                        >
-                          <MoreHorizontal size={13} />
-                        </button>
+                      </div>
+                      <div className="text-xs font-bold truncate text-white group-hover:text-[#FA2D48] transition-colors">
+                        {alb.title}
+                      </div>
+                      <div className="text-[11px] text-[#A1A1A6] truncate">
+                        {alb.artist}
                       </div>
                     </div>
-                    <div className="text-xs font-bold truncate text-white group-hover:text-[#FA2D48] transition-colors">
-                      {alb.title}
-                    </div>
-                    <div className="text-[11px] text-[#A1A1A6] truncate">
-                      {alb.artist}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          ))}
+                  ))}
+                </div>
+              </section>
+            ))
+          )}
         </div>
       )}
 
@@ -474,139 +545,157 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
       {/* SUB-VIEW 2: ARTISTS (Two-Pane Master-Detail Browser)                      */}
       {/* ========================================================================= */}
       {activeTab === 'Artists' && (
-        <div className="flex flex-col md:flex-row gap-6 min-h-[500px]">
-          {/* Master Column (Left): Alphabetized Artist List */}
-          <div className="w-full md:w-64 lg:w-72 border-r border-white/10 shrink-0 pr-4 flex flex-col space-y-3">
-            <div className="relative">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8E8E93]" />
-              <input
-                type="text"
-                placeholder="Filter artists..."
-                value={artistFilter}
-                onChange={(e) => setArtistFilter(e.target.value)}
-                className="w-full h-8 pl-8 pr-3 rounded-full bg-white/[0.06] hover:bg-white/[0.09] focus:bg-white/[0.12] border border-white/10 focus:border-white/25 text-xs text-white placeholder-[#8E8E93] outline-none transition-all"
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-1 max-h-[calc(100vh-280px)] scrollbar-none">
-              {filteredArtists.map((artist) => {
-                const isSelected = artist.id === currentArtist?.id;
-                return (
-                  <button
-                    key={artist.id}
-                    onClick={() => setSelectedArtistId(artist.id)}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
-                      isSelected
-                        ? 'bg-white/12 border border-white/20 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25)]'
-                        : 'text-[#A1A1A6] hover:text-white hover:bg-white/[0.06]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-7 h-7 rounded-full bg-neutral-800 overflow-hidden shrink-0 flex items-center justify-center">
-                        <Users2 size={14} className="text-neutral-400" />
-                      </div>
-                      <span className={`text-xs truncate ${isSelected ? 'font-bold text-white' : 'font-medium'}`}>
-                        {artist.name}
-                      </span>
-                    </div>
-                    <span className="text-[10px] font-mono opacity-60">
-                      {artist.trackCount}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-bold uppercase tracking-wider text-[#8E8E93]">
+              {filteredArtists.length} Artists in Library
+            </span>
+            {renderSourceFilterPill()}
           </div>
 
-          {/* Detail Column (Right): Selected Artist Discography */}
-          <div className="flex-1 min-w-0 overflow-y-auto space-y-6 pl-2">
-            {currentArtist ? (
-              <>
-                {/* Artist Header Banner */}
-                <div className="acrylic-tile p-5 rounded-3xl flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-4 min-w-0">
-                    <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-neutral-800 to-neutral-700 flex items-center justify-center text-white shrink-0 shadow-lg">
-                      <Users2 size={28} />
-                    </div>
-                    <div className="min-w-0">
-                      <h2 className="text-2xl font-black text-white truncate">
-                        {currentArtist.name}
-                      </h2>
-                      <p className="text-xs text-[#A1A1A6] pt-0.5">
-                        {currentArtistSongs.length} saved songs • {currentArtistAlbums.length} albums in your library
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => {
-                        if (currentArtistSongs.length > 0) {
-                          handlePlaySong(currentArtistSongs[0], currentArtistSongs);
-                        }
-                      }}
-                      className="spring-press flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#FA2D48] hover:bg-[#e0263f] text-white text-xs font-bold cursor-pointer shadow-md shadow-[#FA2D48]/20 transition-all"
-                    >
-                      <Play size={13} className="fill-current" />
-                      <span>Play All</span>
-                    </button>
-                    <button
-                      onClick={() => navigateToArtist(currentArtist.id)}
-                      className="spring-press flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-white/[0.06] hover:bg-white/[0.10] border border-white/10 text-xs font-semibold text-white cursor-pointer transition-colors"
-                    >
-                      <span>Full Profile</span>
-                      <ChevronRight size={13} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Top Songs by Artist rendered with DesktopTrackTable */}
-                {currentArtistSongs.length > 0 && (
-                  <section className="space-y-3">
-                    <h3 className="text-sm font-bold tracking-tight text-white">Songs</h3>
-                    <div className="acrylic-tile p-4 rounded-3xl overflow-hidden tracklist-row">
-                      <DesktopTrackTable
-                        songs={currentArtistSongs}
-                        showCover={false}
-                        showArtist={false}
-                        showAlbum={true}
-                        showTrackNumber={true}
-                        density="standard"
-                        onOpenContextMenu={onOpenContextMenu}
-                      />
-                    </div>
-                  </section>
-                )}
-
-                {/* Albums by Artist in Library */}
-                {currentArtistAlbums.length > 0 && (
-                  <section className="space-y-3">
-                    <h3 className="text-sm font-bold tracking-tight text-white">Albums</h3>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                      {currentArtistAlbums.map((alb) => (
-                        <div
-                          key={alb.id}
-                          onClick={() => navigateToRelease(alb.id, 'album')}
-                          className="acrylic-tile group p-3 rounded-2xl cursor-pointer"
-                        >
-                          <div className="artwork-lockup relative aspect-square rounded-xl overflow-hidden mb-2 bg-neutral-900">
-                            <img src={alb.coverUrl} alt={alb.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
-                          </div>
-                          <div className="text-xs font-bold truncate text-white group-hover:text-[#FA2D48] transition-colors">
-                            {alb.title}
-                          </div>
-                          <div className="text-[11px] text-[#A1A1A6]">{alb.year}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
-              </>
-            ) : (
-              <div className="acrylic-tile rounded-3xl py-16 text-center text-xs text-[#8E8E93]">
-                Select an artist from the list
+          <div className="flex flex-col md:flex-row gap-6 min-h-[500px]">
+            {/* Master Column (Left): Alphabetized Artist List */}
+            <div className="w-full md:w-64 lg:w-72 border-r border-white/10 shrink-0 pr-4 flex flex-col space-y-3">
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8E8E93]" />
+                <input
+                  type="text"
+                  placeholder="Filter artists..."
+                  value={artistFilter}
+                  onChange={(e) => setArtistFilter(e.target.value)}
+                  className="w-full h-8 pl-8 pr-3 rounded-full bg-white/[0.06] hover:bg-white/[0.09] focus:bg-white/[0.12] border border-white/10 focus:border-white/25 text-xs text-white placeholder-[#8E8E93] outline-none transition-all"
+                />
               </div>
-            )}
+
+              <div className="flex-1 overflow-y-auto space-y-1 max-h-[calc(100vh-280px)] scrollbar-none">
+                {filteredArtists.map((artist) => {
+                  const isSelected = artist.id === currentArtist?.id;
+                  return (
+                    <button
+                      key={artist.id}
+                      onClick={() => setSelectedArtistId(artist.id)}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-white/12 border border-white/20 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25)]'
+                          : 'text-[#A1A1A6] hover:text-white hover:bg-white/[0.06]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded-full bg-neutral-800 overflow-hidden shrink-0 flex items-center justify-center">
+                          <Users2 size={14} className="text-neutral-400" />
+                        </div>
+                        <span className={`text-xs truncate ${isSelected ? 'font-bold text-white' : 'font-medium'}`}>
+                          {artist.name}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono opacity-60">
+                        {artist.trackCount}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Detail Column (Right): Selected Artist Discography */}
+            <div className="flex-1 min-w-0 overflow-y-auto space-y-6 pl-2">
+              {currentArtist ? (
+                <>
+                  {/* Artist Header Banner */}
+                  <div className="acrylic-tile p-5 rounded-3xl flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-neutral-800 to-neutral-700 flex items-center justify-center text-white shrink-0 shadow-lg">
+                        <Users2 size={28} />
+                      </div>
+                      <div className="min-w-0">
+                        <h2 className="text-2xl font-black text-white truncate">
+                          {currentArtist.name}
+                        </h2>
+                        <p className="text-xs text-[#A1A1A6] pt-0.5">
+                          {currentArtistSongs.length} songs • {currentArtistAlbums.length} albums in your library
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          if (currentArtistSongs.length > 0) {
+                            handlePlaySong(currentArtistSongs[0], currentArtistSongs);
+                          }
+                        }}
+                        className="spring-press flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#FA2D48] hover:bg-[#e0263f] text-white text-xs font-bold cursor-pointer shadow-md shadow-[#FA2D48]/20 transition-all"
+                      >
+                        <Play size={13} className="fill-current" />
+                        <span>Play All</span>
+                      </button>
+                      {!currentArtist.isLocal && (
+                        <button
+                          onClick={() => navigateToArtist(currentArtist.id)}
+                          className="spring-press flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-white/[0.06] hover:bg-white/[0.10] border border-white/10 text-xs font-semibold text-white cursor-pointer transition-colors"
+                        >
+                          <span>Full Profile</span>
+                          <ChevronRight size={13} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Top Songs by Artist rendered with DesktopTrackTable */}
+                  {currentArtistSongs.length > 0 && (
+                    <section className="space-y-3">
+                      <h3 className="text-sm font-bold tracking-tight text-white">Songs</h3>
+                      <div className="acrylic-tile p-4 rounded-3xl overflow-hidden tracklist-row">
+                        <DesktopTrackTable
+                          songs={currentArtistSongs}
+                          showCover={false}
+                          showArtist={false}
+                          showAlbum={true}
+                          showTrackNumber={true}
+                          density="standard"
+                          onOpenContextMenu={onOpenContextMenu}
+                        />
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Albums by Artist in Library */}
+                  {currentArtistAlbums.length > 0 && (
+                    <section className="space-y-3">
+                      <h3 className="text-sm font-bold tracking-tight text-white">Albums</h3>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                        {currentArtistAlbums.map((alb) => (
+                          <div
+                            key={alb.id}
+                            onClick={() => handlePlayOrOpenAlbum(alb)}
+                            className="acrylic-tile group p-3 rounded-2xl cursor-pointer"
+                          >
+                            <div className="artwork-lockup relative aspect-square rounded-xl overflow-hidden mb-2 bg-neutral-900">
+                              <img
+                                src={alb.coverUrl || DEFAULT_LOCAL_ALBUM_ART_SVG}
+                                alt={alb.title}
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLImageElement).src = DEFAULT_LOCAL_ALBUM_ART_SVG;
+                                }}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                            </div>
+                            <div className="text-xs font-bold truncate text-white group-hover:text-[#FA2D48] transition-colors">
+                              {alb.title}
+                            </div>
+                            <div className="text-[11px] text-[#A1A1A6]">{alb.year}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                </>
+              ) : (
+                <div className="acrylic-tile rounded-3xl py-16 text-center text-xs text-[#8E8E93]">
+                  Select an artist from the list
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -616,41 +705,45 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
       {/* ========================================================================= */}
       {activeTab === 'Albums' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs font-bold uppercase tracking-wider text-[#8E8E93]">
               {derivedAlbums.length} Albums in Collection
             </span>
 
-            {/* Toggle Grid vs 3D Cover Flow */}
-            <div className="flex items-center gap-1 p-1 rounded-full bg-white/[0.06] border border-white/10">
-              <button
-                onClick={() => {
-                  setIsCoverFlowActive(false);
-                  navigateToTab('library', 'Albums');
-                }}
-                title="Grid View"
-                className={`p-1.5 rounded-full text-xs transition-all cursor-pointer ${
-                  !isCoverFlowActive
-                    ? 'bg-white/15 text-white shadow-sm'
-                    : 'text-[#A1A1A6] hover:text-white'
-                }`}
-              >
-                <Grid size={15} />
-              </button>
-              <button
-                onClick={() => {
-                  setIsCoverFlowActive(true);
-                  navigateToTab('library', 'CoverFlow');
-                }}
-                title="3D Cover Flow"
-                className={`p-1.5 rounded-full text-xs transition-all cursor-pointer ${
-                  isCoverFlowActive
-                    ? 'bg-white/15 text-white shadow-sm'
-                    : 'text-[#A1A1A6] hover:text-white'
-                }`}
-              >
-                <Box size={15} />
-              </button>
+            <div className="flex items-center gap-2">
+              {renderSourceFilterPill()}
+
+              {/* Toggle Grid vs 3D Cover Flow */}
+              <div className="flex items-center gap-1 p-1 rounded-full bg-white/[0.06] border border-white/10">
+                <button
+                  onClick={() => {
+                    setIsCoverFlowActive(false);
+                    navigateToTab('library', 'Albums');
+                  }}
+                  title="Grid View"
+                  className={`p-1.5 rounded-full text-xs transition-all cursor-pointer ${
+                    !isCoverFlowActive
+                      ? 'bg-white/15 text-white shadow-sm'
+                      : 'text-[#A1A1A6] hover:text-white'
+                  }`}
+                >
+                  <Grid size={15} />
+                </button>
+                <button
+                  onClick={() => {
+                    setIsCoverFlowActive(true);
+                    navigateToTab('library', 'CoverFlow');
+                  }}
+                  title="3D Cover Flow"
+                  className={`p-1.5 rounded-full text-xs transition-all cursor-pointer ${
+                    isCoverFlowActive
+                      ? 'bg-white/15 text-white shadow-sm'
+                      : 'text-[#A1A1A6] hover:text-white'
+                  }`}
+                >
+                  <Box size={15} />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -658,22 +751,29 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
             <div className="acrylic-tile p-6 rounded-3xl overflow-hidden shadow-2xl">
               <AlbumCoverFlow
                 albums={derivedAlbums}
-                onSelectAlbum={(alb) => navigateToRelease(alb.id, 'album')}
-                onPlayAlbum={(alb) => navigateToRelease(alb.id, 'album')}
+                onSelectAlbum={(alb) => handlePlayOrOpenAlbum(alb)}
+                onPlayAlbum={(alb) => handlePlayOrOpenAlbum(alb, true)}
               />
+            </div>
+          ) : derivedAlbums.length === 0 ? (
+            <div className="acrylic-tile rounded-3xl py-16 text-center text-xs text-[#8E8E93]">
+              No albums match the current source filter.
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
               {derivedAlbums.map((alb) => (
                 <div
                   key={alb.id}
-                  onClick={() => navigateToRelease(alb.id, 'album')}
+                  onClick={() => handlePlayOrOpenAlbum(alb)}
                   className="acrylic-tile group p-3 rounded-2xl transition-all cursor-pointer"
                 >
                   <div className="artwork-lockup relative aspect-square rounded-xl overflow-hidden mb-2.5 bg-neutral-900">
                     <img
-                      src={alb.coverUrl}
+                      src={alb.coverUrl || DEFAULT_LOCAL_ALBUM_ART_SVG}
                       alt={alb.title}
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).src = DEFAULT_LOCAL_ALBUM_ART_SVG;
+                      }}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                     />
                     {/* macOS Dual-Hover Overlay */}
@@ -681,7 +781,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                       <div
                         onClick={(e) => {
                           e.stopPropagation();
-                          navigateToRelease(alb.id, 'album');
+                          handlePlayOrOpenAlbum(alb, true);
                         }}
                         className="w-8 h-8 rounded-full bg-white text-black shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-transform cursor-pointer"
                         title="Play"
@@ -692,12 +792,12 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                         onClick={(e) => {
                           e.stopPropagation();
                           if (onOpenContextMenu) {
-                            onOpenContextMenu(e, {
+                            onOpenContextMenu(e, (alb.songs?.[0] || {
                               videoId: alb.id,
                               title: alb.title,
                               artist: alb.artist,
                               liked: true,
-                            } as any);
+                            }) as any);
                           }
                         }}
                         className="w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white/90 border border-white/20 flex items-center justify-center transition-all cursor-pointer"
@@ -727,18 +827,22 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
             <span className="text-xs font-bold uppercase tracking-wider text-[#8E8E93]">
-              {filteredSongs.length} Songs Saved
+              {filteredSongs.length} Songs in Library
             </span>
 
-            <div className="relative w-full sm:w-auto">
-              <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#8E8E93]" />
-              <input
-                type="text"
-                placeholder="Filter saved songs..."
-                value={songFilter}
-                onChange={(e) => setSongFilter(e.target.value)}
-                className="h-8 pl-9 pr-3 rounded-full bg-white/[0.06] hover:bg-white/[0.09] focus:bg-white/[0.12] border border-white/10 focus:border-white/25 text-xs text-white placeholder-[#8E8E93] outline-none transition-all w-full sm:w-64"
-              />
+            <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end flex-wrap">
+              {renderSourceFilterPill()}
+
+              <div className="relative w-full sm:w-auto">
+                <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#8E8E93]" />
+                <input
+                  type="text"
+                  placeholder="Filter library songs..."
+                  value={songFilter}
+                  onChange={(e) => setSongFilter(e.target.value)}
+                  className="h-8 pl-9 pr-3 rounded-full bg-white/[0.06] hover:bg-white/[0.09] focus:bg-white/[0.12] border border-white/10 focus:border-white/25 text-xs text-white placeholder-[#8E8E93] outline-none transition-all w-full sm:w-64"
+                />
+              </div>
             </div>
           </div>
 
@@ -753,9 +857,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
               allowSorting={true}
               onOpenContextMenu={onOpenContextMenu}
               emptyMessage={
-                favorites.length === 0
-                  ? 'No favorite tracks saved yet. Heart songs to add them to your library.'
-                  : 'No saved songs match your filter.'
+                unifiedSongs.length === 0
+                  ? 'No tracks in your library yet. Heart songs or scan a Local Media folder.'
+                  : 'No library songs match your filter.'
               }
             />
           </div>
@@ -775,7 +879,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
               <div className="min-w-0">
                 <h2 className="text-xl font-black text-white truncate">Favorite Songs</h2>
                 <p className="text-xs text-[#A1A1A6] pt-0.5">
-                  {filteredSongs.length} {filteredSongs.length === 1 ? 'track' : 'tracks'} in your Favorites
+                  {filteredFavoriteSongs.length} {filteredFavoriteSongs.length === 1 ? 'track' : 'tracks'} in your Favorites
                 </p>
               </div>
             </div>
@@ -791,9 +895,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                   className="h-8 pl-9 pr-3 rounded-full bg-white/[0.06] hover:bg-white/[0.09] focus:bg-white/[0.12] border border-white/10 focus:border-white/25 text-xs text-white placeholder-[#8E8E93] outline-none transition-all w-48 sm:w-56"
                 />
               </div>
-              {filteredSongs.length > 0 && (
+              {filteredFavoriteSongs.length > 0 && (
                 <button
-                  onClick={() => handlePlaySong(filteredSongs[0], filteredSongs)}
+                  onClick={() => handlePlaySong(filteredFavoriteSongs[0], filteredFavoriteSongs)}
                   className="spring-press flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-[#FA2D48] hover:bg-[#e0263f] text-white text-xs font-bold cursor-pointer shadow-md shadow-[#FA2D48]/20 transition-all"
                 >
                   <Play size={13} className="fill-current" />
@@ -805,7 +909,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
 
           <div className="acrylic-tile p-4 rounded-3xl overflow-hidden tracklist-row">
             <DesktopTrackTable
-              songs={filteredSongs}
+              songs={filteredFavoriteSongs}
               showCover={true}
               showArtist={true}
               showAlbum={true}

@@ -21,7 +21,9 @@ export interface Song {
   // Album & Collection
   album?: string;                     // UI shorthand alias for albumName
   albumName?: string | null;
+  albumArtist?: string | null;        // Album artist for accurate compilation/album grouping
   albumId?: string | null;
+  trackNumber?: number;               // Disc/album track number
 
   // Duration & Playback Metrics
   durationSec?: number;               // Duration in seconds
@@ -29,14 +31,21 @@ export interface Song {
   totalPlayTimeMs: number;            // Cumulative listening time in milliseconds
   playCount: number;                  // Number of completed plays
   lastPlayedTimeMs?: number | null;   // Epoch timestamp of last playback
+  lastModifiedMs?: number;            // Local file mtimeMs
 
   // Artwork & Visuals
   artworkUrl?: string;                // UI shorthand alias for thumbnailUrl
   thumbnailUrl?: string | null;
+  artworkHash?: string | null;        // SHA-1 hash of embedded/folder artwork bytes
 
   // Audio Stream & Source Metadata
+  source?: 'local' | 'online';        // Unified library provenance
   streamUrl?: string | null;          // Direct playback URI or file path
   bitrate?: number | string;          // Numeric kbps (e.g. 320) or string (e.g. "160kbps")
+  codec?: string;                     // Audio codec e.g. FLAC, MP3, AAC, Opus
+  bitDepth?: number;                  // Bits per sample e.g. 16, 24
+  sampleRate?: number;                // Sample rate in Hz e.g. 44100, 96000
+  isDolbyAtmos?: boolean;             // True only when active stream is Dolby Atmos
   audioQuality?: string;              // UI shorthand alias for sourceQuality
   sourceQuality?: string | null;      // e.g. "160kbps Opus", "24-bit / 96kHz FLAC"
   playbackSourceType?: PlaybackSourceType;
@@ -157,6 +166,16 @@ export function normalizeSong(raw: Partial<Song> & Record<string, unknown>): Son
       : 0;
   const playCount = typeof raw.playCount === 'number' && raw.playCount >= 0 ? raw.playCount : 0;
 
+  const isLocal = Boolean(
+    raw.isLocal || raw.source === 'local' || raw.playbackSourceType === 'LOCAL'
+  );
+  const source: 'local' | 'online' =
+    raw.source === 'local' || raw.source === 'online'
+      ? raw.source
+      : isLocal
+      ? 'local'
+      : 'online';
+
   return {
     ...raw,
     id: videoId,
@@ -168,23 +187,37 @@ export function normalizeSong(raw: Partial<Song> & Record<string, unknown>): Son
     artistId: (raw.artistId as string | null | undefined) ?? (artists[0]?.id ?? null),
     albumName,
     album,
+    albumArtist: (raw.albumArtist as string | null | undefined) ?? null,
     albumId: (raw.albumId as string | null | undefined) ?? null,
+    trackNumber: typeof raw.trackNumber === 'number' && raw.trackNumber > 0 ? raw.trackNumber : undefined,
     durationSec,
     durationText,
     totalPlayTimeMs,
     playCount,
     lastPlayedTimeMs: (raw.lastPlayedTimeMs as number | null | undefined) ?? null,
+    lastModifiedMs:
+      typeof raw.lastModifiedMs === 'number'
+        ? raw.lastModifiedMs
+        : typeof raw.mtimeMs === 'number'
+        ? raw.mtimeMs
+        : undefined,
     artworkUrl,
     thumbnailUrl,
+    artworkHash: (raw.artworkHash as string | null | undefined) ?? null,
+    source,
     streamUrl: (raw.streamUrl as string | null | undefined) ?? null,
     bitrate: (raw.bitrate as number | string | undefined),
+    codec: typeof raw.codec === 'string' ? raw.codec : undefined,
+    bitDepth: typeof raw.bitDepth === 'number' ? raw.bitDepth : undefined,
+    sampleRate: typeof raw.sampleRate === 'number' ? raw.sampleRate : undefined,
+    isDolbyAtmos: typeof raw.isDolbyAtmos === 'boolean' ? raw.isDolbyAtmos : undefined,
     audioQuality,
     sourceQuality,
-    playbackSourceType: (raw.playbackSourceType as PlaybackSourceType | undefined) ?? (raw.isLocal ? 'LOCAL' : 'YOUTUBE'),
+    playbackSourceType: (raw.playbackSourceType as PlaybackSourceType | undefined) ?? (isLocal ? 'LOCAL' : 'YOUTUBE'),
     playbackSessionId: (raw.playbackSessionId as string | null | undefined) ?? null,
     playlistBrowseId: (raw.playlistBrowseId as string | null | undefined) ?? null,
     hasOriginalAudio: raw.hasOriginalAudio !== undefined ? Boolean(raw.hasOriginalAudio) : true,
-    isLocal: Boolean(raw.isLocal),
+    isLocal,
     loudnessDb: typeof raw.loudnessDb === 'number' ? raw.loudnessDb : undefined,
     replayGainDb: typeof raw.replayGainDb === 'number' ? raw.replayGainDb : undefined,
     bpm: typeof raw.bpm === 'number' ? raw.bpm : undefined,

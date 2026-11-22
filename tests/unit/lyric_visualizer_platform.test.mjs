@@ -271,9 +271,16 @@ test('LyricVisualizerPlatformController: multi-monitor discovery & overlay manag
       this.isVisible = false;
       this.isClosed = false;
       this.loadedUrl = null;
+      const wcEmitter = new EventEmitter();
       this.webContents = {
         send: (channel, ...args) => {
           this.emit('ipc-send', { channel, args });
+        },
+        once: (eventName, listener) => {
+          wcEmitter.once(eventName, listener);
+        },
+        emit: (eventName, ...args) => {
+          wcEmitter.emit(eventName, ...args);
         },
       };
       createdWindows.push(this);
@@ -456,8 +463,40 @@ test('LyricVisualizerPlatformController: multi-monitor discovery & overlay manag
     }
   });
 
-  broadcastHandler(null, { currentTrack: { title: 'Test Track' }, positionMs: 5000 });
-  assert.deepEqual(receivedBroadcast, { currentTrack: { title: 'Test Track' }, positionMs: 5000 });
+  broadcastHandler(null, { revisionId: 5, trackId: 't-1', currentTrack: { title: 'Test Track' }, positionMs: 5000 });
+  assert.deepEqual(receivedBroadcast, { revisionId: 5, trackId: 't-1', currentTrack: { title: 'Test Track' }, positionMs: 5000 });
+
+  // Stale lower revisionId should not overwrite cached snapshot
+  broadcastHandler(null, { revisionId: 2, trackId: 't-stale', currentTrack: { title: 'Stale' }, positionMs: 100 });
+  const requestSnapshotHandler = ipcHandlers.get('lv-request-snapshot');
+  assert.ok(requestSnapshotHandler, 'lv-request-snapshot IPC handler must be registered');
+  const cachedSnap = await requestSnapshotHandler();
+  assert.equal(cachedSnap.revisionId, 5);
+  assert.equal(cachedSnap.trackId, 't-1');
+
+  // Newly opened overlay window must immediately receive cached snapshot on did-finish-load
+  controller.setOverlayConfig({
+    enabled: true,
+    monitorIds: ['101', '102'],
+  });
+  const win102Reopened = controller._getOverlayWindows().get('102');
+  assert.ok(win102Reopened);
+  let replayedPayload = null;
+  win102Reopened.on('ipc-send', ({ channel, args }) => {
+    if (channel === 'lv-state-broadcast') {
+      replayedPayload = args[0];
+    }
+  });
+  win102Reopened.webContents.emit('did-finish-load');
+  assert.deepEqual(replayedPayload, cachedSnap);
+
+  // Test lv-set-keep-awake IPC handler (used by in-app fullscreen ambient portal)
+  const setKeepAwakeHandler = ipcHandlers.get('lv-set-keep-awake');
+  assert.ok(setKeepAwakeHandler, 'lv-set-keep-awake IPC handler must be registered');
+  await setKeepAwakeHandler(null, true);
+  assert.equal(powerBlockerActive, true, 'lv-set-keep-awake(true) must activate power blocker');
+  await setKeepAwakeHandler(null, false);
+  assert.equal(powerBlockerActive, false, 'lv-set-keep-awake(false) must deactivate power blocker');
 
   // 7. Cleanup
   controller.dispose();

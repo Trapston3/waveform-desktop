@@ -126,16 +126,33 @@ function computeLineFadeAlpha(lines: Lyrics['lines'], timeSeconds: number, activ
   return 1;
 }
 
+const activeSyncEngines = new Set<SyncEngine>();
+
+export function snapAllSyncEngines(positionSeconds: number, lyrics: Lyrics | null = null): void {
+  for (const engine of activeSyncEngines) {
+    engine.snapToTime(positionSeconds, lyrics);
+  }
+}
+
 export class SyncEngine {
   private offsetMs = 0;
   private lastTrackId: string | null = null;
   private lastSnapshotTimestampMs = -1;
   private lastSnapshotPosition = 0;
   private lastOutputTime = 0;
+  private lastLineIndex = -1;
   private pendingSeekFlag = false;
+
+  constructor() {
+    activeSyncEngines.add(this);
+  }
 
   getOffsetMs(): number {
     return this.offsetMs;
+  }
+
+  getLastLineIndex(): number {
+    return this.lastLineIndex;
   }
 
   setOffsetMs(offsetMs: number): void {
@@ -146,11 +163,27 @@ export class SyncEngine {
     }
   }
 
+  snapToTime(positionSeconds: number, lyrics: Lyrics | null = null): void {
+    const safeSec = Number.isFinite(positionSeconds) ? Math.max(0, positionSeconds) : 0;
+    this.lastSnapshotPosition = safeSec;
+    this.lastSnapshotTimestampMs =
+      typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const effectiveSec = Math.max(0, safeSec + this.offsetMs / 1000);
+    this.lastOutputTime = effectiveSec;
+    this.pendingSeekFlag = true;
+    if (lyrics && lyrics.lines.length > 0) {
+      this.lastLineIndex = binarySearchLine(lyrics.lines, effectiveSec);
+    } else {
+      this.lastLineIndex = -1;
+    }
+  }
+
   reset(): void {
     this.lastTrackId = null;
     this.lastSnapshotTimestampMs = -1;
     this.lastSnapshotPosition = 0;
     this.lastOutputTime = 0;
+    this.lastLineIndex = -1;
     this.pendingSeekFlag = true;
   }
 
@@ -168,6 +201,7 @@ export class SyncEngine {
       this.lastSnapshotTimestampMs = snapshot.timestampMs;
       this.lastSnapshotPosition = snapshot.positionSeconds;
       this.lastOutputTime = 0;
+      this.lastLineIndex = -1;
       didSeekThisFrame = true;
     }
 
@@ -197,6 +231,11 @@ export class SyncEngine {
 
     const effectiveRaw = Math.max(0, rawExtrapolated + this.offsetMs / 1000);
 
+    // If effective time jumped backward by >0.35s (e.g., stream reset to 0 or drift snap), treat as seek
+    if (!didSeekThisFrame && this.lastOutputTime - effectiveRaw > 0.35) {
+      didSeekThisFrame = true;
+    }
+
     let timeSeconds: number;
     if (didSeekThisFrame || !snapshot.isPlaying) {
       timeSeconds = effectiveRaw;
@@ -207,6 +246,7 @@ export class SyncEngine {
     this.lastOutputTime = timeSeconds;
 
     if (!lyrics || lyrics.lines.length === 0) {
+      this.lastLineIndex = -1;
       return {
         timeSeconds,
         activeLineIndex: -1,
@@ -218,6 +258,7 @@ export class SyncEngine {
     }
 
     const activeLineIndex = binarySearchLine(lyrics.lines, timeSeconds);
+    this.lastLineIndex = activeLineIndex;
     let activeWordIndex = -1;
     let wordProgress = 0;
 

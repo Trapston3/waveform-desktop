@@ -2,6 +2,7 @@
 // Pure-Node YouTube SABR progressive audio downloader + HTTP Range protocol responder
 // Uses googlevideo SabrStream (ANDROID_VR / IOS / VISIONOS) with seamless yt-dlp continuation/fallback
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -72,15 +73,27 @@ interface ActiveStreamJob {
   aborted: boolean;
   waiters: Set<() => void>;
   completionPromise: Promise<void>;
+  startMs: number;
+  actualStartMs: number | null;
+  reportedTotal: number;
+  knownTotalSize: number | null;
+  isSeekJob: boolean;
+  abortController: AbortController | null;
 }
 
 const VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const MAX_CACHE_BYTES = 512 * 1024 * 1024; // 512 MB
 const PRIME_MIN_BYTES = 32 * 1024; // 32 KB
 const VISITOR_TTL_MS = 30 * 60 * 1000; // 30 minutes
-const DEFAULT_OPEN_RANGE_CHUNK = 512 * 1024; // 512 KB chunk when streaming an active download
-const SABR_STALL_HANDOFF_MS = 4500; // Fast handoff when ANDROID_VR hits YouTube's 60s SABR prefix cap
+const DEFAULT_OPEN_RANGE_CHUNK = 256 * 1024; // 256 KB chunk size for live open-ended stream reads
+const SABR_STALL_HANDOFF_MS = 12_000; // Allow up to 12s between SABR segments before yt-dlp handoff
 const RANGE_WAIT_TIMEOUT_MS = 60_000;
+
+export interface SabrStreamAuthOptions {
+  cookie?: string;
+  poToken?: string;
+  reloadPlaybackParams?: unknown;
+}
 
 const PLAYER_CLIENTS: PlayerClientProfile[] = [
   {
@@ -133,6 +146,245 @@ const PLAYER_CLIENTS: PlayerClientProfile[] = [
 
 let cachedVisitorData: { value: string; fetchedAt: number } | null = null;
 const activeJobs = new Map<string, ActiveStreamJob>();
+const activeSeekJobs = new Map<string, ActiveStreamJob>();
+const activeProxyJobs = new Map<string, ActiveStreamJob>();
+const activeSeekSeq = new Map<string, number>();
+const completedProxyMimes = new Map<string, string>();
+let seekFileCounter = 0;
+
+const WEBM_CLUSTER_ID = Buffer.from([0x1f, 0x43, 0xb6, 0x75]);
+
+function readEbmlVint(
+  buf: Uint8Array,
+  offset: number
+): { value: number; length: number; isUnknown: boolean } | null {
+  if (offset >= buf.length) return null;
+  const first = buf[offset];
+  if (first === 0) return null;
+
+  let len = 1;
+  while (len <= 8 && (first & (0x80 >> (len - 1))) === 0) {
+    len++;
+  }
+  if (len > 8 || offset + len > buf.length) return null;
+
+  const mask = (1 << (8 - len)) - 1;
+  let value = first & mask;
+  let allOnes = value === mask;
+
+  for (let i = 1; i < len; i++) {
+    const b = buf[offset + i];
+    value = value * 256 + b;
+    if (b !== 0xff) allOnes = false;
+  }
+
+  return { value, length: len, isUnknown: allOnes };
+}
+
+function tryReadClusterTimecodeAt(buf: Uint8Array, clusterPos: number): number | null {
+  if (clusterPos + 5 > buf.length) return null;
+  const clusterSize = readEbmlVint(buf, clusterPos + 4);
+  if (!clusterSize) return null;
+
+  let cursor = clusterPos + 4 + clusterSize.length;
+  const maxScanEnd = clusterSize.isUnknown
+    ? Math.min(buf.length, cursor + 128)
+    : Math.min(buf.length, cursor + Math.min(clusterSize.value, 128));
+
+  for (let elem = 0; elem < 8 && cursor < maxScanEnd; elem++) {
+    const b0 = buf[cursor];
+    let idLen = 1;
+    while (idLen <= 4 && (b0 & (0x80 >> (idLen - 1))) === 0) {
+      idLen++;
+    }
+    if (idLen > 4 || cursor + idLen >= maxScanEnd) break;
+
+    const elemSize = readEbmlVint(buf, cursor + idLen);
+    if (!elemSize || elemSize.isUnknown) break;
+
+    const dataStart = cursor + idLen + elemSize.length;
+    if (idLen === 1 && b0 === 0xe7) {
+      if (elemSize.value > 8 || dataStart + elemSize.value > buf.length) return null;
+      let timecodeMs = 0;
+      for (let i = 0; i < elemSize.value; i++) {
+        timecodeMs = timecodeMs * 256 + buf[dataStart + i];
+      }
+      return timecodeMs;
+    }
+
+    // SimpleBlock (0xA3) / BlockGroup (0xA0) follow Timecode in Matroska Clusters
+    if (idLen === 1 && (b0 === 0xa3 || b0 === 0xa0)) break;
+    cursor = dataStart + elemSize.value;
+  }
+
+  return null;
+}
+
+export function parseFirstWebmClusterTimecodeMs(buf: Uint8Array): number | null {
+  if (!buf || buf.byteLength < 8) return null;
+  const view = Buffer.isBuffer(buf)
+    ? buf
+    : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+
+  let pos = view.indexOf(WEBM_CLUSTER_ID, 0);
+  while (pos !== -1) {
+    const tc = tryReadClusterTimecodeAt(view, pos);
+    if (tc !== null) return tc;
+    pos = view.indexOf(WEBM_CLUSTER_ID, pos + 1);
+  }
+  return null;
+}
+
+export async function findWebmClusterSeekSlice(
+  filePath: string,
+  targetMs: number
+): Promise<{
+  initBytes: Uint8Array;
+  clusterOffset: number;
+  actualStartMs: number;
+  totalLength: number;
+} | null> {
+  try {
+    const stat = await fsp.stat(filePath);
+    if (!stat.isFile() || stat.size < 8) return null;
+
+    const CHUNK_SIZE = 256 * 1024;
+    const OVERLAP = 64;
+    const fh = await fsp.open(filePath, 'r');
+
+    let firstClusterOffset: number | null = null;
+    let chosen: { offset: number; timecodeMs: number } | null = null;
+
+    try {
+      const readBuf = Buffer.alloc(CHUNK_SIZE);
+      let carry: Buffer = Buffer.alloc(0);
+      let fileOffset = 0;
+      let nextFileSearchOffset = 0;
+
+      while (fileOffset < stat.size) {
+        const { bytesRead } = await fh.read(readBuf, 0, CHUNK_SIZE, fileOffset);
+        if (bytesRead === 0) break;
+
+        const isLastChunk = fileOffset + bytesRead >= stat.size;
+        const chunk = readBuf.subarray(0, bytesRead);
+        const windowBuf = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+        const windowStartOffset = fileOffset - carry.length;
+
+        let localSearchStart = Math.max(0, nextFileSearchOffset - windowStartOffset);
+        while (localSearchStart < windowBuf.length) {
+          const pos = windowBuf.indexOf(WEBM_CLUSTER_ID, localSearchStart);
+          if (pos === -1) break;
+
+          // Defer Cluster headers near the end of a non-final chunk until the next chunk supplies full Timecode bytes
+          if (!isLastChunk && pos > windowBuf.length - OVERLAP) {
+            nextFileSearchOffset = windowStartOffset + pos;
+            break;
+          }
+
+          const tc = tryReadClusterTimecodeAt(windowBuf, pos);
+          const absOffset = windowStartOffset + pos;
+          if (tc !== null) {
+            if (firstClusterOffset === null) {
+              firstClusterOffset = absOffset;
+              chosen = { offset: absOffset, timecodeMs: tc };
+            } else if (tc <= targetMs) {
+              chosen = { offset: absOffset, timecodeMs: tc };
+            }
+            nextFileSearchOffset = absOffset + 4;
+            localSearchStart = pos + 4;
+          } else {
+            nextFileSearchOffset = absOffset + 1;
+            localSearchStart = pos + 1;
+          }
+        }
+
+        const windowEndOffset = fileOffset + bytesRead;
+        if (windowEndOffset > nextFileSearchOffset && localSearchStart >= windowBuf.length) {
+          nextFileSearchOffset = Math.max(nextFileSearchOffset, windowEndOffset - 3);
+        }
+
+        const carryLen = Math.min(OVERLAP, windowBuf.length);
+        carry = Buffer.from(windowBuf.subarray(windowBuf.length - carryLen));
+        fileOffset += bytesRead;
+      }
+    } finally {
+      await fh.close();
+    }
+
+    if (firstClusterOffset === null || !chosen) {
+      return null;
+    }
+
+    const initBytes =
+      firstClusterOffset > 0
+        ? await readFileSlice(filePath, 0, firstClusterOffset - 1)
+        : new Uint8Array(0);
+    const totalLength = initBytes.byteLength + (stat.size - chosen.offset);
+
+    return {
+      initBytes,
+      clusterOffset: chosen.offset,
+      actualStartMs: chosen.timecodeMs,
+      totalLength,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readVirtualSeekSlice(
+  filePath: string,
+  sliceInfo: { initBytes: Uint8Array; clusterOffset: number },
+  start: number,
+  end: number
+): Promise<Uint8Array> {
+  const initLen = sliceInfo.initBytes.byteLength;
+  if (end < initLen) {
+    return sliceInfo.initBytes.subarray(start, end + 1);
+  }
+  if (start >= initLen) {
+    return readFileSlice(
+      filePath,
+      sliceInfo.clusterOffset + (start - initLen),
+      sliceInfo.clusterOffset + (end - initLen)
+    );
+  }
+  const part1 = sliceInfo.initBytes.subarray(start);
+  const part2 = await readFileSlice(
+    filePath,
+    sliceInfo.clusterOffset,
+    sliceInfo.clusterOffset + (end - initLen)
+  );
+  return Buffer.concat([part1, part2]);
+}
+
+async function abortAndCleanupJob(job: ActiveStreamJob): Promise<void> {
+  job.aborted = true;
+  notifyWaiters(job);
+  if (job.abortController) {
+    try {
+      job.abortController.abort();
+    } catch {
+      // Ignore abort errors
+    }
+    job.abortController = null;
+  }
+  if (job.sabrStream) {
+    await job.sabrStream.abort().catch(() => {});
+  }
+  if (job.childProcess) {
+    try {
+      job.childProcess.kill('SIGTERM');
+    } catch {
+      // Ignore kill errors
+    }
+  }
+  if (job.fileHandle) {
+    await job.fileHandle.close().catch(() => {});
+    job.fileHandle = null;
+  }
+  await fsp.unlink(job.partPath).catch(() => {});
+}
 
 function getDefaultCacheDir(): string {
   return path.join(os.tmpdir(), 'waveform-yt-cache');
@@ -159,6 +411,7 @@ function waitForJobProgress(job: ActiveStreamJob, timeoutMs = RANGE_WAIT_TIMEOUT
       job.waiters.delete(onProgress);
       reject(new Error(`Timed out waiting for SABR audio stream data for ${job.videoId}`));
     }, timeoutMs);
+    timer.unref?.();
 
     const onProgress = () => {
       clearTimeout(timer);
@@ -254,11 +507,15 @@ export async function fetchFreshVisitorData(forceRefresh = false): Promise<strin
 
 async function fetchPlayerMetadata(
   videoId: string,
-  visitorData?: string
+  visitorData?: string,
+  startIndex = 0,
+  options?: SabrStreamAuthOptions
 ): Promise<PlayerMetadata> {
   let lastError = 'No player client returned SABR streaming metadata';
 
-  for (const profile of PLAYER_CLIENTS) {
+  const count = PLAYER_CLIENTS.length;
+  for (let i = 0; i < count; i++) {
+    const profile = PLAYER_CLIENTS[(startIndex + i) % count];
     try {
       const clientContext: Record<string, unknown> = {
         clientName: profile.name,
@@ -288,20 +545,37 @@ async function fetchPlayerMetadata(
       if (visitorData) {
         headers['X-Goog-Visitor-Id'] = visitorData;
       }
+      if (options?.cookie) {
+        headers['Cookie'] = options.cookie;
+      }
+
+      const payload: Record<string, unknown> = {
+        context: {
+          client: clientContext,
+          user: { lockedSafetyMode: false },
+          request: { useSsl: true },
+        },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true,
+      };
+      if (options?.reloadPlaybackParams) {
+        payload.playbackContext = {
+          reloadPlaybackContext: {
+            reloadPlaybackParams: options.reloadPlaybackParams,
+          },
+        };
+      }
+      if (options?.poToken) {
+        payload.serviceIntegrityDimensions = {
+          poToken: options.poToken,
+        };
+      }
 
       const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          context: {
-            client: clientContext,
-            user: { lockedSafetyMode: false },
-            request: { useSsl: true },
-          },
-          videoId,
-          contentCheckOk: true,
-          racyCheckOk: true,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
@@ -489,7 +763,6 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
       : 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio';
 
   const clientAttempts: Array<{ extractorArgs: string | null; formatSelector: string }> = [
-    { extractorArgs: 'youtube:player_client=web_embedded,tv_downgraded', formatSelector: preferredAudioOnlySelector },
     { extractorArgs: 'youtube:player_client=web_embedded,tv_downgraded', formatSelector: `${preferredAudioOnlySelector}/18/best` },
     { extractorArgs: 'youtube:player_client=tv,web_embedded', formatSelector: `${preferredAudioOnlySelector}/18/best` },
     { extractorArgs: null, formatSelector: `${preferredAudioOnlySelector}/18/best` },
@@ -550,6 +823,7 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
       });
 
       let writeChain = Promise.resolve();
+      const prevPartPath = job.partPath;
       child.stdout?.on('data', (chunk: Buffer) => {
         if (job.aborted || !fh) return;
         const copy = Buffer.from(chunk);
@@ -565,6 +839,12 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
           ytdlpBytes += copy.length;
           if (streamDirectlyToPart) {
             job.bytesWritten = ytdlpBytes;
+            notifyWaiters(job);
+          } else {
+            if (ytdlpBytes > job.bytesWritten) {
+              job.partPath = targetPartPath;
+              job.bytesWritten = ytdlpBytes;
+            }
             notifyWaiters(job);
           }
         });
@@ -591,8 +871,8 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
       }
 
       await finalizePartFile(targetPartPath, job.finalPath);
-      if (!streamDirectlyToPart) {
-        await fsp.unlink(job.partPath).catch(() => {});
+      if (!streamDirectlyToPart && prevPartPath !== targetPartPath) {
+        await fsp.unlink(prevPartPath).catch(() => {});
       }
 
       job.mimeType = sniffedMime;
@@ -656,7 +936,7 @@ async function startYtDlpFallbackJob(
     itag: 251,
     durationSec: 0,
     sourceClient: 'yt-dlp',
-    estimatedSize: 0,
+    estimatedSize: 5 * 1024 * 1024,
     bytesWritten: 0,
     finalSize: 0,
     done: false,
@@ -667,6 +947,12 @@ async function startYtDlpFallbackJob(
     aborted: false,
     waiters: new Set(),
     completionPromise: Promise.resolve(),
+    startMs: 0,
+    actualStartMs: 0,
+    reportedTotal: 5 * 1024 * 1024,
+    knownTotalSize: null,
+    isSeekJob: false,
+    abortController: null,
   };
 
   const jobKey = getJobKey(cacheDir, videoId);
@@ -688,10 +974,15 @@ async function startYtDlpFallbackJob(
   return job;
 }
 
-async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveStreamJob> {
+async function startSabrJob(
+  videoId: string,
+  cacheDir: string,
+  options?: SabrStreamAuthOptions,
+  startMs = 0
+): Promise<ActiveStreamJob> {
   await fsp.mkdir(cacheDir, { recursive: true });
   const visitorData = await fetchFreshVisitorData();
-  const metadata = await fetchPlayerMetadata(videoId, visitorData);
+  const metadata = await fetchPlayerMetadata(videoId, visitorData, 0, options);
 
   const sabrFormats = metadata.adaptiveFormats.map((f) => buildSabrFormat(f));
   const chosenFormat = selectBestAudioFormat(sabrFormats);
@@ -699,9 +990,12 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
     throw new Error(`No audio-only SABR format available for ${videoId}`);
   }
 
+  const isSeekJob = startMs > 0;
   const { mimeType, ext } = normalizeAudioMimeAndExt(chosenFormat.mimeType);
-  const partPath = path.join(cacheDir, `${videoId}.${ext}.part`);
-  const finalPath = path.join(cacheDir, `${videoId}.${ext}`);
+  const partPath = isSeekJob
+    ? path.join(cacheDir, `${videoId}.seek-${startMs}-${++seekFileCounter}.${ext}.part`)
+    : path.join(cacheDir, `${videoId}.${ext}.part`);
+  const finalPath = isSeekJob ? partPath : path.join(cacheDir, `${videoId}.${ext}`);
   const metaPath = path.join(cacheDir, `${videoId}.json`);
 
   const clientInfo: ClientInfo = {
@@ -714,16 +1008,25 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
     hl: 'en',
   };
 
+  let reloadAttempt = 0;
+  const resolvedPoToken = options?.poToken || process.env.WAVEFORM_YOUTUBE_POTOKEN || undefined;
+
   const sabrStream = new SabrStream({
     videoId,
     serverAbrStreamingUrl: metadata.serverAbrStreamingUrl,
     videoPlaybackUstreamerConfig: metadata.videoPlaybackUstreamerConfig,
     clientInfo,
+    ...(resolvedPoToken ? { poToken: resolvedPoToken } : {}),
     formats: sabrFormats,
     callbacks: {
-      onReloadPlayerResponse: async () => {
-        const refreshedVisitor = await fetchFreshVisitorData();
-        const refreshed = await fetchPlayerMetadata(videoId, refreshedVisitor);
+      onReloadPlayerResponse: async (reloadContext) => {
+        reloadAttempt += 1;
+        const refreshedVisitor = await fetchFreshVisitorData(true);
+        const refreshed = await fetchPlayerMetadata(videoId, refreshedVisitor, reloadAttempt, {
+          ...options,
+          poToken: resolvedPoToken,
+          reloadPlaybackParams: reloadContext?.reloadPlaybackParams,
+        });
         return {
           serverAbrStreamingUrl: refreshed.serverAbrStreamingUrl,
           videoPlaybackUstreamerConfig: refreshed.videoPlaybackUstreamerConfig,
@@ -732,18 +1035,55 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
     },
   });
 
+  // Register error listener immediately before start() so stall/stream errors never crash main process
+  let sabrErrored: Error | null = null;
+  sabrStream.on('error', (err) => {
+    sabrErrored = err instanceof Error ? err : new Error(String(err));
+  });
+
+  if (isSeekJob) {
+    // googlevideo's setupStreaming calls seekTo(trackCollection.buffered, 'client') after the init-only
+    // first response, which resets playerTimeMs back to 0 before the first media segment arrives.
+    const sabrAny = sabrStream as any;
+    const origSeekTo = typeof sabrAny.seekTo === 'function' ? sabrAny.seekTo.bind(sabrStream) : null;
+    if (origSeekTo) {
+      sabrAny.seekTo = (timeMs: number, source: string) => {
+        if (
+          timeMs === 0 &&
+          source === 'client' &&
+          (!sabrAny.trackCollection?.bufferedRanges || sabrAny.trackCollection.bufferedRanges.length === 0)
+        ) {
+          return;
+        }
+        return origSeekTo(timeMs, source);
+      };
+    }
+  }
+
   const { audioStream, selectedFormats } = sabrStream.start({
     enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
     isPostLiveDvr: false,
     audioFormat: chosenFormat,
-    maxRetries: 4,
-    stallDetectionMs: 12_000,
+    ...(isSeekJob ? { startTimeMs: startMs } : {}),
+    maxRetries: 6,
+    stallDetectionMs: 18_000,
   });
 
   const actualFormat = selectedFormats.audioFormat || chosenFormat;
   const durationSec =
     metadata.durationSec ||
     (actualFormat.approxDurationMs ? Math.round(actualFormat.approxDurationMs / 1000) : 0);
+  const bitrateBps = actualFormat.averageBitrate || actualFormat.bitrate || 160_000;
+  const computedEstimatedSize =
+    durationSec > 0 ? Math.round((bitrateBps / 8) * durationSec * 1.04) : 4 * 1024 * 1024;
+  const baseEstimatedSize =
+    actualFormat.contentLength && actualFormat.contentLength > 0
+      ? actualFormat.contentLength
+      : computedEstimatedSize;
+  const estimatedSize =
+    isSeekJob && durationSec > 0
+      ? Math.max(256 * 1024, Math.round(baseEstimatedSize * Math.max(0.08, (durationSec - startMs / 1000) / durationSec)))
+      : baseEstimatedSize;
 
   const job: ActiveStreamJob = {
     videoId,
@@ -756,7 +1096,7 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
     itag: actualFormat.itag,
     durationSec,
     sourceClient: metadata.clientProfile.name,
-    estimatedSize: actualFormat.contentLength || 0,
+    estimatedSize,
     bytesWritten: 0,
     finalSize: 0,
     done: false,
@@ -767,15 +1107,17 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
     aborted: false,
     waiters: new Set(),
     completionPromise: Promise.resolve(),
+    startMs,
+    actualStartMs: isSeekJob ? null : 0,
+    reportedTotal: estimatedSize,
+    knownTotalSize: null,
+    isSeekJob,
+    abortController: null,
   };
 
   const jobKey = getJobKey(cacheDir, videoId);
-  activeJobs.set(jobKey, job);
-
-  let sabrErrored: Error | null = null;
-  sabrStream.on('error', (err) => {
-    sabrErrored = err instanceof Error ? err : new Error(String(err));
-  });
+  const jobMap = isSeekJob ? activeSeekJobs : activeJobs;
+  jobMap.set(jobKey, job);
 
   job.completionPromise = (async () => {
     let fh: fsp.FileHandle | null = null;
@@ -789,9 +1131,9 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
       while (true) {
         if (job.aborted) break;
 
-        // Race reader.read() against a short stall timer once we've already primed initial bytes
-        // so YouTube's 60s ANDROID_VR SABR prefix cap is detected in ~3.5s instead of 90s.
-        const stallTimeoutMs = job.bytesWritten >= PRIME_MIN_BYTES ? SABR_STALL_HANDOFF_MS : 15_000;
+        // Race reader.read() against a stall timer once initial bytes are primed
+        const stallTimeoutMs =
+          job.bytesWritten >= PRIME_MIN_BYTES ? SABR_STALL_HANDOFF_MS : isSeekJob ? 4_500 : 18_000;
         let stallTimer: ReturnType<typeof setTimeout> | undefined;
         const readResult = await Promise.race([
           reader.read().then((res) => ({ timedOut: false as const, res })),
@@ -820,8 +1162,18 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
         throw new Error('SABR stream aborted');
       }
 
-      // Close SABR reader/file handle before either finalizing or handing off to yt-dlp
-      if (needsYtDlpContinuation || sabrErrored) {
+      // Check whether SABR reached true EOF before closing
+      const audioEndSec = sabrStream.audioEndTimeMs > 0 ? sabrStream.audioEndTimeMs / 1000 : 0;
+      const reachedTrueEof =
+        !needsYtDlpContinuation &&
+        !sabrErrored &&
+        job.bytesWritten > 0 &&
+        ((job.durationSec > 0 && audioEndSec >= job.durationSec - 8) ||
+          (!isSeekJob && job.estimatedSize > 0 && job.bytesWritten >= job.estimatedSize * 0.68) ||
+          job.durationSec === 0);
+
+      // Close SABR reader/file handle before either finalizing or handing off
+      if (needsYtDlpContinuation || sabrErrored || !reachedTrueEof) {
         await reader.cancel().catch(() => {});
         await sabrStream.abort().catch(() => {});
       }
@@ -830,12 +1182,21 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
       fh = null;
       job.fileHandle = null;
 
-      // If SABR stalled before reaching the end of the track (e.g., 60s prefix cap), seamlessly
-      // complete the full file with yt-dlp while keeping partPath readable for active playback.
-      const appearsTruncated =
-        job.estimatedSize > 0 && job.bytesWritten < job.estimatedSize - 64 * 1024;
+      if (isSeekJob) {
+        if (job.bytesWritten === 0 || (needsYtDlpContinuation && job.bytesWritten < PRIME_MIN_BYTES)) {
+          throw sabrErrored || new Error(`SABR seek stream stalled before priming for ${videoId}`);
+        }
+        // Seek sessions stay in their own temp file and never overwrite 0..EOF cache
+        job.finalPath = partPath;
+        job.finalSize = job.bytesWritten;
+        job.done = true;
+        notifyWaiters(job);
+        return;
+      }
 
-      if (needsYtDlpContinuation || sabrErrored || (job.bytesWritten === 0) || appearsTruncated) {
+      // If SABR stalled or stopped before true EOF (e.g., 60s prefix cap), seamlessly
+      // complete the full file with yt-dlp while keeping partPath readable for active playback.
+      if (needsYtDlpContinuation || sabrErrored || job.bytesWritten === 0 || !reachedTrueEof) {
         if (job.bytesWritten === 0) {
           throw sabrErrored || new Error(`SABR stream produced 0 bytes for ${videoId}`);
         }
@@ -873,6 +1234,9 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
       }
       await fsp.unlink(partPath).catch(() => {});
       job.error = err instanceof Error ? err : new Error(String(err));
+      if (isSeekJob && activeSeekJobs.get(jobKey) === job) {
+        activeSeekJobs.delete(jobKey);
+      }
       notifyWaiters(job);
     } finally {
       try {
@@ -881,7 +1245,7 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
         // Ignore release errors
       }
       job.sabrStream = null;
-      if (activeJobs.get(jobKey) === job) {
+      if (!isSeekJob && activeJobs.get(jobKey) === job) {
         activeJobs.delete(jobKey);
       }
     }
@@ -891,8 +1255,9 @@ async function startSabrJob(videoId: string, cacheDir: string): Promise<ActiveSt
 }
 
 async function primeJob(job: ActiveStreamJob): Promise<void> {
+  const waitMs = job.isSeekJob ? 5_500 : 25_000;
   while (!job.done && !job.error && !job.aborted && job.bytesWritten < PRIME_MIN_BYTES) {
-    await waitForJobProgress(job, 25_000);
+    await waitForJobProgress(job, waitMs);
   }
   if (job.error && job.bytesWritten < PRIME_MIN_BYTES) {
     throw job.error;
@@ -900,6 +1265,61 @@ async function primeJob(job: ActiveStreamJob): Promise<void> {
   if (job.aborted) {
     throw new Error(`Stream priming aborted for ${job.videoId}`);
   }
+  if (job.startMs > 0 && job.actualStartMs === null) {
+    try {
+      const avail = job.done ? job.finalSize : job.bytesWritten;
+      if (avail > 0) {
+        const readPath = job.done ? job.finalPath : job.partPath;
+        const head = await readFileSlice(readPath, 0, Math.min(avail - 1, 65535));
+        const parsedTc = parseFirstWebmClusterTimecodeMs(head);
+        job.actualStartMs = parsedTc !== null ? parsedTc : job.startMs;
+      } else {
+        job.actualStartMs = job.startMs;
+      }
+    } catch {
+      job.actualStartMs = job.startMs;
+    }
+  }
+}
+
+async function ensureSeekJob(
+  videoId: string,
+  cacheDir: string,
+  startMs: number
+): Promise<ActiveStreamJob> {
+  const jobKey = getJobKey(cacheDir, videoId);
+  const existing = activeSeekJobs.get(jobKey);
+  if (existing && !existing.error && !existing.aborted && existing.startMs === startMs) {
+    await primeJob(existing);
+    if (!existing.error && !existing.aborted) {
+      return existing;
+    }
+  }
+
+  const seq = (activeSeekSeq.get(jobKey) || 0) + 1;
+  activeSeekSeq.set(jobKey, seq);
+
+  if (existing) {
+    activeSeekJobs.delete(jobKey);
+    await abortAndCleanupJob(existing);
+  }
+
+  const seekJob = await startSabrJob(videoId, cacheDir, undefined, startMs);
+  if (activeSeekSeq.get(jobKey) !== seq) {
+    if (activeSeekJobs.get(jobKey) === seekJob) {
+      activeSeekJobs.delete(jobKey);
+    }
+    await abortAndCleanupJob(seekJob);
+    const latest = activeSeekJobs.get(jobKey);
+    if (latest && !latest.error && !latest.aborted) {
+      await primeJob(latest);
+      return latest;
+    }
+    throw new Error(`Seek request superseded for ${videoId}`);
+  }
+
+  await primeJob(seekJob);
+  return seekJob;
 }
 
 async function ensureActiveOrCached(
@@ -1026,140 +1446,197 @@ function createCorsHeaders(extra: Record<string, string> = {}): Headers {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
     'Access-Control-Allow-Headers': 'Range, Content-Type',
+    'Access-Control-Expose-Headers':
+      'Content-Length, Content-Range, Accept-Ranges, Content-Type, X-Waveform-Start-Ms',
     'Accept-Ranges': 'bytes',
     ...extra,
   });
 }
 
-export async function resolveYoutubeStreamProtocolRequest(
-  request: Request,
-  cacheDir: string = getDefaultCacheDir()
-): Promise<Response> {
-  if (request.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: createCorsHeaders() });
+function createStaticSliceStream(
+  start: number,
+  end: number,
+  readSlice: (s: number, e: number) => Promise<Uint8Array>,
+  signal?: AbortSignal
+): ReadableStream<Uint8Array> {
+  let cursor = start;
+  let closed = Boolean(signal?.aborted);
+  if (signal && !closed) {
+    signal.addEventListener(
+      'abort',
+      () => {
+        closed = true;
+      },
+      { once: true }
+    );
   }
-
-  let videoId: string | null = null;
-  try {
-    const parsedUrl = new URL(request.url);
-    videoId = parsedUrl.searchParams.get('v');
-  } catch {
-    return new Response('Invalid stream URL', {
-      status: 400,
-      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
-    });
-  }
-
-  if (!videoId || !VIDEO_ID_REGEX.test(videoId)) {
-    return new Response('Invalid or missing YouTube video ID', {
-      status: 400,
-      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
-    });
-  }
-
-  let state:
-    | { type: 'cached'; meta: CachedYoutubeStreamMeta; filePath: string }
-    | { type: 'active'; job: ActiveStreamJob };
-
-  try {
-    state = await ensureActiveOrCached(videoId, cacheDir);
-  } catch (err) {
-    return new Response(err instanceof Error ? err.message : 'Stream not found', {
-      status: 404,
-      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
-    });
-  }
-
-  const rangeHeader = request.headers.get('range') || request.headers.get('Range');
-  const parsedRange = parseRangeHeader(rangeHeader);
-
-  // Case 1: Fully cached file on disk
-  if (state.type === 'cached') {
-    const { meta, filePath } = state;
-    const totalSize = meta.contentLength;
-    const contentType = meta.mimeType || 'audio/webm';
-
-    if (!parsedRange) {
-      if (request.method === 'HEAD') {
-        return new Response(null, {
-          status: 200,
-          headers: createCorsHeaders({
-            'Content-Type': contentType,
-            'Content-Length': String(totalSize),
-          }),
-        });
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (closed || cursor > end) {
+        controller.close();
+        return;
       }
-      const data = await fsp.readFile(filePath);
-      return new Response(data, {
+      const chunkEnd = Math.min(end, cursor + DEFAULT_OPEN_RANGE_CHUNK - 1);
+      const chunk = await readSlice(cursor, chunkEnd);
+      if (closed) {
+        controller.close();
+        return;
+      }
+      if (chunk.byteLength === 0) {
+        controller.close();
+        return;
+      }
+      cursor += chunk.byteLength;
+      controller.enqueue(chunk);
+      if (cursor > end) {
+        controller.close();
+      }
+    },
+    cancel() {
+      closed = true;
+    },
+  });
+}
+
+async function serveStaticRange(
+  request: Request,
+  totalSize: number,
+  contentType: string,
+  parsedRange: ParsedRange | null,
+  readSlice: (start: number, end: number) => Promise<Uint8Array>,
+  extraHeaders: Record<string, string> = {}
+): Promise<Response> {
+  if (!parsedRange) {
+    if (request.method === 'HEAD' || totalSize === 0) {
+      return new Response(totalSize === 0 && request.method !== 'HEAD' ? new Uint8Array(0) : null, {
         status: 200,
         headers: createCorsHeaders({
           'Content-Type': contentType,
           'Content-Length': String(totalSize),
+          ...extraHeaders,
         }),
       });
     }
+    const body =
+      totalSize <= 2 * 1024 * 1024
+        ? await readSlice(0, totalSize - 1)
+        : createStaticSliceStream(0, totalSize - 1, readSlice, request.signal);
+    return new Response(body, {
+      status: 200,
+      headers: createCorsHeaders({
+        'Content-Type': contentType,
+        'Content-Length': String(totalSize),
+        ...extraHeaders,
+      }),
+    });
+  }
 
-    let start = parsedRange.start;
-    let end = parsedRange.end;
+  let start = parsedRange.start;
+  let end = parsedRange.end;
 
-    if (start < 0) {
-      const suffixLen = -start;
-      start = Math.max(0, totalSize - suffixLen);
-      end = totalSize - 1;
-    } else if (end === null || end >= totalSize) {
-      end = totalSize - 1;
-    }
+  if (start < 0) {
+    const suffixLen = -start;
+    start = Math.max(0, totalSize - suffixLen);
+    end = totalSize - 1;
+  } else if (end === null || end >= totalSize) {
+    end = totalSize - 1;
+  }
 
-    if (start >= totalSize || start > end) {
-      return new Response('Requested Range Not Satisfiable', {
-        status: 416,
-        headers: createCorsHeaders({
-          'Content-Range': `bytes */${totalSize}`,
-        }),
-      });
-    }
+  if (start >= totalSize || start > end) {
+    return new Response('Requested Range Not Satisfiable', {
+      status: 416,
+      headers: createCorsHeaders({
+        'Content-Range': `bytes */${totalSize}`,
+        ...extraHeaders,
+      }),
+    });
+  }
 
-    const sliceLength = end - start + 1;
-    if (request.method === 'HEAD') {
-      return new Response(null, {
-        status: 206,
-        headers: createCorsHeaders({
-          'Content-Type': contentType,
-          'Content-Length': String(sliceLength),
-          'Content-Range': `bytes ${start}-${end}/${totalSize}`,
-        }),
-      });
-    }
+  const sliceLength = end - start + 1;
+  if (request.method === 'HEAD') {
+    return new Response(null, {
+      status: 206,
+      headers: createCorsHeaders({
+        'Content-Type': contentType,
+        'Content-Length': String(sliceLength),
+        'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+        ...extraHeaders,
+      }),
+    });
+  }
 
-    const slice = await readFileSlice(filePath, start, end);
+  if (sliceLength <= 2 * 1024 * 1024) {
+    const slice = await readSlice(start, end);
     return new Response(slice, {
       status: 206,
       headers: createCorsHeaders({
         'Content-Type': contentType,
         'Content-Length': String(slice.byteLength),
         'Content-Range': `bytes ${start}-${start + slice.byteLength - 1}/${totalSize}`,
+        ...extraHeaders,
       }),
     });
   }
 
-  // Case 2: Active progressive SABR / yt-dlp download
-  const { job } = state;
+  return new Response(createStaticSliceStream(start, end, readSlice, request.signal), {
+    status: 206,
+    headers: createCorsHeaders({
+      'Content-Type': contentType,
+      'Content-Length': String(sliceLength),
+      'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+      ...extraHeaders,
+    }),
+  });
+}
+
+function resolveJobReportedTotal(job: ActiveStreamJob, availableBytes: number): number {
+  if (job.done) {
+    return job.finalSize;
+  }
+  if (job.knownTotalSize !== null && job.knownTotalSize >= availableBytes) {
+    return job.knownTotalSize;
+  }
+  job.reportedTotal = Math.max(
+    job.reportedTotal || job.estimatedSize,
+    availableBytes + 262144
+  );
+  return job.reportedTotal;
+}
+
+async function serveActiveJobRangeResponse(
+  request: Request,
+  job: ActiveStreamJob,
+  parsedRange: ParsedRange | null,
+  extraHeaders: Record<string, string> = {}
+): Promise<Response> {
+  const contentType = job.mimeType || 'audio/webm';
 
   if (!parsedRange) {
-    await job.completionPromise;
-    if (job.error || !job.done) {
-      return new Response(job.error?.message || 'Stream failed', {
-        status: 500,
-        headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+    if (job.done) {
+      return serveStaticRange(
+        request,
+        job.finalSize,
+        contentType,
+        null,
+        (s, e) => readFileSlice(job.finalPath, s, e),
+        extraHeaders
+      );
+    }
+    if (request.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: createCorsHeaders({
+          'Content-Type': contentType,
+          ...(job.knownTotalSize !== null ? { 'Content-Length': String(job.knownTotalSize) } : {}),
+          ...extraHeaders,
+        }),
       });
     }
-    const contentType = job.mimeType || 'audio/webm';
-    const data = await fsp.readFile(job.finalPath);
-    return new Response(data, {
+    return new Response(createLiveJobStream(job, 0, request.signal), {
       status: 200,
       headers: createCorsHeaders({
         'Content-Type': contentType,
-        'Content-Length': String(data.byteLength),
+        ...extraHeaders,
       }),
     });
   }
@@ -1169,33 +1646,88 @@ export async function resolveYoutubeStreamProtocolRequest(
     if (job.error || !job.done) {
       return new Response(job.error?.message || 'Stream failed', {
         status: 500,
-        headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+        headers: createCorsHeaders({ 'Content-Type': 'text/plain', ...extraHeaders }),
       });
     }
-    const contentType = job.mimeType || 'audio/webm';
-    const totalSize = job.finalSize;
-    const start = Math.max(0, totalSize + parsedRange.start);
-    const end = totalSize - 1;
-    const slice = await readFileSlice(job.finalPath, start, end);
-    return new Response(slice, {
-      status: 206,
-      headers: createCorsHeaders({
-        'Content-Type': contentType,
-        'Content-Length': String(slice.byteLength),
-        'Content-Range': `bytes ${start}-${end}/${totalSize}`,
-      }),
-    });
+    return serveStaticRange(
+      request,
+      job.finalSize,
+      contentType,
+      parsedRange,
+      (s, e) => readFileSlice(job.finalPath, s, e),
+      extraHeaders
+    );
   }
 
   const start = parsedRange.start;
   const requestedEnd = parsedRange.end;
-  const targetEnd =
-    requestedEnd !== null ? requestedEnd : start + DEFAULT_OPEN_RANGE_CHUNK - 1;
+
+  // Open-ended range (e.g., Range: bytes=0- or Range: bytes=N-)
+  if (requestedEnd === null) {
+    while (!job.done && !job.error && !job.aborted && job.bytesWritten <= start) {
+      try {
+        await waitForJobProgress(job, RANGE_WAIT_TIMEOUT_MS);
+      } catch {
+        break;
+      }
+    }
+
+    if (job.error && job.bytesWritten <= start) {
+      return new Response(job.error.message, {
+        status: 502,
+        headers: createCorsHeaders({ 'Content-Type': 'text/plain', ...extraHeaders }),
+      });
+    }
+
+    if (job.done) {
+      return serveStaticRange(
+        request,
+        job.finalSize,
+        contentType,
+        parsedRange,
+        (s, e) => readFileSlice(job.finalPath, s, e),
+        extraHeaders
+      );
+    }
+
+    const availableBytes = job.bytesWritten;
+    const reportedTotal = resolveJobReportedTotal(job, availableBytes);
+    if (job.knownTotalSize !== null && start >= reportedTotal) {
+      return new Response('Requested Range Not Satisfiable', {
+        status: 416,
+        headers: createCorsHeaders({
+          'Content-Range': `bytes */${reportedTotal}`,
+          ...extraHeaders,
+        }),
+      });
+    }
+
+    const openRangeHeaders: Record<string, string> = {
+      'Content-Type': contentType,
+      'Content-Range': `bytes ${start}-${reportedTotal - 1}/${reportedTotal}`,
+      ...extraHeaders,
+    };
+    if (job.knownTotalSize !== null) {
+      openRangeHeaders['Content-Length'] = String(Math.max(0, reportedTotal - start));
+    }
+
+    if (request.method === 'HEAD') {
+      return new Response(null, {
+        status: 206,
+        headers: createCorsHeaders(openRangeHeaders),
+      });
+    }
+
+    return new Response(createLiveJobStream(job, start, request.signal), {
+      status: 206,
+      headers: createCorsHeaders(openRangeHeaders),
+    });
+  }
+
+  // Bounded range (requestedEnd !== null)
+  const targetEnd = requestedEnd;
 
   while (!job.done && !job.error && !job.aborted && job.bytesWritten <= targetEnd) {
-    if (requestedEnd === null && job.bytesWritten >= start + 64 * 1024) {
-      break;
-    }
     try {
       await waitForJobProgress(job, RANGE_WAIT_TIMEOUT_MS);
     } catch {
@@ -1203,12 +1735,10 @@ export async function resolveYoutubeStreamProtocolRequest(
     }
   }
 
-  const contentType = job.mimeType || 'audio/webm';
-
   if (job.error && job.bytesWritten <= start) {
     return new Response(job.error.message, {
       status: 502,
-      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+      headers: createCorsHeaders({ 'Content-Type': 'text/plain', ...extraHeaders }),
     });
   }
 
@@ -1218,14 +1748,13 @@ export async function resolveYoutubeStreamProtocolRequest(
       status: 416,
       headers: createCorsHeaders({
         'Content-Range': `bytes */${availableBytes}`,
+        ...extraHeaders,
       }),
     });
   }
 
   const actualEnd = Math.min(targetEnd, availableBytes - 1);
-  const reportedTotal = job.done
-    ? job.finalSize
-    : Math.max(job.estimatedSize, availableBytes, actualEnd + 1);
+  const reportedTotal = resolveJobReportedTotal(job, availableBytes);
 
   if (request.method === 'HEAD') {
     return new Response(null, {
@@ -1234,6 +1763,7 @@ export async function resolveYoutubeStreamProtocolRequest(
         'Content-Type': contentType,
         'Content-Length': String(actualEnd - start + 1),
         'Content-Range': `bytes ${start}-${actualEnd}/${reportedTotal}`,
+        ...extraHeaders,
       }),
     });
   }
@@ -1252,33 +1782,588 @@ export async function resolveYoutubeStreamProtocolRequest(
       'Content-Type': contentType,
       'Content-Length': String(slice.byteLength),
       'Content-Range': `bytes ${start}-${start + slice.byteLength - 1}/${reportedTotal}`,
+      ...extraHeaders,
     }),
   });
 }
 
-export async function destroyAllSabrStreams(): Promise<void> {
-  const jobs = Array.from(activeJobs.values());
-  activeJobs.clear();
+function createLiveJobStream(
+  job: ActiveStreamJob,
+  startOffset: number,
+  signal?: AbortSignal
+): ReadableStream<Uint8Array> {
+  let cursor = startOffset;
+  let closed = false;
+  let activeWaiter: (() => void) | null = null;
 
-  await Promise.all(
-    jobs.map(async (job) => {
-      job.aborted = true;
-      notifyWaiters(job);
-      if (job.sabrStream) {
-        await job.sabrStream.abort().catch(() => {});
+  const cleanup = () => {
+    closed = true;
+    if (activeWaiter) {
+      job.waiters.delete(activeWaiter);
+      const w = activeWaiter;
+      activeWaiter = null;
+      w();
+    }
+  };
+
+  if (signal) {
+    if (signal.aborted) {
+      closed = true;
+    } else {
+      signal.addEventListener('abort', cleanup, { once: true });
+    }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (!closed) {
+        const available = job.done ? job.finalSize : job.bytesWritten;
+        if (cursor < available) {
+          const readEnd = Math.min(available - 1, cursor + DEFAULT_OPEN_RANGE_CHUNK - 1);
+          let slice: Uint8Array;
+          try {
+            const readPath = job.done ? job.finalPath : job.partPath;
+            slice = await readFileSlice(readPath, cursor, readEnd);
+          } catch {
+            slice = await readFileSlice(job.finalPath, cursor, readEnd);
+          }
+          if (closed) return;
+          if (slice.byteLength > 0) {
+            cursor += slice.byteLength;
+            controller.enqueue(slice);
+            if (job.done && cursor >= job.finalSize) {
+              cleanup();
+              controller.close();
+            }
+            return;
+          }
+        }
+
+        if (job.done && cursor >= job.finalSize) {
+          cleanup();
+          controller.close();
+          return;
+        }
+
+        if (job.error || job.aborted) {
+          cleanup();
+          if (cursor > startOffset) {
+            controller.close();
+          } else {
+            controller.error(job.error || new Error('Stream aborted'));
+          }
+          return;
+        }
+
+        await new Promise<void>((resolve) => {
+          if (closed || job.done || job.error || job.aborted || job.bytesWritten > cursor) {
+            resolve();
+            return;
+          }
+          const timer = setTimeout(() => {
+            if (activeWaiter === onProgress) {
+              job.waiters.delete(onProgress);
+              activeWaiter = null;
+            }
+            resolve();
+          }, RANGE_WAIT_TIMEOUT_MS);
+          timer.unref?.();
+
+          const onProgress = () => {
+            clearTimeout(timer);
+            if (activeWaiter === onProgress) {
+              job.waiters.delete(onProgress);
+              activeWaiter = null;
+            }
+            resolve();
+          };
+          activeWaiter = onProgress;
+          job.waiters.add(onProgress);
+        });
       }
-      if (job.childProcess) {
-        try {
-          job.childProcess.kill('SIGTERM');
-        } catch {
-          // Ignore kill errors
+    },
+    cancel() {
+      // Close ONLY this per-request stream reader; never abort the shared ActiveStreamJob
+      cleanup();
+    },
+  });
+}
+
+function inferAudioMimeFromUrl(targetUrl: string): string {
+  const lower = targetUrl.toLowerCase().split('?')[0];
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (lower.endsWith('.m4a') || lower.endsWith('.mp4') || lower.endsWith('.aac')) return 'audio/mp4';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.ogg') || lower.endsWith('.opus')) return 'audio/ogg';
+  if (lower.endsWith('.webm')) return 'audio/webm';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  return 'audio/flac';
+}
+
+function startProxyCacheJob(
+  proxyKey: string,
+  cacheDir: string,
+  partPath: string,
+  finalPath: string,
+  contentType: string,
+  upstreamBody: ReadableStream<Uint8Array> | null,
+  knownTotalSize: number | null,
+  abortController: AbortController
+): ActiveStreamJob {
+  const estimatedSize = knownTotalSize && knownTotalSize > 0 ? knownTotalSize : 8 * 1024 * 1024;
+  const job: ActiveStreamJob = {
+    videoId: path.basename(finalPath, '.bin'),
+    cacheDir,
+    partPath,
+    finalPath,
+    metaPath: '',
+    ext: 'bin',
+    mimeType: contentType,
+    itag: 0,
+    durationSec: 0,
+    sourceClient: 'proxy',
+    estimatedSize,
+    bytesWritten: 0,
+    finalSize: 0,
+    done: false,
+    error: null,
+    sabrStream: null,
+    childProcess: null,
+    fileHandle: null,
+    aborted: false,
+    waiters: new Set(),
+    completionPromise: Promise.resolve(),
+    startMs: 0,
+    actualStartMs: 0,
+    reportedTotal: estimatedSize,
+    knownTotalSize,
+    isSeekJob: false,
+    abortController,
+  };
+
+  activeProxyJobs.set(proxyKey, job);
+
+  job.completionPromise = (async () => {
+    let fh: fsp.FileHandle | null = null;
+    const reader = upstreamBody ? upstreamBody.getReader() : null;
+    try {
+      await fsp.mkdir(cacheDir, { recursive: true });
+      fh = await fsp.open(partPath, 'w');
+      job.fileHandle = fh;
+
+      if (reader) {
+        while (true) {
+          if (job.aborted) break;
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value || value.byteLength === 0) continue;
+          const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+          await fh.write(buf, 0, buf.length, job.bytesWritten);
+          job.bytesWritten += buf.length;
+          notifyWaiters(job);
         }
       }
-      if (job.fileHandle) {
-        await job.fileHandle.close().catch(() => {});
+
+      if (job.aborted) {
+        throw new Error('Proxy download aborted');
+      }
+
+      await fh.close();
+      fh = null;
+      job.fileHandle = null;
+
+      await finalizePartFile(partPath, finalPath);
+      job.finalSize = job.bytesWritten;
+      job.knownTotalSize = job.bytesWritten;
+      job.done = true;
+      completedProxyMimes.set(proxyKey, contentType);
+      notifyWaiters(job);
+    } catch (err) {
+      if (reader) {
+        await reader.cancel().catch(() => {});
+      }
+      if (fh) {
+        await fh.close().catch(() => {});
         job.fileHandle = null;
       }
-      await fsp.unlink(job.partPath).catch(() => {});
-    })
-  );
+      await fsp.unlink(partPath).catch(() => {});
+      job.error = err instanceof Error ? err : new Error(String(err));
+      notifyWaiters(job);
+    } finally {
+      try {
+        reader?.releaseLock();
+      } catch {
+        // Ignore release errors
+      }
+      job.abortController = null;
+      if (activeProxyJobs.get(proxyKey) === job) {
+        activeProxyJobs.delete(proxyKey);
+      }
+    }
+  })();
+
+  return job;
+}
+
+export async function resolveRemoteAudioProxyRequest(
+  request: Request,
+  cacheDir: string = getDefaultCacheDir()
+): Promise<Response> {
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: createCorsHeaders() });
+  }
+
+  let targetUrl: string | null = null;
+  try {
+    const parsedUrl = new URL(request.url);
+    targetUrl = parsedUrl.searchParams.get('url');
+  } catch {
+    return new Response('Invalid proxy request URL', {
+      status: 400,
+      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+    });
+  }
+
+  if (!targetUrl) {
+    return new Response('Missing target url parameter', {
+      status: 400,
+      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+    });
+  }
+
+  let parsedTarget: URL;
+  try {
+    parsedTarget = new URL(targetUrl);
+    if (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:') {
+      throw new Error('Unsupported protocol');
+    }
+  } catch {
+    return new Response('Invalid target audio URL', {
+      status: 400,
+      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+    });
+  }
+
+  const rangeHeader = request.headers.get('range') || request.headers.get('Range');
+  const parsedRange = parseRangeHeader(rangeHeader);
+  const urlHash = crypto.createHash('sha1').update(parsedTarget.toString()).digest('hex');
+  const proxyKey = `${path.resolve(cacheDir)}::${urlHash}`;
+  const partPath = path.join(cacheDir, `proxy-${urlHash}.part`);
+  const finalPath = path.join(cacheDir, `proxy-${urlHash}.bin`);
+
+  if (parsedRange) {
+    const existingJob = activeProxyJobs.get(proxyKey);
+    if (existingJob && !existingJob.error && !existingJob.aborted) {
+      return serveActiveJobRangeResponse(request, existingJob, parsedRange);
+    }
+
+    try {
+      const stat = await fsp.stat(finalPath);
+      if (stat.isFile() && stat.size > 0) {
+        const mimeType =
+          completedProxyMimes.get(proxyKey) || inferAudioMimeFromUrl(parsedTarget.toString());
+        return serveStaticRange(
+          request,
+          stat.size,
+          mimeType,
+          parsedRange,
+          (s, e) => readFileSlice(finalPath, s, e)
+        );
+      }
+    } catch {
+      // Cache miss; fetch upstream
+    }
+  }
+
+  const upstreamHeaders: Record<string, string> = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+    Accept: '*/*',
+  };
+  if (rangeHeader) {
+    upstreamHeaders['Range'] = rangeHeader;
+  }
+
+  const jobAbortController = new AbortController();
+  let promoteToBackgroundJob = false;
+  const onReqAbort = () => {
+    if (!promoteToBackgroundJob) {
+      jobAbortController.abort();
+    }
+  };
+  if (request.signal) {
+    if (request.signal.aborted) {
+      return new Response(null, { status: 499, headers: createCorsHeaders() });
+    }
+    request.signal.addEventListener('abort', onReqAbort, { once: true });
+  }
+
+  try {
+    const upstreamRes = await fetch(parsedTarget.toString(), {
+      method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers: upstreamHeaders,
+      signal: jobAbortController.signal,
+      redirect: 'follow',
+    });
+
+    const rawContentType = upstreamRes.headers.get('content-type') || '';
+    const contentType =
+      rawContentType && !rawContentType.includes('application/octet-stream')
+        ? rawContentType
+        : inferAudioMimeFromUrl(parsedTarget.toString());
+
+    const rawContentLength = upstreamRes.headers.get('content-length');
+    const parsedUpstreamLength =
+      rawContentLength !== null && /^\d+$/.test(rawContentLength.trim())
+        ? parseInt(rawContentLength.trim(), 10)
+        : null;
+
+    // If client sent Range and upstream returned 200 OK (ignored Range), stream into
+    // deduplicated disk cache and serve strict HTTP 206 Partial Content slices.
+    if (parsedRange && upstreamRes.status === 200) {
+      if (request.method === 'HEAD') {
+        request.signal?.removeEventListener('abort', onReqAbort);
+        if (parsedUpstreamLength !== null && parsedUpstreamLength > 0) {
+          const totalSize = parsedUpstreamLength;
+          let start = parsedRange.start;
+          let end = parsedRange.end;
+          if (start < 0) {
+            start = Math.max(0, totalSize + start);
+            end = totalSize - 1;
+          } else if (end === null || end >= totalSize) {
+            end = totalSize - 1;
+          }
+          if (start >= totalSize || start > end) {
+            return new Response(null, {
+              status: 416,
+              headers: createCorsHeaders({
+                'Content-Type': contentType,
+                'Content-Range': `bytes */${totalSize}`,
+              }),
+            });
+          }
+          return new Response(null, {
+            status: 206,
+            headers: createCorsHeaders({
+              'Content-Type': contentType,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': String(end - start + 1),
+              'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+            }),
+          });
+        }
+        return new Response(null, {
+          status: 200,
+          headers: createCorsHeaders({
+            'Content-Type': contentType,
+            'Accept-Ranges': 'bytes',
+            ...(rawContentLength ? { 'Content-Length': rawContentLength } : {}),
+          }),
+        });
+      }
+
+      const concurrentJob = activeProxyJobs.get(proxyKey);
+      if (concurrentJob && !concurrentJob.error && !concurrentJob.aborted) {
+        request.signal?.removeEventListener('abort', onReqAbort);
+        await upstreamRes.body?.cancel().catch(() => {});
+        return serveActiveJobRangeResponse(request, concurrentJob, parsedRange);
+      }
+
+      promoteToBackgroundJob = true;
+      request.signal?.removeEventListener('abort', onReqAbort);
+      const proxyJob = startProxyCacheJob(
+        proxyKey,
+        cacheDir,
+        partPath,
+        finalPath,
+        contentType,
+        upstreamRes.body,
+        parsedUpstreamLength,
+        jobAbortController
+      );
+      return serveActiveJobRangeResponse(request, proxyJob, parsedRange);
+    }
+
+    const extraHeaders: Record<string, string> = {
+      'Content-Type': contentType,
+      'Accept-Ranges':
+        upstreamRes.status === 206 ? 'bytes' : upstreamRes.headers.get('accept-ranges') || 'bytes',
+    };
+
+    const contentRange = upstreamRes.headers.get('content-range');
+    if (contentRange) {
+      extraHeaders['Content-Range'] = contentRange;
+    }
+
+    if (rawContentLength) {
+      extraHeaders['Content-Length'] = rawContentLength;
+    } else if (upstreamRes.status === 206 && contentRange) {
+      const crMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(?:\d+|\*)$/i);
+      if (crMatch) {
+        const crStart = Number(crMatch[1]);
+        const crEnd = Number(crMatch[2]);
+        if (Number.isFinite(crStart) && Number.isFinite(crEnd) && crEnd >= crStart) {
+          extraHeaders['Content-Length'] = String(crEnd - crStart + 1);
+        }
+      }
+    }
+
+    return new Response(request.method === 'HEAD' ? null : upstreamRes.body, {
+      status: upstreamRes.status,
+      headers: createCorsHeaders(extraHeaders),
+    });
+  } catch (err) {
+    if (request.signal?.aborted) {
+      return new Response(null, { status: 499, headers: createCorsHeaders() });
+    }
+    return new Response(
+      err instanceof Error ? err.message : 'Upstream audio proxy fetch failed',
+      {
+        status: 502,
+        headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+      }
+    );
+  }
+}
+
+export async function resolveYoutubeStreamProtocolRequest(
+  request: Request,
+  cacheDir: string = getDefaultCacheDir()
+): Promise<Response> {
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: createCorsHeaders() });
+  }
+
+  let videoId: string | null = null;
+  let startMs = 0;
+  try {
+    const parsedUrl = new URL(request.url);
+    if (
+      parsedUrl.hostname === 'proxy' ||
+      parsedUrl.pathname === '/proxy' ||
+      (!parsedUrl.searchParams.get('v') && parsedUrl.searchParams.get('url'))
+    ) {
+      return resolveRemoteAudioProxyRequest(request, cacheDir);
+    }
+    videoId = parsedUrl.searchParams.get('v');
+    startMs = Math.max(0, Math.floor(Number(parsedUrl.searchParams.get('startMs')) || 0));
+  } catch {
+    return new Response('Invalid stream URL', {
+      status: 400,
+      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+    });
+  }
+
+  if (!videoId || !VIDEO_ID_REGEX.test(videoId)) {
+    return new Response('Invalid or missing YouTube video ID', {
+      status: 400,
+      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+    });
+  }
+
+  const rangeHeader = request.headers.get('range') || request.headers.get('Range');
+  const parsedRange = parseRangeHeader(rangeHeader);
+
+  if (startMs > 0) {
+    const serveCachedSeekSlice = async (): Promise<Response | null> => {
+      const cached = await readCachedMeta(cacheDir, videoId);
+      if (
+        cached &&
+        (cached.meta.ext === 'webm' || (cached.meta.mimeType || '').includes('webm'))
+      ) {
+        const seekSlice = await findWebmClusterSeekSlice(cached.filePath, startMs);
+        if (seekSlice) {
+          const contentType = cached.meta.mimeType || 'audio/webm';
+          return serveStaticRange(
+            request,
+            seekSlice.totalLength,
+            contentType,
+            parsedRange,
+            (s, e) => readVirtualSeekSlice(cached.filePath, seekSlice, s, e),
+            { 'X-Waveform-Start-Ms': String(seekSlice.actualStartMs) }
+          );
+        }
+      }
+      return null;
+    };
+
+    const cachedResp = await serveCachedSeekSlice();
+    if (cachedResp) return cachedResp;
+
+    try {
+      const seekJob = await ensureSeekJob(videoId, cacheDir, startMs);
+      return serveActiveJobRangeResponse(request, seekJob, parsedRange, {
+        'X-Waveform-Start-Ms': String(seekJob.actualStartMs ?? startMs),
+      });
+    } catch (err) {
+      if (request.signal?.aborted) {
+        return new Response(null, { status: 499, headers: createCorsHeaders() });
+      }
+      if (!(err instanceof Error && err.message.includes('superseded'))) {
+        const cachedAfter = await serveCachedSeekSlice();
+        if (cachedAfter) return cachedAfter;
+
+        const jobKey = getJobKey(cacheDir, videoId);
+        try {
+          const bgJob = activeJobs.get(jobKey) || (await startYtDlpFallbackJob(videoId, cacheDir));
+          await bgJob.completionPromise;
+          if (!request.signal?.aborted) {
+            const cachedFromBg = await serveCachedSeekSlice();
+            if (cachedFromBg) return cachedFromBg;
+          }
+        } catch {
+          // Fall through to 404 error below
+        }
+      }
+
+      return new Response(err instanceof Error ? err.message : 'Stream not found', {
+        status: 404,
+        headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+      });
+    }
+  }
+
+  let state:
+    | { type: 'cached'; meta: CachedYoutubeStreamMeta; filePath: string }
+    | { type: 'active'; job: ActiveStreamJob };
+
+  try {
+    state = await ensureActiveOrCached(videoId, cacheDir);
+  } catch (err) {
+    return new Response(err instanceof Error ? err.message : 'Stream not found', {
+      status: 404,
+      headers: createCorsHeaders({ 'Content-Type': 'text/plain' }),
+    });
+  }
+
+  // Case 1: Fully cached file on disk
+  if (state.type === 'cached') {
+    const { meta, filePath } = state;
+    const totalSize = meta.contentLength;
+    const contentType = meta.mimeType || 'audio/webm';
+    return serveStaticRange(
+      request,
+      totalSize,
+      contentType,
+      parsedRange,
+      (s, e) => readFileSlice(filePath, s, e)
+    );
+  }
+
+  // Case 2: Active progressive SABR / yt-dlp download
+  return serveActiveJobRangeResponse(request, state.job, parsedRange);
+}
+
+export async function destroyAllSabrStreams(): Promise<void> {
+  const jobs = [
+    ...activeJobs.values(),
+    ...activeSeekJobs.values(),
+    ...activeProxyJobs.values(),
+  ];
+  activeJobs.clear();
+  activeSeekJobs.clear();
+  activeProxyJobs.clear();
+  activeSeekSeq.clear();
+
+  await Promise.all(jobs.map((job) => abortAndCleanupJob(job)));
 }

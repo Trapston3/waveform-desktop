@@ -14,6 +14,12 @@ import { useThemeStore } from '../theme/Theme';
 import { SyllableLyricsEngine } from '../player/SyllableLyricsEngine';
 import type { Song } from '../../models/Song';
 
+function isValidImageUrl(url: unknown): url is string {
+  if (typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  return Boolean(trimmed && trimmed !== 'undefined' && trimmed !== 'null');
+}
+
 export interface RightSidecarProps {
   isOpen: boolean;
   onClose: () => void;
@@ -31,6 +37,31 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
   currentTrack: fallbackTrack,
 }) => {
   const [activeTab, setActiveTab] = useState<'lyrics' | 'queue'>('lyrics');
+  const [brokenArt, setBrokenArt] = useState<Record<string, boolean>>({});
+
+  const markArtBroken = (url: string) =>
+    setBrokenArt((prev) => (prev[url] ? prev : { ...prev, [url]: true }));
+
+  const renderCoverArt = (url: unknown, iconSize: number) => {
+    if (isValidImageUrl(url)) {
+      const src = url.trim();
+      if (!brokenArt[src]) {
+        return (
+          <img
+            src={src}
+            alt="cover"
+            onError={() => markArtBroken(src)}
+            className="w-full h-full object-cover"
+          />
+        );
+      }
+    }
+    return (
+      <div className="w-full h-full flex items-center justify-center text-neutral-600">
+        <Music2 size={iconSize} />
+      </div>
+    );
+  };
 
   const isLyricsDrawerOpen = useNavigationStore((s) => s.isLyricsDrawerOpen);
   const isQueueDrawerOpen = useNavigationStore((s) => s.isQueueDrawerOpen);
@@ -174,17 +205,7 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
             {currentPlaying && (
               <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white/[0.06] border border-[var(--color-accent)]/30">
                 <div className="w-10 h-10 rounded-lg overflow-hidden bg-neutral-900 shrink-0">
-                  {currentPlaying.thumbnailUrl ? (
-                    <img
-                      src={currentPlaying.thumbnailUrl}
-                      alt="cover"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-neutral-600">
-                      <Music2 size={16} />
-                    </div>
-                  )}
+                  {renderCoverArt(currentPlaying.thumbnailUrl, 16)}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-xs font-bold text-[var(--color-accent)] truncate">
@@ -220,13 +241,7 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
                       className="text-[var(--color-on-surface-variant)] opacity-30 group-hover:opacity-100 cursor-grab"
                     />
                     <div className="w-8 h-8 rounded overflow-hidden bg-neutral-900 shrink-0">
-                      {item.thumbnailUrl ? (
-                        <img src={item.thumbnailUrl} alt="cover" className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-neutral-600">
-                          <Music2 size={12} />
-                        </div>
-                      )}
+                      {renderCoverArt(item.thumbnailUrl, 12)}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-medium text-white truncate">{item.title}</div>
@@ -263,13 +278,7 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
                     className="queue-row group flex items-center gap-2 p-2 rounded-lg hover:bg-white/[0.06] transition-all cursor-pointer"
                   >
                     <div className="w-8 h-8 rounded overflow-hidden bg-neutral-900 shrink-0">
-                      {item.thumbnailUrl ? (
-                        <img src={item.thumbnailUrl} alt="cover" className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-neutral-600">
-                          <Music2 size={12} />
-                        </div>
-                      )}
+                      {renderCoverArt(item.thumbnailUrl, 12)}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-medium text-white truncate">{item.title}</div>
@@ -296,13 +305,7 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
                     className="queue-row group flex items-center gap-2 p-2 rounded-lg hover:bg-white/[0.06] transition-all cursor-pointer"
                   >
                     <div className="w-8 h-8 rounded overflow-hidden bg-neutral-900 shrink-0">
-                      {item.thumbnailUrl ? (
-                        <img src={item.thumbnailUrl} alt="cover" className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-neutral-600">
-                          <Music2 size={12} />
-                        </div>
-                      )}
+                      {renderCoverArt(item.thumbnailUrl, 12)}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-medium text-white truncate">{item.title}</div>

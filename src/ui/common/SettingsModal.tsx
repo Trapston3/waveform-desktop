@@ -22,6 +22,21 @@ import {
 import { useSettingsStore } from '../../state/settingsStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
+import {
+  resolveStyleVariationId,
+  VISUAL_STYLE_DEFINITIONS,
+  type VisualStyleId,
+} from '../../lyricVisualizer/core';
+import {
+  MAX_BACKGROUND_OPACITY,
+  MAX_FONT_SIZE_SCALE,
+  MAX_VIGNETTE_STRENGTH,
+  MIN_BACKGROUND_OPACITY,
+  MIN_FONT_SIZE_SCALE,
+  MIN_VIGNETTE_STRENGTH,
+  type MotionIntensity,
+  useLyricVisualizerStore,
+} from '../../lyricVisualizer/state/lyricVisualizerStore';
 import { FACTORY_EQ_PRESETS } from '../../audio/DspChain';
 import { LocalMediaScanner } from '../../services/LocalMediaScanner';
 import {
@@ -69,6 +84,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const { settings, updateSettings, resetToDefaults } = useSettingsStore();
   const resetListeningData = useLibraryStore((s) => s.resetListeningData);
   const startLocalMediaScan = useLibraryStore((s) => s.startLocalMediaScan);
+
+  const vizConfig = useLyricVisualizerStore((s) => s.config);
+  const setStyleId = useLyricVisualizerStore((s) => s.setStyleId);
+  const setStyleVariation = useLyricVisualizerStore((s) => s.setStyleVariation);
+  const setFontSizeScale = useLyricVisualizerStore((s) => s.setFontSizeScale);
+  const setMotionIntensity = useLyricVisualizerStore((s) => s.setMotionIntensity);
+  const setAudioReactive = useLyricVisualizerStore((s) => s.setAudioReactive);
+  const setBackgroundOpacity = useLyricVisualizerStore((s) => s.setBackgroundOpacity);
+  const setVignetteStrength = useLyricVisualizerStore((s) => s.setVignetteStrength);
+  const setAlbumArtColorMatch = useLyricVisualizerStore((s) => s.setAlbumArtColorMatch);
+  const setTextAlign = useLyricVisualizerStore((s) => s.setTextAlign);
+
+  const activeVizStyle =
+    VISUAL_STYLE_DEFINITIONS.find((s) => s.id === vizConfig.styleId) ??
+    VISUAL_STYLE_DEFINITIONS[0];
+  const activeVizVariationId = resolveStyleVariationId(
+    vizConfig.styleId,
+    vizConfig.variationByStyle
+  );
 
   useEffect(() => {
     if (!isOpen) return;
@@ -314,6 +348,65 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
           <option value="bars68">68-Bar Waveform Seekbar</option>
           <option value="thinSlider">Thin Slider</option>
         </select>
+      ),
+    },
+    {
+      id: 'nowPlayingLayout',
+      tab: 'appearance',
+      title: 'Now Playing Layout',
+      description: 'Choose between Split View, Centered Lyrics, or Full Ambient stage',
+      keywords: 'now playing layout split centered ambient lyrics',
+      control: (
+        <div className="flex items-center gap-1">
+          {(
+            [
+              { id: 'split', label: 'Split View' },
+              { id: 'centered', label: 'Centered Lyrics' },
+              { id: 'ambient', label: 'Full Ambient' },
+            ] as const
+          ).map((opt) => {
+            const active = settings.nowPlayingLayout === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() =>
+                  handleUpdate({
+                    nowPlayingLayout: opt.id,
+                    'appearance.nowPlayingLayout': opt.id,
+                  })
+                }
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-[var(--color-accent)] text-white border-transparent'
+                    : 'bg-[var(--color-surface-variant)] text-[var(--color-primary)] border-[var(--color-outline)] hover:border-[var(--color-accent)]'
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      ),
+    },
+    {
+      id: 'hideAlbumCover',
+      tab: 'appearance',
+      title: 'Hide Album Cover in Now Playing',
+      description: 'Collapse artwork lockup and show auto-fading bottom control dock',
+      keywords: 'hide album cover artwork centered dock',
+      control: (
+        <input
+          type="checkbox"
+          checked={Boolean(settings.hideAlbumCover)}
+          onChange={(e) =>
+            handleUpdate({
+              hideAlbumCover: e.target.checked,
+              'appearance.hideAlbumCover': e.target.checked,
+            })
+          }
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
       ),
     },
 
@@ -582,6 +675,234 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
           value={settings['lyrics.fontSize']}
           onChange={(e) => handleUpdate({ 'lyrics.fontSize': parseInt(e.target.value, 10) })}
           className="w-32 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'lyricsAlignment',
+      tab: 'lyrics',
+      title: 'Lyric Justification',
+      description: 'Align lyrics left or centered in Now Playing & Visualizer stages',
+      keywords: 'lyrics alignment centered left justification',
+      control: (
+        <div className="flex items-center gap-1">
+          {(
+            [
+              { id: 'center', label: 'Centered' },
+              { id: 'left', label: 'Left' },
+            ] as const
+          ).map((opt) => {
+            const active = (vizConfig.textAlign ?? settings.lyricsAlignment) === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => {
+                  setTextAlign(opt.id);
+                  handleUpdate({
+                    lyricsAlignment: opt.id,
+                    'lyrics.alignment': opt.id,
+                  });
+                }}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-[var(--color-accent)] text-white border-transparent'
+                    : 'bg-[var(--color-surface-variant)] text-[var(--color-primary)] border-[var(--color-outline)] hover:border-[var(--color-accent)]'
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      ),
+    },
+    {
+      id: 'visualizerStyle',
+      tab: 'lyrics',
+      title: 'Visualizer Style',
+      description: activeVizStyle.description,
+      keywords: 'visualizer style theme 12 styles',
+      control: (
+        <select
+          value={vizConfig.styleId}
+          onChange={(e) => {
+            setStyleId(e.target.value as VisualStyleId);
+            flashSaved();
+          }}
+          className="px-3 py-1.5 rounded-lg bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs text-[var(--color-primary)]"
+        >
+          {VISUAL_STYLE_DEFINITIONS.map((style) => (
+            <option key={style.id} value={style.id}>
+              {style.label}
+            </option>
+          ))}
+        </select>
+      ),
+    },
+    ...(activeVizStyle.variations.length > 1
+      ? [
+          {
+            id: 'visualizerVariation',
+            tab: 'lyrics' as SettingsTab,
+            title: `${activeVizStyle.label} Variation`,
+            description: 'Select visual preset variation for the active visualizer style',
+            keywords: 'visualizer variation preset substyle',
+            control: (
+              <div className="flex flex-wrap justify-end gap-1 max-w-xs">
+                {activeVizStyle.variations.map((v) => {
+                  const active = activeVizVariationId === v.id;
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      title={v.description}
+                      onClick={() => {
+                        setStyleVariation(activeVizStyle.id, v.id);
+                        flashSaved();
+                      }}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-[var(--color-accent)] text-white border-transparent'
+                          : 'bg-[var(--color-surface-variant)] text-[var(--color-primary)] border-[var(--color-outline)] hover:border-[var(--color-accent)]'
+                      }`}
+                    >
+                      {v.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ),
+          },
+        ]
+      : []),
+    {
+      id: 'visualizerTypographyScale',
+      tab: 'lyrics',
+      title: 'Visualizer Typography Scale',
+      description: `Scale factor (${vizConfig.fontSizeScale.toFixed(2)}x)`,
+      keywords: 'visualizer typography text size scale',
+      control: (
+        <input
+          type="range"
+          min={MIN_FONT_SIZE_SCALE}
+          max={MAX_FONT_SIZE_SCALE}
+          step="0.05"
+          value={vizConfig.fontSizeScale}
+          onChange={(e) => {
+            setFontSizeScale(parseFloat(e.target.value));
+            flashSaved();
+          }}
+          className="w-32 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'visualizerMotionIntensity',
+      tab: 'lyrics',
+      title: 'Visualizer Motion Intensity',
+      description: 'Control animation amplitude and camera dynamics',
+      keywords: 'visualizer motion intensity subtle normal vivid',
+      control: (
+        <div className="flex items-center gap-1">
+          {(['subtle', 'normal', 'vivid'] as MotionIntensity[]).map((opt) => {
+            const active = (vizConfig.motionIntensity || 'normal') === opt;
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => {
+                  setMotionIntensity(opt);
+                  flashSaved();
+                }}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium capitalize border transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-[var(--color-accent)] text-white border-transparent'
+                    : 'bg-[var(--color-surface-variant)] text-[var(--color-primary)] border-[var(--color-outline)] hover:border-[var(--color-accent)]'
+                }`}
+              >
+                {opt}
+              </button>
+            );
+          })}
+        </div>
+      ),
+    },
+    {
+      id: 'visualizerAudioReactive',
+      tab: 'lyrics',
+      title: 'Visualizer Audio Reactivity',
+      description: 'Drive visualizer motion and pulse from live FFT audio energy',
+      keywords: 'visualizer audio reactive fft beat',
+      control: (
+        <input
+          type="checkbox"
+          checked={vizConfig.audioReactive}
+          onChange={(e) => {
+            setAudioReactive(e.target.checked);
+            flashSaved();
+          }}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'visualizerBackgroundOpacity',
+      tab: 'lyrics',
+      title: 'Visualizer Background Opacity',
+      description: `Backdrop opacity (${Math.round((vizConfig.backgroundOpacity ?? 0.95) * 100)}%)`,
+      keywords: 'visualizer background opacity',
+      control: (
+        <input
+          type="range"
+          min={MIN_BACKGROUND_OPACITY}
+          max={MAX_BACKGROUND_OPACITY}
+          step="0.05"
+          value={vizConfig.backgroundOpacity ?? 0.95}
+          onChange={(e) => {
+            setBackgroundOpacity(parseFloat(e.target.value));
+            flashSaved();
+          }}
+          className="w-32 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'visualizerVignetteStrength',
+      tab: 'lyrics',
+      title: 'Visualizer Vignette Strength',
+      description: `Edge vignette intensity (${Math.round((vizConfig.vignetteStrength ?? 0.55) * 100)}%)`,
+      keywords: 'visualizer vignette strength edge darkness',
+      control: (
+        <input
+          type="range"
+          min={MIN_VIGNETTE_STRENGTH}
+          max={MAX_VIGNETTE_STRENGTH}
+          step="0.05"
+          value={vizConfig.vignetteStrength ?? 0.55}
+          onChange={(e) => {
+            setVignetteStrength(parseFloat(e.target.value));
+            flashSaved();
+          }}
+          className="w-32 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'visualizerOklchMatch',
+      tab: 'lyrics',
+      title: 'Album-Art OKLCH Color Match',
+      description: 'Adapt visualizer palette dynamically to the playing album artwork',
+      keywords: 'visualizer oklch color match album art',
+      control: (
+        <input
+          type="checkbox"
+          checked={vizConfig.albumArtColorMatch}
+          onChange={(e) => {
+            setAlbumArtColorMatch(e.target.checked);
+            flashSaved();
+          }}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
         />
       ),
     },

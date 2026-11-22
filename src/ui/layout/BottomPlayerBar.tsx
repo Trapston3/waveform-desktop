@@ -3,7 +3,17 @@
 // Fully decoupled state with granular selectors and leaf PlaybackTimePill for 0Hz re-renders during playback
 
 import { ArtistCredits } from '../common/ArtistCredits';
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
+
+function isValidImageUrl(url: unknown): url is string {
+  return Boolean(
+    url &&
+      typeof url === 'string' &&
+      url.trim() &&
+      url !== 'undefined' &&
+      url !== 'null'
+  );
+}
 import {
   Shuffle,
   Repeat,
@@ -124,6 +134,8 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = React.memo(({
   const isShuffle = usePlayerStore((s) => s.isShuffle);
   const repeatMode = usePlayerStore((s) => s.repeatMode);
   const waveformBuckets = usePlayerStore((s) => s.waveformBuckets);
+  const activeStreamQuality = usePlayerStore((s) => s.activeStreamQuality);
+  const activeStreamIsAtmos = usePlayerStore((s) => s.activeStreamIsAtmos);
 
   // Stable action callbacks
   const togglePlay = usePlayerStore((s) => s.togglePlay);
@@ -158,11 +170,18 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = React.memo(({
         }
       : null);
 
+  const [artBroken, setArtBroken] = useState(false);
+
+  useEffect(() => {
+    setArtBroken(false);
+  }, [activeTrack?.thumbnailUrl]);
+
   const isPlaying = externalIsPlaying !== undefined ? externalIsPlaying : playbackState === 'PLAYING';
   const handleTogglePlay = externalOnTogglePlay || togglePlay;
   const isLiked = activeTrack ? isFavorite(activeTrack.videoId) : false;
 
-  const isAtmos = Boolean(settings['dsp.spatialAudioEnabled']);
+  const isAtmos = activeStreamIsAtmos;
+  const qualityBadgeLabel = activeStreamQuality || (activeTrack as any)?.sourceQuality || 'Stream';
 
   const totalSec =
     (durationMs > 0
@@ -189,10 +208,11 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = React.memo(({
             onClick={() => setNowPlayingModalOpen(true)}
             className="artwork-lockup relative group w-12 h-12 w-[54px] h-[54px] rounded-xl bg-neutral-900 shrink-0 cursor-pointer overflow-hidden transition-transform duration-200 hover:scale-105"
           >
-            {activeTrack?.thumbnailUrl ? (
+            {isValidImageUrl(activeTrack?.thumbnailUrl) && !artBroken ? (
               <img
                 src={activeTrack.thumbnailUrl}
                 alt={activeTrack.title}
+                onError={() => setArtBroken(true)}
                 className="w-full h-full object-cover"
               />
             ) : (
@@ -241,7 +261,7 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = React.memo(({
               {/* Single Clean Quality Badge */}
               <button
                 onClick={() => setEqualizerOpen(true)}
-                title={isAtmos ? 'Dolby Atmos Active' : 'Lossless ALAC 24-bit/48kHz'}
+                title={isAtmos ? 'Dolby Atmos Active' : qualityBadgeLabel}
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-white/10 text-white/90 border border-white/15 hover:border-[var(--color-accent)] transition-colors shrink-0 cursor-pointer"
               >
                 {isAtmos ? (
@@ -252,7 +272,7 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = React.memo(({
                 ) : (
                   <>
                     <LosslessWaveIcon size={12} className="text-[var(--color-accent)]" />
-                    <span>LOSSLESS 24/48</span>
+                    <span>{qualityBadgeLabel}</span>
                   </>
                 )}
               </button>

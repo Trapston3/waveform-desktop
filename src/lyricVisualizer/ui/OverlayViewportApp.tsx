@@ -1,8 +1,9 @@
 // src/lyricVisualizer/ui/OverlayViewportApp.tsx
 // Transparent multi-monitor desktop overlay viewport app (#/overlay).
-// Listens to onLvStateBroadcast and onLvPlatformEvent.
-// Renders zero opaque chrome when click-through locked, and a subtle
-// drag/control bar when unlocked.
+// Listens to onLvStateBroadcast and onLvPlatformEvent, requests initial snapshot via lvRequestSnapshot(),
+// drops stale revisionId payloads, clears lyrics immediately on trackId change, and NEVER falls back
+// to Starlight Harbor unless sandboxEnabled is true.
+// Renders zero opaque chrome when click-through locked, and a subtle drag/control bar when unlocked.
 
 import React, { useEffect, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Lock, Move, Sparkles, X } from 'lucide-react';
@@ -11,6 +12,7 @@ import {
   DEMO_FALLBACK_PALETTE,
   getBundledFontCssFamily,
   type PlaybackSnapshot,
+  resolveStyleVariationId,
   STARLIGHT_HARBOR_LYRICS,
   STARLIGHT_HARBOR_TRACK,
   SyncEngine,
@@ -30,11 +32,15 @@ export const OverlayViewportApp: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<LyricStageRenderer | null>(null);
   const syncEngineRef = useRef<SyncEngine>(new SyncEngine());
+  const lastRevisionIdRef = useRef<number>(0);
+  const lastTrackIdRef = useRef<string | null>(null);
+
+  const initialSandbox = useLyricVisualizerStore.getState().config.sandboxEnabled;
 
   const snapshotRef = useRef<PlaybackSnapshot>({
-    track: STARLIGHT_HARBOR_TRACK,
+    track: initialSandbox ? STARLIGHT_HARBOR_TRACK : null,
     positionSeconds: 0,
-    isPlaying: true,
+    isPlaying: initialSandbox,
     playbackRate: 1,
     timestampMs: nowMs(),
   });
@@ -74,28 +80,60 @@ export const OverlayViewportApp: React.FC = () => {
     };
   }, []);
 
-  // Subscribe to IPC broadcast state and platform events
+  // Subscribe to IPC broadcast state, request initial snapshot, and listen to platform events
   useEffect(() => {
     const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
 
+    const handleIncomingPayload = (payload: LyricVisualizerBroadcastPayload) => {
+      if (!payload || typeof payload !== 'object') return;
+
+      // Drop stale out-of-order broadcast revisions
+      if (
+        typeof payload.revisionId === 'number' &&
+        lastRevisionIdRef.current > 0 &&
+        payload.revisionId < lastRevisionIdRef.current
+      ) {
+        return;
+      }
+      if (typeof payload.revisionId === 'number') {
+        lastRevisionIdRef.current = payload.revisionId;
+      }
+
+      // Immediately clear previous song's lyrics when trackId changes
+      const incomingTrackId =
+        payload.trackId !== undefined ? payload.trackId : payload.track?.id ?? null;
+      if (incomingTrackId !== lastTrackIdRef.current) {
+        lastTrackIdRef.current = incomingTrackId;
+        rendererRef.current?.setLyrics(payload.lyrics ?? null);
+      }
+
+      applyBroadcastPayload(payload);
+      syncEngineRef.current.setOffsetMs(payload.songOffsetMs ?? 0);
+      snapshotRef.current = {
+        track: payload.track ?? null,
+        positionSeconds: payload.positionSeconds ?? 0,
+        isPlaying: Boolean(payload.isPlaying),
+        playbackRate: 1,
+        timestampMs: nowMs(),
+      };
+      if (payload.audio) {
+        latestAudioRef.current = { ...payload.audio };
+      }
+    };
+
     const unsubBroadcast =
       typeof api?.onLvStateBroadcast === 'function'
-        ? api.onLvStateBroadcast((payload: LyricVisualizerBroadcastPayload) => {
-            if (!payload || typeof payload !== 'object') return;
-            applyBroadcastPayload(payload);
-            syncEngineRef.current.setOffsetMs(payload.songOffsetMs ?? 0);
-            snapshotRef.current = {
-              track: payload.track ?? null,
-              positionSeconds: payload.positionSeconds ?? 0,
-              isPlaying: Boolean(payload.isPlaying),
-              playbackRate: 1,
-              timestampMs: nowMs(),
-            };
-            if (payload.audio) {
-              latestAudioRef.current = { ...payload.audio };
-            }
-          })
+        ? api.onLvStateBroadcast(handleIncomingPayload)
         : null;
+
+    // Request latest cached broadcast snapshot immediately on mount
+    if (typeof api?.lvRequestSnapshot === 'function') {
+      Promise.resolve(api.lvRequestSnapshot())
+        .then((snap: LyricVisualizerBroadcastPayload | null) => {
+          if (snap) handleIncomingPayload(snap);
+        })
+        .catch(() => {});
+    }
 
     const unsubPlatform =
       typeof api?.onLvPlatformEvent === 'function'
@@ -124,27 +162,38 @@ export const OverlayViewportApp: React.FC = () => {
     if (!canvas || !container) return;
 
     const state = useLyricVisualizerStore.getState();
-    const initialLyrics = state.activeLyrics ?? STARLIGHT_HARBOR_LYRICS;
+    const initialLyrics =
+      state.activeLyrics ?? (state.config.sandboxEnabled ? STARLIGHT_HARBOR_LYRICS : null);
 
     const renderer = new LyricStageRenderer({
       canvas,
       styleId: state.config.styleId,
+      variationId: resolveStyleVariationId(state.config.styleId, state.config.variationByStyle),
       fontFamily: getBundledFontCssFamily(state.config.fontId),
       fontSizeScale: state.config.fontSizeScale,
       palette: state.activePalette ?? DEMO_FALLBACK_PALETTE,
       reduceMotion: state.config.reduceMotion,
+      motionIntensity: state.config.motionIntensity,
+      backgroundOpacity: state.config.backgroundOpacity,
+      vignetteStrength: state.config.vignetteStrength,
+      textAlign: state.config.textAlign,
       isAmbientMode: false,
       isOverlayMode: true,
       audioReactive: state.config.audioReactive,
       onSampleFrame: (outAudio) => {
+        const curState = useLyricVisualizerStore.getState();
         const srcAudio = latestAudioRef.current;
-        outAudio.rmsLevel = srcAudio.rmsLevel;
-        outAudio.bassEnergy = srcAudio.bassEnergy;
-        outAudio.midEnergy = srcAudio.midEnergy;
-        outAudio.trebleEnergy = srcAudio.trebleEnergy;
-        outAudio.beatDetected = srcAudio.beatDetected;
+        outAudio.rmsLevel = curState.config.audioReactive ? srcAudio.rmsLevel : 0;
+        outAudio.bassEnergy = curState.config.audioReactive ? srcAudio.bassEnergy : 0;
+        outAudio.midEnergy = curState.config.audioReactive ? srcAudio.midEnergy : 0;
+        outAudio.trebleEnergy = curState.config.audioReactive ? srcAudio.trebleEnergy : 0;
+        outAudio.beatDetected = curState.config.audioReactive ? srcAudio.beatDetected : false;
+        outAudio.estimatedBpm = srcAudio.estimatedBpm;
+        outAudio.beatStrength = curState.config.audioReactive ? srcAudio.beatStrength : 0;
 
-        const lyrics = useLyricVisualizerStore.getState().activeLyrics ?? STARLIGHT_HARBOR_LYRICS;
+        const lyrics =
+          curState.activeLyrics ??
+          (curState.config.sandboxEnabled ? STARLIGHT_HARBOR_LYRICS : null);
         const sync = syncEngineRef.current.update(snapshotRef.current, lyrics);
         return {
           timeSeconds: sync.timeSeconds,
@@ -182,16 +231,37 @@ export const OverlayViewportApp: React.FC = () => {
   }, []);
 
   // Synchronize store updates to renderer
+  const activeVariationId = resolveStyleVariationId(config.styleId, config.variationByStyle);
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     syncEngineRef.current.setOffsetMs(currentSongOffsetMs);
     renderer.setStyle(config.styleId);
+    renderer.setVariation(activeVariationId);
     renderer.setTypography(getBundledFontCssFamily(config.fontId), config.fontSizeScale);
     renderer.setPalette(config.albumArtColorMatch ? activePalette : DEMO_FALLBACK_PALETTE);
-    renderer.setLyrics(activeLyrics ?? STARLIGHT_HARBOR_LYRICS);
+    renderer.setVisualSettings({
+      backgroundOpacity: config.backgroundOpacity,
+      vignetteStrength: config.vignetteStrength,
+      textAlign: config.textAlign,
+    });
+    const resolvedTrack = config.sandboxEnabled ? STARLIGHT_HARBOR_TRACK : activeTrack;
+    renderer.setTrackMetadata(
+      resolvedTrack
+        ? {
+            id: resolvedTrack.id,
+            title: resolvedTrack.title,
+            artist: resolvedTrack.artist,
+            album: resolvedTrack.album || '',
+            year: resolvedTrack.year,
+            bpm: resolvedTrack.bpm,
+          }
+        : null
+    );
+    renderer.setLyrics(activeLyrics ?? (config.sandboxEnabled ? STARLIGHT_HARBOR_LYRICS : null));
     renderer.setModes({
       reduceMotion: config.reduceMotion,
+      motionIntensity: config.motionIntensity,
       isOverlayMode: true,
       isAmbientMode: false,
       audioReactive: config.audioReactive,
@@ -199,11 +269,18 @@ export const OverlayViewportApp: React.FC = () => {
     renderer.setLocked(isScreenLocked || isGameSuppressed);
   }, [
     config.styleId,
+    activeVariationId,
     config.fontId,
     config.fontSizeScale,
     config.albumArtColorMatch,
     config.reduceMotion,
+    config.motionIntensity,
     config.audioReactive,
+    config.backgroundOpacity,
+    config.vignetteStrength,
+    config.textAlign,
+    config.sandboxEnabled,
+    activeTrack,
     activePalette,
     activeLyrics,
     currentSongOffsetMs,

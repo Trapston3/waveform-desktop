@@ -1,6 +1,6 @@
 // tests/unit/lyric_visualizer_styles.test.mjs
-// Unit & behavioral tests for all 13 LyricVisualizer visual styles, WebGlEffectLayer fallback,
-// LyricsMeasurer caching, Ship3DScene, and LyricStageRenderer lock-screen GPU pause & hit-testing.
+// Unit & behavioral tests for all 12 LyricVisualizer visual styles, WebGlEffectLayer fallback & color parsing,
+// LyricsMeasurer spacing/auto-scale/spec caching, IosTextingMotion, CodeEditorKinetic, and LyricStageRenderer.
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,28 +28,37 @@ export async function resolve(specifier, context, nextResolve) {
 `;
 register(`data:text/javascript,${encodeURIComponent(resolverHook)}`, import.meta.url);
 
+const { VISUAL_STYLE_DEFINITIONS } = await import('../../src/lyricVisualizer/core/index.ts');
 const {
   ALL_VISUAL_STYLE_IDS,
   StyleRegistry,
   LyricsMeasurer,
   WebGlEffectLayer,
+  parseColorToRgbInto,
   LyricStageRenderer,
+  CRTScanlineStyle,
+  LiquidMetalStyle,
+  getSyncButtonTheme,
+  detectLyricEmbedCard,
+  detectMagicWordEffect,
+  resolveContextualEmoji,
+  transformLyricLineToCodeTokens,
+  detectCodeWordEffect,
 } = await import('../../src/lyricVisualizer/rendering/index.ts');
 
-const EXPECTED_13_STYLES = [
+const EXPECTED_12_STYLES = [
   'AppleMusicFlow',
-  'NeonKinetic',
   'TypewriterEditorial',
   'MinimalSwiss',
   'LiquidMetal',
-  'HoloVaporwave',
   'KaraokeStage',
   'BrutalistZine',
   'GenerativeParticleInk',
-  'SpectrumRibbon',
   'Spatial3DDepth',
   'CRTScanline',
   'StarfieldShip3D',
+  'IosTextingMotion',
+  'CodeEditorKinetic',
 ];
 
 function createMockCanvas2DContext() {
@@ -199,21 +208,24 @@ const UNSYNCED_LYRICS = {
   ],
 };
 
-describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
-  test('StyleRegistry registers all 13 required visual style IDs', () => {
+describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
+  test('StyleRegistry registers all 12 consolidated visual style IDs', () => {
     const registry = new StyleRegistry();
-    assert.equal(ALL_VISUAL_STYLE_IDS.length, 13);
-    assert.deepEqual([...registry.listIds()], EXPECTED_13_STYLES);
+    assert.equal(ALL_VISUAL_STYLE_IDS.length, 12);
+    assert.deepEqual([...registry.listIds()], EXPECTED_12_STYLES);
 
-    for (const id of EXPECTED_13_STYLES) {
+    for (const id of EXPECTED_12_STYLES) {
       assert.equal(registry.has(id), true, `Missing style ID: ${id}`);
       const style = registry.get(id);
       assert.equal(style.id, id);
       assert.equal(typeof style.render, 'function');
     }
+    for (const legacyId of ['NeonKinetic', 'HoloVaporwave', 'SpectrumRibbon']) {
+      assert.equal(registry.has(legacyId), false, `Legacy style ${legacyId} must not be registered top-level`);
+    }
   });
 
-  test('All 13 styles render cleanly across empty, unsynced, synced, beat spike, reduceMotion, overlay, and ambient modes', () => {
+  test('All 12 styles and every variation render cleanly across modes', () => {
     const canvas = createMockCanvas();
     const webGlCanvas = createMockCanvas();
     const renderer = new LyricStageRenderer({
@@ -266,21 +278,41 @@ describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
         lyrics: SYNCED_LYRICS,
         sync: { timeSeconds: 6.1, activeLineIndex: 1, activeWordIndex: 2, wordProgress: 0.8 },
         audio: { rmsLevel: 0.5, bassEnergy: 0.4, midEnergy: 0.5, trebleEnergy: 0.5, beatDetected: false },
-        modes: { reduceMotion: false, isOverlayMode: true, isAmbientMode: false },
+        modes: { reduceMotion: false, isOverlayMode: true, isEmbeddedTransparent: false, isAmbientMode: false },
+      },
+      {
+        name: 'embedded-transparent',
+        lyrics: SYNCED_LYRICS,
+        sync: { timeSeconds: 6.1, activeLineIndex: 1, activeWordIndex: -1, wordProgress: 0 },
+        audio: { rmsLevel: 0.5, bassEnergy: 0.4, midEnergy: 0.5, trebleEnergy: 0.5, beatDetected: false },
+        modes: { reduceMotion: false, isOverlayMode: false, isEmbeddedTransparent: true, isAmbientMode: false },
       },
       {
         name: 'ambient-mode',
         lyrics: SYNCED_LYRICS,
         sync: { timeSeconds: 10.5, activeLineIndex: 2, activeWordIndex: 3, wordProgress: 0.35 },
         audio: { rmsLevel: 0.6, bassEnergy: 0.65, midEnergy: 0.45, trebleEnergy: 0.55, beatDetected: true },
-        modes: { reduceMotion: false, isOverlayMode: false, isAmbientMode: true },
+        modes: { reduceMotion: false, isOverlayMode: false, isEmbeddedTransparent: false, isAmbientMode: true },
       },
     ];
 
     let fakeNow = 1000;
-    for (const styleId of EXPECTED_13_STYLES) {
-      renderer.setStyle(styleId);
+    for (const def of VISUAL_STYLE_DEFINITIONS) {
+      renderer.setStyle(def.id);
+      for (const variation of def.variations) {
+        renderer.setVariation(variation.id);
+        canvas.ctx2d.ops.length = 0;
+        renderer.setLyrics(SYNCED_LYRICS);
+        renderer.setModes({ reduceMotion: false, isOverlayMode: false, isEmbeddedTransparent: false, isAmbientMode: false });
+        renderer.setSyncState({ timeSeconds: 2.4, activeLineIndex: 0, activeWordIndex: 2, wordProgress: 0.65 });
+        renderer.setAudioMetrics({ rmsLevel: 0.7, bassEnergy: 0.75, midEnergy: 0.5, trebleEnergy: 0.6, beatDetected: true });
+        fakeNow += 16.67;
+        assert.equal(renderer.renderFrame(fakeNow), true, `${def.id} (${variation.id}) should render`);
+        assert.ok(canvas.ctx2d.ops.length > 0, `${def.id} (${variation.id}) should emit Canvas2D ops`);
+      }
+
       for (const sc of scenarios) {
+        const styleId = def.id;
         canvas.ctx2d.ops.length = 0;
         renderer.setLyrics(sc.lyrics);
         renderer.setModes(sc.modes);
@@ -295,8 +327,8 @@ describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
           `${styleId} (${sc.name}) should emit Canvas2D operations`
         );
 
-        // Verify overlay mode clears transparently and avoids full-viewport opaque fillRect(0,0,960,540)
-        if (sc.modes.isOverlayMode) {
+        // Verify overlay / embeddedTransparent mode clears transparently and avoids full-viewport opaque fillRect(0,0,960,540)
+        if (sc.modes.isOverlayMode || sc.modes.isEmbeddedTransparent) {
           const hasClear = canvas.ctx2d.ops.some(
             (op) => Array.isArray(op) && op[0] === 'clearRect'
           );
@@ -387,6 +419,186 @@ describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
     assert.equal(measurer.measureCount, 3);
   });
 
+  test('LyricsMeasurer preserves explicit spaceWidth between tokens, matches StyleMeasurementSpec, and auto-scales oversized single words', () => {
+    // Font-size-aware mock ctx (scales character width with fontSize parsed from ctx.font)
+    const fontAwareCtx = {
+      ...createMockCanvas2DContext(),
+      measureText(text) {
+        const m = /\b(\d+)px\b/.exec(this.font);
+        const px = m ? Number(m[1]) : 32;
+        if (text === ' ') return { width: px * 0.25 }; // smaller than 0.28 -> clamped to >= 0.28 * px
+        return { width: String(text).length * px * 0.62 };
+      },
+    };
+
+    const measurer = new LyricsMeasurer();
+    const specLayout = measurer.measure(
+      fontAwareCtx,
+      {
+        providerName: 'Test',
+        sourceKind: 'WordSynced',
+        lines: [
+          {
+            startSeconds: 0,
+            endSeconds: 4,
+            text: 'Up on his horse',
+            isSynthesizedWords: false,
+            words: [
+              { text: 'Up', startSeconds: 0, endSeconds: 1 },
+              { text: 'on', startSeconds: 1, endSeconds: 2 },
+              { text: 'his', startSeconds: 2, endSeconds: 3 },
+              { text: 'horse', startSeconds: 3, endSeconds: 4 },
+            ],
+          },
+        ],
+      },
+      900,
+      600,
+      'Inter, sans-serif',
+      1.0,
+      undefined,
+      {
+        fontWeight: 900,
+        fontSizeMultiplier: 1.04,
+        textTransform: 'uppercase',
+        letterSpacing: '0.02em',
+        maxLineWidthRatio: 0.78,
+      }
+    );
+
+    assert.ok(specLayout);
+    const words = specLayout.lines[0].words;
+    assert.equal(words[0].text, 'UP');
+    assert.equal(words[1].text, 'ON');
+    const minSpace = specLayout.fontSizePx * 0.28;
+    for (let i = 1; i < words.length; i++) {
+      if (words[i].y === words[i - 1].y) {
+        const gap = words[i].x - (words[i - 1].x + words[i - 1].width);
+        assert.ok(gap >= minSpace - 1e-6, `Expected word gap >= ${minSpace}, got ${gap}`);
+      }
+    }
+
+    // Long single word exceeding maxLineWidth triggers auto-scale down (min 14)
+    const longWordLayout = measurer.measure(
+      fontAwareCtx,
+      {
+        providerName: 'Test',
+        sourceKind: 'LineSynced',
+        lines: [
+          {
+            startSeconds: 0,
+            endSeconds: 5,
+            text: 'Supercalifragilisticexpialidocious',
+            isSynthesizedWords: false,
+            words: [{ text: 'Supercalifragilisticexpialidocious', startSeconds: 0, endSeconds: 5 }],
+          },
+        ],
+      },
+      320,
+      400,
+      'Inter, sans-serif',
+      1.4,
+      44
+    );
+    assert.ok(longWordLayout);
+    assert.ok(longWordLayout.fontSizePx >= 14 && longWordLayout.fontSizePx < 44);
+  });
+
+  test('parseColorToRgbInto parses hex (#rgb/#rrggbb) and rgb()/rgba() strings cleanly', () => {
+    const out = new Float32Array(3);
+    parseColorToRgbInto('#ff8000', out);
+    assert.ok(Math.abs(out[0] - 1) < 0.01);
+    assert.ok(Math.abs(out[1] - 128 / 255) < 0.01);
+    assert.ok(Math.abs(out[2] - 0) < 0.01);
+
+    parseColorToRgbInto('rgb(10, 20, 40)', out);
+    assert.ok(Math.abs(out[0] - 10 / 255) < 0.005);
+    assert.ok(Math.abs(out[1] - 20 / 255) < 0.005);
+    assert.ok(Math.abs(out[2] - 40 / 255) < 0.005);
+
+    parseColorToRgbInto('rgba(218, 226, 242, 0.78)', out);
+    assert.ok(Math.abs(out[0] - 218 / 255) < 0.005);
+    assert.ok(Math.abs(out[1] - 226 / 255) < 0.005);
+    assert.ok(Math.abs(out[2] - 242 / 255) < 0.005);
+  });
+
+  test('detectLyricEmbedCard detects maps, voice memo, missed call, link/photo, and time/weather cards', () => {
+    assert.equal(detectLyricEmbedCard('Steady beacons guide the harbor home')?.kind, 'maps');
+    assert.equal(detectLyricEmbedCard('Driving down the highway in Tokyo')?.kind, 'maps');
+    assert.equal(detectLyricEmbedCard('Listen to that voice on the radio')?.kind, 'voiceMemo');
+    assert.equal(detectLyricEmbedCard('You had a missed FaceTime call from me')?.kind, 'missedCall');
+    assert.equal(detectLyricEmbedCard('Send the link to that old polaroid photo')?.kind, 'linkPreview');
+    assert.equal(detectLyricEmbedCard('Walking in the midnight summer rain')?.kind, 'timeWeather');
+    assert.equal(detectLyricEmbedCard('Lanterns drift quietly'), null);
+  });
+
+  test('IosTextingMotionStyle renders conversation bubbles, typing indicator in 0.5-1.4s gaps, embed cards, and tapbacks', () => {
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'IosTextingMotion',
+      palette: SAMPLE_PALETTE,
+      fontFamily: 'Inter, sans-serif',
+      motionIntensity: 'vivid',
+    });
+    renderer.resize(900, 620, 1);
+    const convoLyrics = {
+      providerName: 'Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 0.5,
+          endSeconds: 2.0,
+          text: 'Are you still downtown tonight?',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Are', startSeconds: 0.5, endSeconds: 0.8 },
+            { text: 'you', startSeconds: 0.8, endSeconds: 1.1 },
+            { text: 'still', startSeconds: 1.1, endSeconds: 1.4 },
+            { text: 'downtown', startSeconds: 1.4, endSeconds: 1.7 },
+            { text: 'tonight?', startSeconds: 1.7, endSeconds: 2.0 },
+          ],
+        },
+        {
+          startSeconds: 3.0, // 1.0s gap -> triggers typing indicator between 2.0s and 3.0s
+          endSeconds: 5.5,
+          text: 'Listen to the voice on the radio!',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Listen', startSeconds: 3.0, endSeconds: 3.4 },
+            { text: 'to', startSeconds: 3.4, endSeconds: 3.7 },
+            { text: 'the', startSeconds: 3.7, endSeconds: 4.0 },
+            { text: 'voice', startSeconds: 4.0, endSeconds: 4.5 },
+            { text: 'on', startSeconds: 4.5, endSeconds: 4.8 },
+            { text: 'the', startSeconds: 4.8, endSeconds: 5.1 },
+            { text: 'radio!', startSeconds: 5.1, endSeconds: 5.5 },
+          ],
+        },
+      ],
+    };
+    renderer.setLyrics(convoLyrics);
+
+    // During 1.0s gap (t=2.5s): typing indicator should draw 3 dots + previous bubble + maps card
+    canvas.ctx2d.ops.length = 0;
+    renderer.setSyncState({ timeSeconds: 2.5, activeLineIndex: 0, activeWordIndex: 4, wordProgress: 1.0 });
+    renderer.setAudioMetrics({ rmsLevel: 0.7, bassEnergy: 0.8, midEnergy: 0.6, trebleEnergy: 0.5, beatDetected: true });
+    assert.equal(renderer.renderFrame(1000), true);
+    const fillTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => op[1]);
+    assert.ok(fillTexts.includes('OPEN IN MAPS'), 'Maps card should render for "downtown"');
+    assert.ok(fillTexts.includes('?'), 'Tapback badge should render on question line');
+
+    // Embedded transparent mode skips opaque full-screen backdrop
+    canvas.ctx2d.ops.length = 0;
+    renderer.setModes({ isEmbeddedTransparent: true });
+    renderer.setSyncState({ timeSeconds: 4.1, activeLineIndex: 1, activeWordIndex: 3, wordProgress: 0.5 });
+    assert.equal(renderer.renderFrame(1032), true);
+    const hasFullBg = canvas.ctx2d.ops.some(
+      (op) => Array.isArray(op) && op[0] === 'fillRect' && op[1] === 0 && op[2] === 0 && op[3] === 900 && op[4] === 620
+    );
+    assert.equal(hasFullBg, false);
+    renderer.dispose();
+  });
+
   test('LyricStageRenderer setLocked(true) halts rAF scheduling and skips all GPU/Canvas draw calls', () => {
     const originalRaf = globalThis.requestAnimationFrame;
     const originalCancelRaf = globalThis.cancelAnimationFrame;
@@ -447,7 +659,7 @@ describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
     }
   });
 
-  test('LyricStageRenderer findLineAtPoint supports click-to-seek hit-testing', () => {
+  test('LyricStageRenderer findLineAtPoint supports click-to-seek hit-testing and respects contentInsetLeft', () => {
     const canvas = createMockCanvas();
     const renderer = new LyricStageRenderer({
       canvas,
@@ -463,6 +675,14 @@ describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
     const hitActive = renderer.findLineAtPoint(400, 276);
     assert.equal(hitActive, 1, 'Clicking vertical center anchor should hit active line 1');
 
+    // Split-view contentInsetLeft blocks clicks in the left transport column while allowing right-half clicks
+    renderer.setModes({ reduceMotion: true });
+    renderer.setContentInsetLeft(380);
+    renderer.renderFrame(1016);
+    assert.equal(renderer.findLineAtPoint(200, 276), null, 'Clicks inside contentInsetLeft (<380px) must return null');
+    assert.equal(renderer.findLineAtPoint(379, 276), null, 'Clicks at x=379 must return null');
+    assert.equal(renderer.findLineAtPoint(590, 276), 1, 'Clicks to the right of contentInsetLeft must hit active line 1');
+
     // Out-of-bounds returns null
     assert.equal(renderer.findLineAtPoint(-10, 276), null);
     assert.equal(renderer.findLineAtPoint(900, 276), null);
@@ -470,7 +690,36 @@ describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
     renderer.dispose();
   });
 
-  test('Rendering modules contain zero Apple SF Symbols or Apple system font references', () => {
+  test('IosTextingMotionStyle omits "Messages · Synced Thread" top bar in split-view (contentInsetLeft > 0)', () => {
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'IosTextingMotion',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: true,
+      contentInsetLeft: 400,
+    });
+    renderer.resize(1200, 720, 1);
+    renderer.setLyrics(SYNCED_LYRICS);
+    renderer.setSyncState({ timeSeconds: 2.0, activeLineIndex: 0, activeWordIndex: 1, wordProgress: 0.4 });
+    canvas.ctx2d.ops.length = 0;
+    assert.equal(renderer.renderFrame(1000), true);
+    const textsSplit = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+      .map((op) => op[1]);
+    assert.equal(textsSplit.includes('Messages · Synced Thread'), false, 'Split-view must omit top Messages bar');
+
+    renderer.setContentInsetLeft(0);
+    canvas.ctx2d.ops.length = 0;
+    assert.equal(renderer.renderFrame(1016), true);
+    const textsFull = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+      .map((op) => op[1]);
+    assert.equal(textsFull.includes('Messages · Synced Thread'), true, 'Full stage must display Messages · Synced Thread header');
+    renderer.dispose();
+  });
+
+  test('Rendering modules contain zero forbidden Apple symbols/fonts while using bundled SF Pro Display stack', () => {
     const renderingDir = path.join(rootDir, 'src', 'lyricVisualizer', 'rendering');
     const files = [];
     const walk = (dir) => {
@@ -481,18 +730,246 @@ describe('LyricVisualizer Rendering & 13 Visual Styles', () => {
       }
     };
     walk(renderingDir);
-    assert.ok(files.length >= 18, 'Expected all rendering and style modules');
+    assert.ok(files.length >= 19, 'Expected all rendering and style modules');
 
-    const forbidden = ['-apple-system', 'SF Pro', 'SF Compact', 'SF Mono', 'BlinkMacSystemFont'];
+    const forbidden = ['SF Symbols', 'SF Compact', 'SF Mono', 'New York Serif'];
     for (const file of files) {
       const content = readFileSync(file, 'utf8');
       for (const token of forbidden) {
         assert.equal(
           content.includes(token),
           false,
-          `Forbidden Apple font token "${token}" found in ${path.relative(rootDir, file)}`
+          `Forbidden Apple font/symbol token "${token}" found in ${path.relative(rootDir, file)}`
         );
       }
+    }
+
+    const iosSrc = readFileSync(path.join(renderingDir, 'styles', 'iosTextingMotion.ts'), 'utf8');
+    assert.ok(iosSrc.includes("IOS_FONT_STACK = \"'SF Pro Display'"), 'IosTextingMotion must use bundled SF Pro Display stack');
+    assert.ok(iosSrc.includes('fontFamilyOverride: IOS_FONT_STACK'), 'IosTextingMotion must override measurement font with SF Pro Display');
+
+    const stageSrc = readFileSync(path.join(renderingDir, 'lyricStageRenderer.ts'), 'utf8');
+    assert.ok(stageSrc.includes('SF_PRO_DISPLAY_STACK'), 'LyricStageRenderer must default to SF_PRO_DISPLAY_STACK');
+  });
+
+  test('IosTextingMotion detects all 9 Magic Word categories and renders all 4 variations', () => {
+    const magicSamples = [
+      ['rainbow', 'rainbow'],
+      ['starlight', 'sparkle'],
+      ['golden', 'shiny'],
+      ['flames', 'fire'],
+      ['frozen', 'ice'],
+      ['heart', 'love'],
+      ['boom', 'impact'],
+      ['ocean', 'water'],
+      ['shadow', 'ghost'],
+    ];
+    for (const [word, expected] of magicSamples) {
+      assert.equal(detectMagicWordEffect(word), expected, `Expected ${word} -> ${expected}`);
+    }
+    assert.equal(resolveContextualEmoji('Flying on a plane'), '✈️');
+
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'IosTextingMotion',
+      palette: SAMPLE_PALETTE,
+    });
+    renderer.resize(900, 620, 1);
+    renderer.setLyrics(SYNCED_LYRICS);
+    renderer.setSyncState({ timeSeconds: 2.0, activeLineIndex: 0, activeWordIndex: 1, wordProgress: 0.5 });
+    for (const variationId of ['ios-dark', 'liquid-glass', 'cinema-edit', 'classic-sms']) {
+      canvas.ctx2d.ops.length = 0;
+      renderer.setVariation(variationId);
+      assert.equal(renderer.renderFrame(1000), true);
+      assert.ok(canvas.ctx2d.ops.length > 0, `Variation ${variationId} should draw`);
+    }
+    renderer.dispose();
+
+    // Contextual emoji Tapback mode: pops matching contextual emoji in Tapback pill once matching word hits
+    const tapbackCanvas = createMockCanvas();
+    const tapbackDraws = [];
+    const origFillText = tapbackCanvas.ctx2d.fillText.bind(tapbackCanvas.ctx2d);
+    tapbackCanvas.ctx2d.fillText = (text, x, y) => {
+      tapbackDraws.push({ text, font: tapbackCanvas.ctx2d.font, align: tapbackCanvas.ctx2d.textAlign });
+      origFillText(text, x, y);
+    };
+    const tapRenderer = new LyricStageRenderer({
+      canvas: tapbackCanvas,
+      styleId: 'IosTextingMotion',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: true,
+    });
+    tapRenderer.resize(900, 620, 1);
+    const planeLyrics = {
+      providerName: 'Tapback Test',
+      sourceKind: 'WordSynced',
+      lines: [0, 1, 2].map((idx) => ({
+        startSeconds: idx * 3 + 0.5,
+        endSeconds: idx * 3 + 2.5,
+        text: 'Board the plane now',
+        isSynthesizedWords: false,
+        words: [
+          { text: 'Board', startSeconds: idx * 3 + 0.5, endSeconds: idx * 3 + 1.0 },
+          { text: 'the', startSeconds: idx * 3 + 1.0, endSeconds: idx * 3 + 1.5 },
+          { text: 'plane', startSeconds: idx * 3 + 1.5, endSeconds: idx * 3 + 2.0 },
+          { text: 'now', startSeconds: idx * 3 + 2.0, endSeconds: idx * 3 + 2.5 },
+        ],
+      })),
+    };
+    tapRenderer.setLyrics(planeLyrics);
+    // Once all 3 lines are reached, at least 2 lines use tapback mode with '✈️'
+    tapRenderer.setSyncState({ timeSeconds: 8.2, activeLineIndex: 2, activeWordIndex: 3, wordProgress: 0.5 });
+    tapRenderer.renderFrame(1000);
+    const tapbackPlanePills = tapbackDraws.filter(
+      (d) => d.text === '✈️' && d.font.startsWith('700 12px') && d.align === 'center'
+    );
+    assert.ok(tapbackPlanePills.length >= 2, 'Contextual emoji Tapback mode must render ✈️ inside Tapback pills');
+    tapRenderer.dispose();
+  });
+
+  test('CRTScanline and LiquidMetal respect hasWebGlBackdrop (opaque dark fill when false, transparent pass-through when true)', () => {
+    const measurer = new LyricsMeasurer();
+    const baseCtx = createMockCanvas2DContext();
+    const layout = measurer.measure(baseCtx, SYNCED_LYRICS, 800, 600, 'Inter, sans-serif', 1.0);
+
+    const runWithBackdrop = (style, variationId, hasWebGlBackdrop) => {
+      const ctx = createMockCanvas2DContext();
+      const fullFills = [];
+      const origFillRect = ctx.fillRect.bind(ctx);
+      ctx.fillRect = (x, y, w, h) => {
+        if (x === 0 && y === 0 && w === 800 && h === 600) {
+          fullFills.push(typeof ctx.fillStyle === 'string' ? ctx.fillStyle : 'gradient');
+        }
+        origFillRect(x, y, w, h);
+      };
+      style.render(
+        ctx,
+        {
+          lyrics: SYNCED_LYRICS,
+          layout,
+          timeSeconds: 2.0,
+          deltaSeconds: 1 / 60,
+          activeLineIndex: 0,
+          activeWordIndex: 1,
+          wordProgress: 0.5,
+          lineFadeAlpha: 1,
+          palette: SAMPLE_PALETTE,
+          audio: { rmsLevel: 0.4, bassEnergy: 0.4, midEnergy: 0.3, trebleEnergy: 0.3, beatDetected: false },
+          fontFamily: 'Inter, sans-serif',
+          fontSizeScale: 1.0,
+          dpiScale: 1,
+          reduceMotion: true,
+          isAmbientMode: false,
+          isOverlayMode: false,
+          isEmbeddedTransparent: false,
+          didSeekThisFrame: false,
+          variationId,
+          manualScrollY: 0,
+          isFollowingPlayback: true,
+          hoveredLineIndex: -1,
+          backgroundOpacity: 0.95,
+          vignetteStrength: 0,
+          textAlign: 'center',
+          trackMetadata: null,
+          hasWebGlBackdrop,
+          recordHitRect: () => {},
+        },
+        800,
+        600
+      );
+      return fullFills;
+    };
+
+    const crt = new CRTScanlineStyle();
+    const crtWithoutGl = runWithBackdrop(crt, 'p31-green', false);
+    const crtWithGl = runWithBackdrop(crt, 'p31-green', true);
+    assert.ok(crtWithoutGl.includes('#030605'), 'CRTScanline without WebGL backdrop must draw opaque #030605 glass fill');
+    assert.equal(crtWithGl.includes('#030605'), false, 'CRTScanline with WebGL backdrop must skip opaque #030605 fill');
+
+    const lm = new LiquidMetalStyle();
+    const lmWithoutGl = runWithBackdrop(lm, 'obsidian-chrome', false);
+    const lmWithGl = runWithBackdrop(lm, 'obsidian-chrome', true);
+    assert.equal(lmWithoutGl.length, 2, 'LiquidMetal without WebGL backdrop must draw opaque scrim + sheen');
+    assert.equal(lmWithGl.length, 1, 'LiquidMetal with WebGL backdrop must skip opaque scrim');
+  });
+
+  test('CodeEditorKinetic transforms lyrics to syntax tokens, detects all 7 word effects, and renders all 4 variations', () => {
+    const tokens = transformLyricLineToCodeTokens("I can't feel the broken sky", 6, 4, 2);
+    assert.ok(tokens.formattedCode.includes('i.cant.feel(the.broken(sky));'));
+    assert.equal(tokens.repeatCount, 2);
+    assert.equal(tokens.ghostAnnotation, '• repeat');
+    assert.equal(tokens.telemetryLabel, '● chorus');
+    assert.ok(tokens.some((t) => t.role === 'negation' && t.text === 'cant'));
+    assert.ok(tokens.some((t) => t.role === 'hook' && t.text === 'feel'));
+
+    const arrow = transformLyricLineToCodeTokens('One two three four five six seven', 7, 1, 1);
+    assert.equal(arrow.isArrowBlock, true);
+    assert.ok(arrow.formattedCode.startsWith('() => { '));
+
+    const effects = [
+      ['mirror', 'mirror'],
+      ["can't", 'strikethrough'],
+      ['broken', 'squiggle'],
+      ['rise', 'lift'],
+      ['fall', 'sink'],
+      ['fade', 'cascade'],
+      ['shatter', 'split'],
+    ];
+    for (const [word, expected] of effects) {
+      assert.equal(detectCodeWordEffect(word), expected, `Expected ${word} -> ${expected}`);
+    }
+
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'CodeEditorKinetic',
+      palette: SAMPLE_PALETTE,
+    });
+    renderer.resize(960, 600, 1);
+    renderer.setLyrics(SYNCED_LYRICS);
+    renderer.setSyncState({ timeSeconds: 2.0, activeLineIndex: 0, activeWordIndex: 1, wordProgress: 0.5 });
+    for (const variationId of ['ide-macro', 'led-stage-matrix', 'clockwork-orbit', 'clean-dark-ide']) {
+      canvas.ctx2d.ops.length = 0;
+      renderer.setVariation(variationId);
+      assert.equal(renderer.renderFrame(1000), true);
+      assert.ok(canvas.ctx2d.ops.length > 0, `CodeEditorKinetic variation ${variationId} should draw`);
+    }
+    renderer.dispose();
+  });
+
+  test('LyricStageRenderer scrollBy/resumeFollowPlayback/setPointerPosition and getSyncButtonTheme cover all 12 styles + Classic', () => {
+    const canvas = createMockCanvas();
+    const followEvents = [];
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'AppleMusicFlow',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: true,
+      onFollowStateChange: (v) => followEvents.push(v),
+    });
+    renderer.resize(800, 600, 1);
+    renderer.setLyrics(SYNCED_LYRICS);
+    renderer.setSyncState({ timeSeconds: 5.0, activeLineIndex: 1, activeWordIndex: 0, wordProgress: 0.2 });
+    renderer.renderFrame(1000);
+    assert.equal(renderer.isFollowing(), true);
+
+    renderer.scrollBy(120);
+    assert.equal(renderer.isFollowing(), false);
+    renderer.renderFrame(1016);
+    assert.equal(renderer.setPointerPosition(400, 276 - 120), 1, 'Pointer should hit scrolled active line');
+
+    renderer.resumeFollowPlayback();
+    assert.equal(renderer.isFollowing(), true);
+    assert.deepEqual(followEvents, [false, true]);
+    renderer.dispose();
+
+    for (const id of ['Classic', ...EXPECTED_12_STYLES]) {
+      const theme = getSyncButtonTheme(id, undefined, SAMPLE_PALETTE);
+      assert.equal(theme.styleId, id);
+      assert.ok(theme.label.length > 0);
+      assert.ok(theme.style.background.length > 0);
+      assert.ok(theme.style.color.length > 0);
     }
   });
 });

@@ -4,4 +4,5 @@ export * from './ship3dScene';
 export * from './lyricsMeasurer';
 export * from './styleRegistry';
 export * from './lyricStageRenderer';
+export * from './syncButtonTheme';
 export * from './styles';

@@ -224,7 +224,7 @@ export const fallbackArtistDetail: ArtistPage = {
   bio: 'Electronic and synthwave producer from Austin, Texas. Foundational pioneer of outrun electro.',
   avatarUrl: 'https://i.ytimg.com/vi/5dNP-a-XXx0/hqdefault.jpg',
   subscribersText: '184K subscribers',
-  monthlyListeners: 420000,
+  monthlyListeners: undefined,
   topSongs: [
     {
       videoId: 'redline_track_01',

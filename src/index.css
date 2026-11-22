@@ -2,7 +2,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('/src/assets/fonts/sf_pro_display_regular.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_regular.otf') format('opentype');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -10,7 +10,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('/src/assets/fonts/sf_pro_display_medium.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_medium.otf') format('opentype');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -18,7 +18,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('/src/assets/fonts/sf_pro_display_semibold.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_semibold.otf') format('opentype');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
@@ -26,7 +26,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('/src/assets/fonts/sf_pro_display_bold.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_bold.otf') format('opentype');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -34,7 +34,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('/src/assets/fonts/sf_pro_display_heavy.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_heavy.otf') format('opentype');
   font-weight: 800;
   font-style: normal;
   font-display: swap;
@@ -42,7 +42,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('/src/assets/fonts/sf_pro_display_heavy.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_heavy.otf') format('opentype');
   font-weight: 900;
   font-style: normal;
   font-display: swap;
@@ -50,7 +50,7 @@
 
 @font-face {
   font-family: 'Vazirmatn';
-  src: url('/src/assets/fonts/vazirmatn_regular.ttf') format('truetype');
+  src: url('./assets/fonts/vazirmatn_regular.ttf') format('truetype');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -529,6 +529,15 @@ body {
 }
 .light ::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.60);
+}
+
+/* Hidden Scrollbar Utility (Lyrics Stage) */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 /* Window Drag Regions */

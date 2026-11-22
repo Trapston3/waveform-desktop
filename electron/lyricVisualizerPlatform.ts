@@ -426,6 +426,8 @@ export function createLyricVisualizerPlatformController(options: PlatformControl
   let isGameGuardBlocking = false;
   let pollIntervalTimer: NodeJS.Timeout | null = null;
   let isDisposed = false;
+  let lastBroadcastPayload: any = null;
+  let isManualKeepAwakeRequested = false;
 
   // Window route loader helper
   const loadRoute = (win: BrowserWindowType, route: string) => {
@@ -576,6 +578,16 @@ export function createLyricVisualizerPlatformController(options: PlatformControl
           overlayWindows.delete(monitorId);
         });
 
+        if (currentWin.webContents && typeof currentWin.webContents.once === 'function') {
+          currentWin.webContents.once('did-finish-load', () => {
+            if (lastBroadcastPayload && !currentWin.isDestroyed()) {
+              try {
+                currentWin.webContents.send('lv-state-broadcast', lastBroadcastPayload);
+              } catch {}
+            }
+          });
+        }
+
         loadRoute(win, `/overlay?monitorId=${encodeURIComponent(monitorId)}`);
         overlayWindows.set(monitorId, win);
       } else {
@@ -638,6 +650,17 @@ export function createLyricVisualizerPlatformController(options: PlatformControl
       emitPlatformEvent('ambient-closed');
       updatePollingState();
     });
+
+    const currentAmbientWin = ambientWindow;
+    if (currentAmbientWin.webContents && typeof currentAmbientWin.webContents.once === 'function') {
+      currentAmbientWin.webContents.once('did-finish-load', () => {
+        if (lastBroadcastPayload && !currentAmbientWin.isDestroyed()) {
+          try {
+            currentAmbientWin.webContents.send('lv-state-broadcast', lastBroadcastPayload);
+          } catch {}
+        }
+      });
+    }
 
     loadRoute(ambientWindow, '/ambient');
 
@@ -758,7 +781,10 @@ export function createLyricVisualizerPlatformController(options: PlatformControl
 
   const handleUnlock = () => {
     isSystemLocked = false;
-    if (ambientWindow && (ambientSettings.keepAwake || isAmbientKeepAwakeRequested)) {
+    if (
+      isManualKeepAwakeRequested ||
+      (ambientWindow && (ambientSettings.keepAwake || isAmbientKeepAwakeRequested))
+    ) {
       keepAwakeService.start('prevent-display-sleep');
     }
     updateOverlaysVisibility();
@@ -815,8 +841,35 @@ export function createLyricVisualizerPlatformController(options: PlatformControl
       return cacheStore.setOffset(trackKey, offsetMs);
     });
 
-    // Relay state broadcast across all open overlay / ambient windows
+    ipcMain.handle('lv-request-snapshot', async () => {
+      return lastBroadcastPayload;
+    });
+
+    ipcMain.handle('lv-set-keep-awake', async (_event, enabled: boolean) => {
+      isManualKeepAwakeRequested = Boolean(enabled);
+      if (isManualKeepAwakeRequested && !isSystemLocked) {
+        return keepAwakeService.start('prevent-display-sleep');
+      }
+      if (!isManualKeepAwakeRequested && !(ambientWindow && isAmbientKeepAwakeRequested)) {
+        keepAwakeService.stop();
+      }
+      return keepAwakeService.isActive();
+    });
+
+    // Relay state broadcast across all open overlay / ambient windows & cache latest snapshot
     ipcMain.on('lv-broadcast-state', (_event, payload: any) => {
+      if (payload && typeof payload === 'object') {
+        const incomingRev = typeof payload.revisionId === 'number' ? payload.revisionId : null;
+        const cachedRev =
+          lastBroadcastPayload && typeof lastBroadcastPayload.revisionId === 'number'
+            ? lastBroadcastPayload.revisionId
+            : null;
+        if (incomingRev !== null && cachedRev !== null && incomingRev < cachedRev) {
+          return;
+        }
+        lastBroadcastPayload = payload;
+      }
+
       const targets: BrowserWindowType[] = [];
       for (const [_, win] of overlayWindows) {
         if (!win.isDestroyed()) targets.push(win);
@@ -878,6 +931,7 @@ export function createLyricVisualizerPlatformController(options: PlatformControl
     _getAmbientWindow: () => ambientWindow,
     _getOverlayConfig: () => overlayConfig,
     _getAmbientSettings: () => ambientSettings,
+    _getLastBroadcastPayload: () => lastBroadcastPayload,
     _isSystemLocked: () => isSystemLocked,
     _isGameGuardBlocking: () => isGameGuardBlocking,
     _handleLock: handleLock,

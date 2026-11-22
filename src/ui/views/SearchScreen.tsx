@@ -3,7 +3,7 @@
 // Renders 6 Liquid Glass filter pills, recent search history, Top Result Acrylic Tile Hero Card,
 // and categorized playable/navigable result shelves.
 
-import React, { useState, useEffect, useRef, memo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
 import { X, Clock, Sparkles, Loader2 } from 'lucide-react';
 import { MusicService } from '../../services/MusicService';
 import type { SearchResult } from '../../models/Navigation';
@@ -11,6 +11,12 @@ import type { Song } from '../../models/Song';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
+import {
+  useLibraryStore,
+  selectUnifiedAlbums,
+  selectUnifiedArtists,
+  DEFAULT_LOCAL_ALBUM_ART_SVG,
+} from '../../state/libraryStore';
 import { PlayerPlayIcon, LosslessWaveIcon } from '../common/WaveFormIcons';
 
 export type SearchFilterPill = 'all' | 'songs' | 'videos' | 'albums' | 'artists' | 'playlists';
@@ -53,6 +59,73 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const currentTrackId = usePlayerStore((s) => s.currentTrack?.videoId);
   const setContextQueue = useQueueStore((s) => s.setContextQueue);
+  const localSongs = useLibraryStore((s) => s.localSongs);
+
+  const localMatchedItems: any[] = useMemo(() => {
+    const q = (searchQuery || '').trim().toLowerCase();
+    if (!q || !Array.isArray(localSongs) || localSongs.length === 0) return [];
+
+    if (activeFilter === 'videos' || activeFilter === 'playlists') return [];
+
+    if (activeFilter === 'albums') {
+      return selectUnifiedAlbums(localSongs)
+        .filter(
+          (alb) =>
+            alb.title.toLowerCase().includes(q) ||
+            alb.artist.toLowerCase().includes(q) ||
+            alb.albumArtist.toLowerCase().includes(q)
+        )
+        .map((alb) => ({
+          id: alb.id,
+          browseId: alb.id,
+          title: alb.title,
+          subtitle: alb.artist,
+          artist: alb.artist,
+          thumbnailUrl: alb.coverUrl || DEFAULT_LOCAL_ALBUM_ART_SVG,
+          artworkUrl: alb.coverUrl || DEFAULT_LOCAL_ALBUM_ART_SVG,
+          isAlbum: true,
+          isLocal: true,
+          source: 'local',
+          songs: alb.songs,
+        }));
+    }
+
+    if (activeFilter === 'artists') {
+      return selectUnifiedArtists(localSongs)
+        .filter((art) => art.name.toLowerCase().includes(q))
+        .map((art) => ({
+          id: art.id,
+          channelId: art.id,
+          title: art.name,
+          subtitle: `${art.trackCount} local ${art.trackCount === 1 ? 'track' : 'tracks'}`,
+          artist: art.name,
+          thumbnailUrl: art.avatarUrl || DEFAULT_LOCAL_ALBUM_ART_SVG,
+          artworkUrl: art.avatarUrl || DEFAULT_LOCAL_ALBUM_ART_SVG,
+          isArtist: true,
+          isLocal: true,
+          source: 'local',
+        }));
+    }
+
+    // 'all' or 'songs'
+    return localSongs
+      .filter(
+        (s) =>
+          s.title.toLowerCase().includes(q) ||
+          s.artist.toLowerCase().includes(q) ||
+          (s.albumName && s.albumName.toLowerCase().includes(q)) ||
+          (s.albumArtist && s.albumArtist.toLowerCase().includes(q))
+      )
+      .map((s) => ({
+        ...s,
+        id: s.videoId,
+        subtitle: s.albumName ? `${s.artist} • ${s.albumName}` : s.artist,
+        thumbnailUrl: s.thumbnailUrl || s.artworkUrl || DEFAULT_LOCAL_ALBUM_ART_SVG,
+        artworkUrl: s.artworkUrl || s.thumbnailUrl || DEFAULT_LOCAL_ALBUM_ART_SVG,
+        isLocal: true,
+        source: 'local',
+      }));
+  }, [localSongs, searchQuery, activeFilter]);
 
   const executeSearch = useCallback(async (targetQuery: string, filter: SearchFilterPill) => {
     const sanitized = targetQuery ? targetQuery.trim() : '';
@@ -77,10 +150,43 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
       });
     } catch (err) {
       console.warn('[SearchScreen] Execution failed:', err);
+      setSearchResults({
+        query: sanitized,
+        filter: filter === 'all' ? undefined : filter,
+        items: [],
+      } as any);
     } finally {
       setIsLoading(false);
     }
   }, []);
+
+  const mergedResults: SearchResult | null = useMemo(() => {
+    const hasQuery = Boolean((searchQuery || '').trim());
+    if (!hasQuery) return null;
+    if (!searchResults && localMatchedItems.length === 0) return null;
+
+    const remoteItems = Array.isArray(searchResults?.items) ? searchResults.items : [];
+    const seenIds = new Set<string>();
+    const combined: any[] = [];
+
+    for (const item of localMatchedItems) {
+      const key = String(item.videoId || item.id || '');
+      if (key && seenIds.has(key)) continue;
+      if (key) seenIds.add(key);
+      combined.push(item);
+    }
+    for (const item of remoteItems as any[]) {
+      const key = String(item.videoId || item.id || '');
+      if (key && seenIds.has(key)) continue;
+      if (key) seenIds.add(key);
+      combined.push(item);
+    }
+
+    return {
+      ...(searchResults || { query: searchQuery.trim() }),
+      items: combined,
+    } as SearchResult;
+  }, [searchResults, localMatchedItems, searchQuery]);
 
   // Sync legacy searchInitialQuery if populated externally without searchQuery
   useEffect(() => {
@@ -120,6 +226,18 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
   };
 
   const handleItemClick = (item: any) => {
+    if (item.isLocal && item.isAlbum && Array.isArray(item.songs) && item.songs.length > 0) {
+      setContextQueue(item.songs, 0, {
+        id: item.id,
+        browseId: item.id,
+        title: item.title,
+        type: 'album',
+        currentIndex: 0,
+      });
+      loadTrack(item.songs[0], 'active', true);
+      return;
+    }
+
     const isBrowse = Boolean(item.browseId || item.isAlbum || item.isPlaylist || item.isArtist);
     if (isBrowse && !item.videoId) {
       if (item.isArtist && (item.channelId || item.id)) {
@@ -131,8 +249,8 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
     }
 
     // Contextual song queue
-    if (searchResults && searchResults.items.length > 0) {
-      const playable = searchResults.items
+    if (mergedResults && mergedResults.items.length > 0) {
+      const playable = mergedResults.items
         .filter((it: any) => !it.isAlbum && !it.isPlaylist && !it.isArtist && (it.videoId || it.id))
         .map((it: any) => ({
           ...it,
@@ -157,6 +275,11 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
   };
 
   const formatItemBadge = (item: any) => {
+    if (item.isLocal) {
+      if (item.isArtist) return 'Local Artist';
+      if (item.isAlbum) return 'Local Album';
+      return 'Local';
+    }
     if (item.isArtist) return 'Artist';
     if (item.isAlbum) return 'Album';
     if (item.isPlaylist) return 'Playlist';
@@ -173,7 +296,7 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
     return '';
   };
 
-  const topResult = searchResults?.items?.[0] as any;
+  const topResult = mergedResults?.items?.[0] as any;
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto pb-12 select-none animate-in fade-in duration-200">
@@ -203,7 +326,7 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
       </div>
 
       {/* 2. Recent Search History (When query is empty) */}
-      {!searchResults && (
+      {!mergedResults && (
         <div className="max-w-2xl mx-auto space-y-3 pt-4">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)]">
@@ -244,15 +367,15 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
       )}
 
       {/* 3. Top Result + Categorized Search Results */}
-      {searchResults && (
+      {mergedResults && (
         <div className="space-y-6">
           <div className="flex items-center justify-between">
             <div className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)]">
-              {searchResults.items.length} Results for &ldquo;{searchQuery}&rdquo;
+              {mergedResults.items.length} Results for &ldquo;{searchQuery}&rdquo;
             </div>
           </div>
 
-          {searchResults.items.length === 0 ? (
+          {mergedResults.items.length === 0 ? (
             <div className="acrylic-tile rounded-3xl py-16 text-center text-xs text-[var(--color-text-secondary)]">
               No results found. Try checking your spelling or searching for another keyword.
             </div>
@@ -320,7 +443,7 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
                       Top Songs
                     </h3>
                     <div className="space-y-2 flex-1 flex flex-col justify-between">
-                      {searchResults.items.slice(1, 5).map((item: any, idx: number) => {
+                      {mergedResults.items.slice(1, 5).map((item: any, idx: number) => {
                         const cover =
                           item.thumbnailUrl ||
                           item.artworkUrl ||
@@ -390,7 +513,7 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
                   {activeFilter === 'all' ? 'All Results' : `${activeFilter} Results`}
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {searchResults.items.map((item: any, idx) => {
+                  {mergedResults.items.map((item: any, idx) => {
                     const cover =
                       item.thumbnailUrl ||
                       item.artworkUrl ||

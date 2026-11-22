@@ -67,7 +67,7 @@ export async function enrichLocalTracksInBackground(
             })
           : await fetchItunesArtworkInBrowser(track.artist, track.title);
 
-        if (url && typeof url === 'string') {
+        if (url && typeof url === 'string' && !url.startsWith('data:')) {
           onTrackUpdated(track.videoId, {
             thumbnailUrl: url,
             artworkUrl: url,

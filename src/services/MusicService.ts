@@ -7,6 +7,7 @@ import { StreamResolver } from './StreamResolver';
 import { LyricsService } from './LyricsService';
 import type { ResolvedStream } from './StreamResolver';
 export type { ResolvedStream };
+import { useLibraryStore } from '../state/libraryStore';
 import {
   fallbackHomeShelves,
   fallbackExploreData,
@@ -21,6 +22,7 @@ import type {
   SearchResult,
   DetailPage,
   ArtistPage,
+  ArtistAlbumItem,
   BrowseItem,
   SearchFilterType,
   Song,
@@ -233,9 +235,266 @@ export class MusicService implements IMusicService {
     }
   }
 
+  private getLibrarySnapshot() {
+    try {
+      const state = useLibraryStore?.getState?.();
+      return {
+        localSongs: Array.isArray(state?.localSongs) ? state.localSongs : [],
+        favorites: Array.isArray(state?.favorites) ? state.favorites : [],
+        playlists: Array.isArray(state?.playlists) ? state.playlists : [],
+      };
+    } catch {
+      return {
+        localSongs: [] as Song[],
+        favorites: [] as Song[],
+        playlists: [] as Array<{
+          id: string;
+          title: string;
+          description?: string;
+          thumbnailUrl?: string | null;
+          songIds?: string[];
+        }>,
+      };
+    }
+  }
+
+  private getSongDurationSec(song: Song): number {
+    if (typeof song.durationSec === 'number' && Number.isFinite(song.durationSec) && song.durationSec > 0) {
+      return song.durationSec;
+    }
+    if (typeof song.totalPlayTimeMs === 'number' && Number.isFinite(song.totalPlayTimeMs) && song.totalPlayTimeMs > 0) {
+      return Math.round(song.totalPlayTimeMs / 1000);
+    }
+    return 0;
+  }
+
+  private resolveLocalReleaseDetail(id: string): DetailPage | null | undefined {
+    const { localSongs, favorites, playlists } = this.getLibrarySnapshot();
+
+    if (id.startsWith('pl_custom_')) {
+      const playlist = playlists.find((p) => p.id === id);
+      if (playlist) {
+        const songById = new Map<string, Song>();
+        for (const s of favorites) {
+          if (s?.videoId) songById.set(s.videoId, s);
+          if (s?.id) songById.set(s.id, s);
+        }
+        for (const s of localSongs) {
+          if (s?.videoId) songById.set(s.videoId, s);
+          if (s?.id) songById.set(s.id, s);
+        }
+        const songs: Song[] = [];
+        for (const sid of playlist.songIds || []) {
+          const hit = songById.get(sid);
+          if (hit) songs.push(hit);
+        }
+        const thumb =
+          playlist.thumbnailUrl ||
+          songs.find((s) => s.thumbnailUrl || s.artworkUrl)?.thumbnailUrl ||
+          songs.find((s) => s.artworkUrl)?.artworkUrl ||
+          null;
+        const totalDuration = songs.reduce((acc, s) => acc + this.getSongDurationSec(s), 0);
+        return {
+          id: playlist.id,
+          title: playlist.title,
+          subtitle: 'Playlist',
+          description: playlist.description || null,
+          type: 'playlist',
+          thumbnailUrl: thumb,
+          coverArt: thumb,
+          songs,
+          songCount: songs.length,
+          songCountText: `${songs.length} ${songs.length === 1 ? 'song' : 'songs'}`,
+          totalDuration,
+          secondaryItems: [],
+          isAlbum: false,
+          isPlaylist: true,
+          isArtist: false,
+        };
+      }
+    }
+
+    const trimmedId = id.trim();
+    const trimmedLower = trimmedId.toLowerCase();
+    const strippedLocalAlb = id.startsWith('local_alb_')
+      ? id.replace(/^local_alb_/, '').trim().toLowerCase()
+      : null;
+    const allowTitleMatch =
+      !id.startsWith('MPREb') &&
+      !id.startsWith('VL') &&
+      !id.startsWith('OLAK') &&
+      !CHART_QUERY_MAP[id] &&
+      id !== fallbackReleaseDetail.id;
+
+    const matchedSongs = localSongs.filter((s) => {
+      if (s.albumId && s.albumId === trimmedId) return true;
+      const alb = (s.albumName || s.album || '').trim().toLowerCase();
+      if (!alb) return false;
+      if (strippedLocalAlb && alb === strippedLocalAlb) return true;
+      if (allowTitleMatch && alb === trimmedLower) return true;
+      return false;
+    });
+
+    if (matchedSongs.length > 0) {
+      const sorted = [...matchedSongs].sort((a, b) => {
+        const ta =
+          typeof a.trackNumber === 'number' && Number.isFinite(a.trackNumber)
+            ? a.trackNumber
+            : Number.MAX_SAFE_INTEGER;
+        const tb =
+          typeof b.trackNumber === 'number' && Number.isFinite(b.trackNumber)
+            ? b.trackNumber
+            : Number.MAX_SAFE_INTEGER;
+        if (ta !== tb) return ta - tb;
+        return (a.title || '').localeCompare(b.title || '');
+      });
+      const first = sorted[0];
+      const albumTitle = first.albumName || first.album || 'Local Album';
+      const albumArtist =
+        (typeof first.albumArtist === 'string' && first.albumArtist.trim()) ||
+        first.artist ||
+        'Unknown Artist';
+      const thumb =
+        sorted.find((s) => s.thumbnailUrl || s.artworkUrl)?.thumbnailUrl ||
+        sorted.find((s) => s.artworkUrl)?.artworkUrl ||
+        null;
+      const year = sorted.find((s) => s.year)?.year || null;
+      const channelId = first.artistId || first.artistIds?.[0] || first.artists?.[0]?.id || null;
+      const totalDuration = sorted.reduce((acc, s) => acc + this.getSongDurationSec(s), 0);
+
+      return {
+        id,
+        title: albumTitle,
+        subtitle: albumArtist,
+        description: null,
+        type: 'album',
+        thumbnailUrl: thumb,
+        coverArt: thumb,
+        year,
+        releaseYear: year,
+        channelId,
+        songs: sorted,
+        songCount: sorted.length,
+        songCountText: `${sorted.length} ${sorted.length === 1 ? 'song' : 'songs'}`,
+        totalDuration,
+        secondaryItems: [],
+        isAlbum: true,
+        isPlaylist: false,
+        isArtist: false,
+      };
+    }
+
+    if (id.startsWith('local_alb_')) {
+      return null;
+    }
+
+    return undefined;
+  }
+
+  private getLocalArtistMatches(
+    id: string,
+    knownArtistName?: string
+  ): { artistName: string; localSongs: Song[]; localAlbums: ArtistAlbumItem[] } {
+    const { localSongs } = this.getLibrarySnapshot();
+    const matchedById = localSongs.filter(
+      (s) =>
+        s.artistId === id ||
+        (Array.isArray(s.artistIds) && s.artistIds.includes(id)) ||
+        (Array.isArray(s.artists) && s.artists.some((a) => a.id === id))
+    );
+
+    let artistName = (knownArtistName || '').trim();
+    if (!artistName && matchedById.length > 0) {
+      const ref = matchedById[0].artists?.find((a) => a.id === id && a.name);
+      artistName = (ref?.name || matchedById[0].artist || '').trim();
+    }
+    if (!artistName && (id.startsWith('art_') || id.startsWith('local_art_'))) {
+      artistName = id.replace(/^(local_)?art_/, '').trim();
+    }
+    if (!artistName && !/^(UC|MPLA)/.test(id)) {
+      artistName = id.trim();
+    }
+
+    const lowerName = artistName.toLowerCase();
+    const seenVideoIds = new Set<string>();
+    const combinedSongs: Song[] = [];
+    for (const s of localSongs) {
+      const matchesId =
+        s.artistId === id ||
+        (Array.isArray(s.artistIds) && s.artistIds.includes(id)) ||
+        (Array.isArray(s.artists) && s.artists.some((a) => a.id === id));
+      const matchesName =
+        Boolean(lowerName) &&
+        ((s.artist || '').trim().toLowerCase() === lowerName ||
+          (typeof s.albumArtist === 'string' && s.albumArtist.trim().toLowerCase() === lowerName) ||
+          (Array.isArray(s.artists) &&
+            s.artists.some((a) => (a.name || '').trim().toLowerCase() === lowerName)));
+      if ((matchesId || matchesName) && !seenVideoIds.has(s.videoId)) {
+        seenVideoIds.add(s.videoId);
+        combinedSongs.push(s);
+      }
+    }
+
+    const albumMap = new Map<string, ArtistAlbumItem>();
+    for (const s of combinedSongs) {
+      const albumTitle = (s.albumName || s.album || '').trim();
+      if (!albumTitle) continue;
+      const key = s.albumId || albumTitle.toLowerCase();
+      if (!albumMap.has(key)) {
+        albumMap.set(key, {
+          id: s.albumId || `local_alb_${albumTitle}`,
+          title: albumTitle,
+          subtitle: [s.year, 'Local Album'].filter(Boolean).join(' • ') || 'Local Album',
+          thumbnailUrl: s.thumbnailUrl || s.artworkUrl || null,
+          year: s.year || null,
+        });
+      }
+    }
+
+    return {
+      artistName,
+      localSongs: combinedSongs,
+      localAlbums: Array.from(albumMap.values()),
+    };
+  }
+
+  private mergeUniqueSongs(primary: Song[], secondary: Song[]): Song[] {
+    const seen = new Set<string>();
+    const result: Song[] = [];
+    for (const s of [...primary, ...secondary]) {
+      if (!s?.videoId || seen.has(s.videoId)) continue;
+      seen.add(s.videoId);
+      result.push(s);
+    }
+    return result;
+  }
+
+  private mergeUniqueAlbums(
+    primary: ArtistAlbumItem[],
+    secondary: ArtistAlbumItem[]
+  ): ArtistAlbumItem[] {
+    const seenIds = new Set<string>();
+    const seenTitles = new Set<string>();
+    const result: ArtistAlbumItem[] = [];
+    for (const alb of [...primary, ...secondary]) {
+      if (!alb?.title) continue;
+      const titleKey = alb.title.trim().toLowerCase();
+      if ((alb.id && seenIds.has(alb.id)) || seenTitles.has(titleKey)) continue;
+      if (alb.id) seenIds.add(alb.id);
+      seenTitles.add(titleKey);
+      result.push(alb);
+    }
+    return result;
+  }
+
   public async getReleaseDetails(id: string, type: 'album' | 'playlist' = 'album'): Promise<DetailPage | null> {
     if (!id || id.trim() === '' || id.includes('nonexistent')) {
       return null;
+    }
+
+    const localDetail = this.resolveLocalReleaseDetail(id);
+    if (localDetail !== undefined) {
+      return localDetail;
     }
 
     if (id === fallbackReleaseDetail.id) {
@@ -321,16 +580,50 @@ export class MusicService implements IMusicService {
       return JSON.parse(JSON.stringify(fallbackArtistDetail));
     }
 
+    const localMatch = this.getLocalArtistMatches(id);
+
     if (id.startsWith('art_') || id.startsWith('local_art_') || !/^(UC|MPLA)/.test(id)) {
-      const artistName = id.replace(/^(local_)?art_/, '').trim();
+      const artistName = localMatch.artistName;
+      if (!artistName) {
+        return null;
+      }
+
+      if (!this.isOnline) {
+        if (localMatch.localSongs.length === 0) {
+          return null;
+        }
+        const thumb =
+          localMatch.localSongs.find((s) => s.thumbnailUrl || s.artworkUrl)?.thumbnailUrl ||
+          localMatch.localSongs.find((s) => s.artworkUrl)?.artworkUrl ||
+          null;
+        return {
+          id,
+          name: artistName,
+          bio: null,
+          subscribersText: null,
+          monthlyListeners: null,
+          avatarUrl: thumb,
+          thumbnailUrl: thumb,
+          topSongs: localMatch.localSongs,
+          albums: localMatch.localAlbums,
+          singlesAndEps: [],
+          radio: null,
+          shuffle: null,
+        };
+      }
+
       try {
         const [artistRes, songsRes, albumsRes] = await Promise.all([
           this.search(artistName, 'artists').catch(() => null),
           this.search(artistName, 'songs').catch(() => null),
           this.search(artistName, 'albums').catch(() => null),
         ]);
+        const isDefaultFallbackArtist = artistName.toLowerCase() === 'lazerhawk';
+        const isNotFallbackStubItem = (item: any) =>
+          isDefaultFallbackArtist || (item?.id !== 'sr_01' && item?.id !== 'sr_02');
+
         const topSongs: Song[] = (songsRes?.items || [])
-          .filter((i: any) => !i.isArtist && !i.isAlbum && !i.isPlaylist)
+          .filter((i: any) => !i.isArtist && !i.isAlbum && !i.isPlaylist && isNotFallbackStubItem(i))
           .slice(0, 10)
           .map((item: any) => ({
             videoId: String(item.videoId || item.id || ''),
@@ -347,8 +640,8 @@ export class MusicService implements IMusicService {
             isExplicit: Boolean(item.explicit),
             playbackSourceType: 'YOUTUBE' as const,
           }));
-        const albumItems = (albumsRes?.items || [])
-          .filter((i: any) => i.isAlbum || i.isSingle)
+        const albumItems: ArtistAlbumItem[] = (albumsRes?.items || [])
+          .filter((i: any) => (i.isAlbum || i.isSingle) && isNotFallbackStubItem(i))
           .slice(0, 12)
           .map((i: any) => ({
             id: String(i.browseId || i.id || ''),
@@ -357,7 +650,9 @@ export class MusicService implements IMusicService {
             thumbnailUrl: i.thumbnailUrl ? String(i.thumbnailUrl) : null,
             year: i.year ? String(i.year) : null,
           }));
-        const artistHit: any = (artistRes?.items || []).find((i: any) => i.isArtist);
+        const artistHit: any = (artistRes?.items || []).find(
+          (i: any) => i.isArtist && isNotFallbackStubItem(i)
+        );
         const realId = String(artistHit?.channelId || artistHit?.browseId || artistHit?.id || '');
         let official: ArtistPage | null = null;
         if (/^(UC|MPLA)/.test(realId)) {
@@ -368,39 +663,141 @@ export class MusicService implements IMusicService {
             official = null;
           }
         }
-        const fb = JSON.parse(JSON.stringify(fallbackArtistDetail));
-        const thumb = official?.avatarUrl || artistHit?.thumbnailUrl || topSongs[0]?.thumbnailUrl || fb.avatarUrl;
+
+        const mergedSongs = id.startsWith('local_art_')
+          ? this.mergeUniqueSongs(localMatch.localSongs, official?.topSongs?.length ? official.topSongs : topSongs)
+          : this.mergeUniqueSongs(official?.topSongs?.length ? official.topSongs : topSongs, localMatch.localSongs);
+        const mergedAlbums = id.startsWith('local_art_')
+          ? this.mergeUniqueAlbums(localMatch.localAlbums, official?.albums?.length ? official.albums : albumItems)
+          : this.mergeUniqueAlbums(official?.albums?.length ? official.albums : albumItems, localMatch.localAlbums);
+
+        const localThumb =
+          localMatch.localSongs.find((s) => s.thumbnailUrl || s.artworkUrl)?.thumbnailUrl ||
+          localMatch.localSongs.find((s) => s.artworkUrl)?.artworkUrl ||
+          null;
+        const thumb =
+          official?.avatarUrl ||
+          artistHit?.thumbnailUrl ||
+          topSongs[0]?.thumbnailUrl ||
+          localThumb ||
+          null;
+        const realMonthlyListeners =
+          typeof official?.monthlyListeners === 'number' &&
+          Number.isFinite(official.monthlyListeners) &&
+          official.monthlyListeners > 0
+            ? official.monthlyListeners
+            : null;
+        const realSubscribersText =
+          official?.subscribersText && official.subscribersText.trim().length > 0
+            ? official.subscribersText.trim()
+            : null;
+
         return {
-          ...fb,
           id,
           name: official?.name && official.name !== 'Artist' ? official.name : artistName,
           bio: official?.bio || null,
-          subscribersText: official?.subscribersText || null,
+          subscribersText: realSubscribersText,
+          monthlyListeners: realMonthlyListeners,
           avatarUrl: thumb,
           thumbnailUrl: thumb,
-          topSongs: official?.topSongs?.length ? official.topSongs : topSongs.length > 0 ? topSongs : fb.topSongs,
-          albums: official?.albums?.length ? official.albums : albumItems.length > 0 ? albumItems : fb.albums,
-          singlesAndEps: official?.singlesAndEps?.length ? official.singlesAndEps : fb.singlesAndEps,
-          radio: official?.radio ?? fb.radio,
-          shuffle: official?.shuffle ?? fb.shuffle,
+          topSongs: mergedSongs,
+          albums: mergedAlbums,
+          singlesAndEps: official?.singlesAndEps?.length ? official.singlesAndEps : [],
+          radio: official?.radio ?? null,
+          shuffle: official?.shuffle ?? null,
         };
       } catch {
-        return JSON.parse(JSON.stringify(fallbackArtistDetail));
+        if (localMatch.localSongs.length > 0) {
+          const thumb =
+            localMatch.localSongs.find((s) => s.thumbnailUrl || s.artworkUrl)?.thumbnailUrl ||
+            localMatch.localSongs.find((s) => s.artworkUrl)?.artworkUrl ||
+            null;
+          return {
+            id,
+            name: artistName,
+            bio: null,
+            subscribersText: null,
+            monthlyListeners: null,
+            avatarUrl: thumb,
+            thumbnailUrl: thumb,
+            topSongs: localMatch.localSongs,
+            albums: localMatch.localAlbums,
+            singlesAndEps: [],
+            radio: null,
+            shuffle: null,
+          };
+        }
+        return null;
       }
     }
     try {
+      let parsed: ArtistPage | null = null;
       if (typeof window !== 'undefined' && (window as any).musicAPI?.getArtistDetails) {
-        return await (window as any).musicAPI.getArtistDetails(id);
+        parsed = await (window as any).musicAPI.getArtistDetails(id);
+      } else {
+        const raw = await this.client.post('browse', { browseId: id });
+        parsed = this.parser.parseArtistDetail(id, raw);
       }
-      const raw = await this.client.post('browse', { browseId: id });
-      const parsed = this.parser.parseArtistDetail(id, raw);
-      if (parsed.name === 'Artist' && parsed.topSongs.length === 0 && !parsed.bio) {
+
+      if (!parsed) {
         return null;
       }
-      return parsed;
+
+      const enrichedLocal = this.getLocalArtistMatches(
+        id,
+        parsed.name && parsed.name !== 'Artist' ? parsed.name : undefined
+      );
+
+      if (
+        parsed.name === 'Artist' &&
+        parsed.topSongs.length === 0 &&
+        !parsed.bio &&
+        enrichedLocal.localSongs.length === 0
+      ) {
+        return null;
+      }
+
+      const realMonthlyListeners =
+        typeof parsed.monthlyListeners === 'number' &&
+        Number.isFinite(parsed.monthlyListeners) &&
+        parsed.monthlyListeners > 0
+          ? parsed.monthlyListeners
+          : null;
+      const realSubscribersText =
+        parsed.subscribersText && parsed.subscribersText.trim().length > 0
+          ? parsed.subscribersText.trim()
+          : null;
+
+      return {
+        ...parsed,
+        subscribersText: realSubscribersText,
+        monthlyListeners: realMonthlyListeners,
+        topSongs: this.mergeUniqueSongs(parsed.topSongs || [], enrichedLocal.localSongs),
+        albums: this.mergeUniqueAlbums(parsed.albums || [], enrichedLocal.localAlbums),
+      };
     } catch {
       if (id === fallbackArtistDetail.id) {
         return JSON.parse(JSON.stringify(fallbackArtistDetail));
+      }
+      if (localMatch.localSongs.length > 0) {
+        const thumb =
+          localMatch.localSongs.find((s) => s.thumbnailUrl || s.artworkUrl)?.thumbnailUrl ||
+          localMatch.localSongs.find((s) => s.artworkUrl)?.artworkUrl ||
+          null;
+        return {
+          id,
+          name: localMatch.artistName || 'Local Artist',
+          bio: null,
+          subscribersText: null,
+          monthlyListeners: null,
+          avatarUrl: thumb,
+          thumbnailUrl: thumb,
+          topSongs: localMatch.localSongs,
+          albums: localMatch.localAlbums,
+          singlesAndEps: [],
+          radio: null,
+          shuffle: null,
+        };
       }
       return null;
     }

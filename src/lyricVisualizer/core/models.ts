@@ -2,18 +2,23 @@
 
 export type VisualStyleId =
   | 'AppleMusicFlow'
-  | 'NeonKinetic'
   | 'TypewriterEditorial'
   | 'MinimalSwiss'
   | 'LiquidMetal'
-  | 'HoloVaporwave'
   | 'KaraokeStage'
   | 'BrutalistZine'
   | 'GenerativeParticleInk'
-  | 'SpectrumRibbon'
   | 'Spatial3DDepth'
   | 'CRTScanline'
-  | 'StarfieldShip3D';
+  | 'StarfieldShip3D'
+  | 'IosTextingMotion'
+  | 'CodeEditorKinetic';
+
+export interface StyleVariationDefinition {
+  readonly id: string;
+  readonly label: string;
+  readonly description?: string;
+}
 
 export interface VisualStyleDefinition {
   readonly id: VisualStyleId;
@@ -21,6 +26,8 @@ export interface VisualStyleDefinition {
   readonly description: string;
   readonly usesWebGl: boolean;
   readonly uses3D?: boolean;
+  readonly defaultVariationId: string;
+  readonly variations: readonly StyleVariationDefinition[];
 }
 
 export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
@@ -29,84 +36,187 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     label: 'Atmospheric Flow',
     description: 'Smooth spring-eased word illumination with atmospheric palette backdrop and depth falloff.',
     usesWebGl: false,
-  },
-  {
-    id: 'NeonKinetic',
-    label: 'Neon Kinetic',
-    description: 'Electric synthwave typography with neon bloom trails and beat-reactive pulse.',
-    usesWebGl: false,
+    defaultVariationId: 'silk-glow',
+    variations: [
+      { id: 'silk-glow', label: 'Silk Glow', description: 'Soft ambient bloom with liquid word sweep' },
+      { id: 'editorial-crisp', label: 'Editorial Crisp', description: 'High-contrast razor focus without bloom' },
+    ],
   },
   {
     id: 'TypewriterEditorial',
     label: 'Typewriter Editorial',
     description: 'Literary serif spotlight with animated cursor, ink reveal, and warm editorial grid.',
     usesWebGl: false,
+    defaultVariationId: 'dark-slate',
+    variations: [
+      { id: 'dark-slate', label: 'Dark Slate', description: 'Deep obsidian literary manuscript page' },
+      { id: 'warm-ink', label: 'Warm Ink', description: 'Warm charcoal paper with amber ink rule' },
+    ],
   },
   {
     id: 'MinimalSwiss',
     label: 'Minimal Swiss',
     description: 'Asymmetric Swiss modernist grid with tight grotesque type and crisp active bar.',
     usesWebGl: false,
+    defaultVariationId: 'international-grid',
+    variations: [
+      { id: 'international-grid', label: 'International Grid', description: 'Josef Müller-Brockmann hairlines and timecode column' },
+      { id: 'editorial-bold', label: 'Editorial Bold', description: 'Oversized display weight with minimal grid framing' },
+    ],
   },
   {
     id: 'LiquidMetal',
     label: 'Liquid Metal',
-    description: 'Specular chrome and iridescent fluid shader backdrop with reflective active words.',
+    description: 'Specular obsidian chrome, iridescent vaporwave synth grid, and album-tinted mercury shaders.',
     usesWebGl: true,
-  },
-  {
-    id: 'HoloVaporwave',
-    label: 'Holo Vaporwave',
-    description: 'Perspective neon synth grid horizon with chromatic pastel scanlines.',
-    usesWebGl: true,
+    defaultVariationId: 'obsidian-chrome',
+    variations: [
+      { id: 'obsidian-chrome', label: 'Obsidian Chrome', description: 'Deep obsidian base with crisp liquid silver specular ridges' },
+      { id: 'holo-vaporwave', label: 'Holo Vaporwave', description: 'Midnight synthwave horizon grid with cyan/magenta holographic sheen' },
+      { id: 'mercury-album-tint', label: 'Mercury Album Tint', description: 'Liquid metallic ridges infused with live album artwork hues' },
+    ],
   },
   {
     id: 'KaraokeStage',
     label: 'Karaoke Stage',
     description: 'High-contrast live stage bounce with word fill-wipe progress and upcoming preview.',
     usesWebGl: false,
+    defaultVariationId: 'concert-gold',
+    variations: [
+      { id: 'concert-gold', label: 'Concert Gold', description: 'Warm spotlight stage with crisp word wipe' },
+      { id: 'club-neon', label: 'Club Neon', description: 'Electric cyan/magenta duet stage pulse' },
+    ],
   },
   {
     id: 'BrutalistZine',
     label: 'Brutalist Zine',
-    description: 'Tilted poster cards, bold uppercase blocks, halftone dots, and knockout highlights.',
+    description: 'Tilted poster cards, bold uppercase blocks, newsprint halftone dots, and knockout highlights.',
     usesWebGl: false,
+    defaultVariationId: 'newsprint-cutout',
+    variations: [
+      { id: 'newsprint-cutout', label: 'Newsprint Cutout', description: 'High-contrast ink cards, masking tape, and halftone grain' },
+      { id: 'xerox-contrast', label: 'Xerox Contrast', description: 'Stark monochrome photocopy zine with razor borders' },
+      { id: 'accent-risograph', label: 'Accent Risograph', description: 'Dual-tone album risograph ink over dark newsprint' },
+    ],
   },
   {
     id: 'GenerativeParticleInk',
-    label: 'Particle Ink',
-    description: 'Audio-reactive ink droplets and glowing embers synchronized with word strikes.',
+    label: 'Particle Ink & Ribbons',
+    description: 'Audio-reactive calligraphic ink droplets and multi-band FFT spectrum ribbons.',
     usesWebGl: false,
-  },
-  {
-    id: 'SpectrumRibbon',
-    label: 'Spectrum Ribbon',
-    description: 'Flowing multi-band FFT waveform ribbons driven by bass, mid, and treble energy.',
-    usesWebGl: false,
+    defaultVariationId: 'pure-ink',
+    variations: [
+      { id: 'pure-ink', label: 'Pure Ink', description: 'Organic calligraphic ink bursts and word-strike embers' },
+      { id: 'spectrum-ribbon', label: 'Spectrum Ribbon', description: 'Multi-layered 3-band glowing FFT waveform ribbons' },
+      { id: 'ink-ribbon-hybrid', label: 'Ink + Ribbon Hybrid', description: 'Combined FFT ribbons with reactive ink particle bursts' },
+    ],
   },
   {
     id: 'Spatial3DDepth',
     label: 'Spatial 3D Depth',
-    description: 'Multi-plane Z-depth perspective camera with depth-of-field alpha and scale.',
+    description: 'Multi-plane Z-depth perspective camera with volumetric rings and depth-of-field scale.',
     usesWebGl: false,
     uses3D: true,
+    defaultVariationId: 'depth-rings',
+    variations: [
+      { id: 'depth-rings', label: 'Depth Rings', description: 'Concentric perspective portal rings with Z-extruded focal lyrics' },
+      { id: 'glass-planes', label: 'Glass Planes', description: 'Translucent dark glass depth cards receding in 3D space' },
+      { id: 'horizon-grid', label: 'Horizon Grid', description: 'Perspective floor and ceiling depth rails with reflective glow' },
+    ],
   },
   {
     id: 'CRTScanline',
     label: 'CRT Scanline',
-    description: 'Retro phosphor monitor vignette, subtle RGB mask, and glowing terminal lyrics.',
+    description: 'Deep phosphor CRT glass monitor with curved barrel vignette, scanlines, and RGB subpixel mask.',
     usesWebGl: true,
+    defaultVariationId: 'p31-green',
+    variations: [
+      { id: 'p31-green', label: 'P31 Phosphor Green', description: 'Classic monochrome green terminal phosphor on deep black glass' },
+      { id: 'p3-amber', label: 'P3 Amber Monitor', description: 'Warm vintage amber CRT phosphor glow' },
+      { id: 'trinitron-rgb', label: 'Trinitron RGB', description: 'Aperture-grille chromatic RGB subpixel separation with album tint' },
+    ],
   },
   {
     id: 'StarfieldShip3D',
     label: 'Starfield Ship 3D',
-    description: 'Deep 3D parallax starfield with procedural starship banking to bass and beat.',
+    description: '3D starfighter weaving through procedural asteroids with BPM cruise and beat warp surges.',
     usesWebGl: true,
     uses3D: true,
+    defaultVariationId: 'deep-space',
+    variations: [
+      { id: 'deep-space', label: 'Deep Space', description: 'Tactical interceptor banking through asteroid corridor' },
+      { id: 'nebula-run', label: 'Nebula Run', description: 'Album-tinted cosmic nebula clouds and plasma exhaust' },
+      { id: 'retro-wireframe', label: 'Retro Wireframe', description: 'Vector arcade wireframe starfighter and faceted asteroids' },
+    ],
+  },
+  {
+    id: 'IosTextingMotion',
+    label: 'iOS Messages',
+    description: 'Synced iOS message thread with glossy Tapbacks, Magic Word kinetic effects, and rich cards.',
+    usesWebGl: false,
+    defaultVariationId: 'ios-dark',
+    variations: [
+      { id: 'ios-dark', label: 'iOS Dark', description: 'Authentic dark iMessage blue and graphite thread' },
+      { id: 'liquid-glass', label: 'Liquid Glass', description: 'Frosted translucent glass bubbles with specular rim highlights' },
+      { id: 'cinema-edit', label: 'Cinema Edit', description: 'Letterboxed kinetic edit with dramatic focal zoom' },
+      { id: 'classic-sms', label: 'Classic SMS Green', description: 'iMessage blue paired with classic SMS green replies' },
+    ],
+  },
+  {
+    id: 'CodeEditorKinetic',
+    label: 'Code Editor Kinetic',
+    description: 'Macro-camera dark IDE where lyrics compile live as expressive JavaScript with collaborator cursors.',
+    usesWebGl: false,
+    uses3D: true,
+    defaultVariationId: 'ide-macro',
+    variations: [
+      { id: 'ide-macro', label: 'IDE Macro', description: '3D macro camera tracking live syntax tokens and crimson block cursor' },
+      { id: 'led-stage-matrix', label: 'LED Stage Matrix', description: 'Concert LED dot-matrix glow over live code tokens' },
+      { id: 'clockwork-orbit', label: 'Clockwork Orbit', description: 'BPM-locked geometric timing rings rotating behind syntax' },
+      { id: 'clean-dark-ide', label: 'Clean Dark IDE', description: 'Razor-sharp flat obsidian code editor without camera tilt' },
+    ],
   },
 ] as const;
 
+export function getStyleDefinition(id: VisualStyleId | string): VisualStyleDefinition {
+  const mappedId =
+    id === 'HoloVaporwave'
+      ? 'LiquidMetal'
+      : id === 'SpectrumRibbon'
+      ? 'GenerativeParticleInk'
+      : id === 'NeonKinetic'
+      ? 'AppleMusicFlow'
+      : id;
+  const found = VISUAL_STYLE_DEFINITIONS.find((s) => s.id === mappedId);
+  return found ?? VISUAL_STYLE_DEFINITIONS[0];
+}
+
+export function resolveStyleVariationId(
+  styleId: VisualStyleId | string,
+  variationByStyle?: Partial<Record<VisualStyleId, string>> | Record<string, string | undefined> | null
+): string {
+  const def = getStyleDefinition(styleId);
+  const rawCandidate =
+    variationByStyle && typeof variationByStyle === 'object'
+      ? (variationByStyle as Record<string, string | undefined>)[def.id] ??
+        (variationByStyle as Record<string, string | undefined>)[styleId]
+      : undefined;
+  if (rawCandidate && def.variations.some((v) => v.id === rawCandidate)) {
+    return rawCandidate;
+  }
+  if (styleId === 'HoloVaporwave' && def.variations.some((v) => v.id === 'holo-vaporwave')) {
+    return 'holo-vaporwave';
+  }
+  if (styleId === 'SpectrumRibbon' && def.variations.some((v) => v.id === 'spectrum-ribbon')) {
+    return 'spectrum-ribbon';
+  }
+  return def.defaultVariationId;
+}
+
+export const SF_PRO_DISPLAY_STACK = "'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif";
+
 export type BundledFontId =
+  | 'SFProDisplay'
   | 'Inter'
   | 'PlusJakartaSans'
   | 'InstrumentSerif'
@@ -120,10 +230,17 @@ export interface BundledFontDefinition {
   readonly label: string;
   readonly cssFamily: string;
   readonly packageName: string;
-  readonly license: 'OFL-1.1';
+  readonly license: 'OFL-1.1' | 'Bundled';
 }
 
 export const BUNDLED_FONTS: readonly BundledFontDefinition[] = [
+  {
+    id: 'SFProDisplay',
+    label: 'SF Pro Display',
+    cssFamily: SF_PRO_DISPLAY_STACK,
+    packageName: 'bundled/sf-pro-display',
+    license: 'Bundled',
+  },
   {
     id: 'Inter',
     label: 'Inter',
@@ -220,6 +337,8 @@ export interface TrackInfo {
   readonly title: string;
   readonly artist: string;
   readonly album?: string;
+  readonly year?: string;
+  readonly bpm?: number;
   readonly durationSeconds: number;
   readonly artworkUrl?: string | null;
   readonly isrc?: string;
@@ -242,6 +361,8 @@ export interface AudioFrameMetrics {
   midEnergy: number;
   trebleEnergy: number;
   beatDetected: boolean;
+  estimatedBpm?: number;
+  beatStrength?: number;
 }
 
 export interface IPlaybackBridge {
@@ -270,6 +391,7 @@ export interface LyricPalette {
   readonly oklchC: number;
   readonly oklchH: number;
   readonly isFallback: boolean;
+  readonly meshColors?: readonly [string, string, string, string];
 }
 
 export interface MeasuredWordLayout {
@@ -306,6 +428,19 @@ export interface LyricsLayout {
   readonly lines: readonly MeasuredLineLayout[];
 }
 
+export type MotionIntensity = 'subtle' | 'normal' | 'vivid';
+export type NowPlayingLayoutMode = 'split' | 'centered' | 'ambient';
+export type LyricTextAlign = 'center' | 'left';
+
+export interface StyleTrackMetadata {
+  readonly id: string;
+  readonly title: string;
+  readonly artist: string;
+  readonly album: string;
+  readonly year?: string;
+  readonly bpm?: number;
+}
+
 export interface StyleFrameContext {
   readonly lyrics: Lyrics | null;
   readonly layout: LyricsLayout | null;
@@ -323,16 +458,42 @@ export interface StyleFrameContext {
   readonly reduceMotion: boolean;
   readonly isAmbientMode: boolean;
   readonly isOverlayMode?: boolean;
+  readonly isEmbeddedTransparent?: boolean;
+  readonly hasWebGlBackdrop?: boolean;
+  readonly contentInsetLeft?: number;
+  readonly motionIntensity?: MotionIntensity;
   readonly didSeekThisFrame: boolean;
+  readonly variationId: string;
+  readonly manualScrollY: number;
+  readonly isFollowingPlayback: boolean;
+  readonly hoveredLineIndex: number;
+  readonly backgroundOpacity: number;
+  readonly vignetteStrength: number;
+  readonly textAlign: LyricTextAlign;
+  readonly trackMetadata: StyleTrackMetadata | null;
+  readonly recordHitRect: (
+    lineIndex: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ) => void;
 }
 
 export interface LyricVisualizerConfig {
   readonly styleId: VisualStyleId;
+  readonly variationByStyle: Partial<Record<VisualStyleId, string>>;
   readonly fontId: BundledFontId;
   readonly fontSizeScale: number;
   readonly albumArtColorMatch: boolean;
   readonly audioReactive: boolean;
   readonly reduceMotion: boolean;
+  readonly motionIntensity?: MotionIntensity;
+  readonly backgroundOpacity: number;
+  readonly vignetteStrength: number;
+  readonly textAlign: LyricTextAlign;
+  readonly nowPlayingLayout: NowPlayingLayoutMode;
+  readonly hideAlbumCover: boolean;
   readonly overlayEnabled: boolean;
   readonly overlayMonitorIds: readonly string[];
   readonly overlayOpacity: number;
@@ -345,11 +506,18 @@ export interface LyricVisualizerConfig {
 
 export const DEFAULT_LYRIC_VISUALIZER_CONFIG: LyricVisualizerConfig = {
   styleId: 'AppleMusicFlow',
-  fontId: 'Inter',
+  variationByStyle: {},
+  fontId: 'SFProDisplay',
   fontSizeScale: 1.0,
   albumArtColorMatch: true,
   audioReactive: true,
   reduceMotion: false,
+  motionIntensity: 'normal',
+  backgroundOpacity: 0.95,
+  vignetteStrength: 0.55,
+  textAlign: 'center',
+  nowPlayingLayout: 'split',
+  hideAlbumCover: false,
   overlayEnabled: false,
   overlayMonitorIds: [],
   overlayOpacity: 0.9,

@@ -5,29 +5,17 @@
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
-  "build": {
-    "appId": "com.waveform.desktop",
-    "productName": "WaveForm",
-    "win": {
-      "icon": "build/icon.ico"
-    },
-    "mac": {
-      "icon": "build/icon.png"
-    },
-    "linux": {
-      "icon": "build/icon.png"
-    }
-  },
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "start": "node scripts/start.mjs",
-    "build": "tsc && vite build && node -e \"const fs = require('fs'); fs.mkdirSync('dist/assets/data', { recursive: true }); fs.copyFileSync('src/assets/data/auto_eq.db', 'dist/assets/data/auto_eq.db');\" && npm run electron:compile",
+    "build": "tsc && vite build && node -e \"const fs = require('fs'), path = require('path'); fs.mkdirSync('dist/assets/data', { recursive: true }); for (const f of fs.readdirSync('src/assets/data')) { const s = path.join('src/assets/data', f); if (fs.statSync(s).isFile()) fs.copyFileSync(s, path.join('dist/assets/data', f)); }\" && npm run electron:compile",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit && tsc -p electron/tsconfig.preload.json --noEmit",
     "test": "node tests/runner.mjs",
     "electron:compile": "tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.preload.json",
     "electron:dev": "node scripts/dev.mjs",
-    "electron:build": "npm run build"
+    "electron:build": "npm run build",
+    "dist:win": "npm run build && electron-builder --win nsis portable --publish never && node scripts/generate-checksums.mjs"
   },
   "dependencies": {
     "@fontsource/fraunces": "^5.3.0",
@@ -53,6 +41,7 @@
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "30.5.1",
+    "electron-builder": "^26.18.0",
     "tailwindcss": "^4.0.9",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { AppSettings } from '../../models/Settings';
+import { extractPaletteFromArtworkUrl, rgbToHex } from '../../lyricVisualizer/core/oklchPalette';
 
 export type ThemeMode = 'dark' | 'light';
 
@@ -64,6 +65,7 @@ export interface ArtworkPalette {
   ambientBackground: string;
   playerTint: string;
   topBandLuminance: number;
+  meshColors?: [string, string, string, string];
 }
 
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
@@ -119,20 +121,39 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   ];
 }
 
-function parseColorToHslAndRgb(color: string): { h: number; s: number; l: number; r: number; g: number; b: number } | null {
+function parseColorToRgbTuple(color: string): [number, number, number] | null {
   const trimmed = (color || '').trim();
-  const hexMatch = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(trimmed);
+  const hexMatch = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(trimmed);
   if (hexMatch) {
     let hex = hexMatch[1];
     if (hex.length === 3) {
       hex = hex.split('').map((c) => c + c).join('');
     }
-    const r = parseInt(hex.slice(0, 2), 16);
-    const g = parseInt(hex.slice(2, 4), 16);
-    const b = parseInt(hex.slice(4, 6), 16);
+    return [
+      parseInt(hex.slice(0, 2), 16),
+      parseInt(hex.slice(2, 4), 16),
+      parseInt(hex.slice(4, 6), 16),
+    ];
+  }
+  const rgbMatch = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i.exec(trimmed);
+  if (rgbMatch) {
+    return [
+      Math.max(0, Math.min(255, Math.round(parseFloat(rgbMatch[1])))),
+      Math.max(0, Math.min(255, Math.round(parseFloat(rgbMatch[2])))),
+      Math.max(0, Math.min(255, Math.round(parseFloat(rgbMatch[3])))),
+    ];
+  }
+  return null;
+}
+
+function parseColorToHslAndRgb(color: string): { h: number; s: number; l: number; r: number; g: number; b: number } | null {
+  const rgbTuple = parseColorToRgbTuple(color);
+  if (rgbTuple) {
+    const [r, g, b] = rgbTuple;
     const [h, s, l] = rgbToHsl(r, g, b);
     return { h, s, l, r, g, b };
   }
+  const trimmed = (color || '').trim();
   const hslMatch = /^hsla?\(\s*([\d.-]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/i.exec(trimmed);
   if (hslMatch) {
     const h = ((Math.round(parseFloat(hslMatch[1])) % 360) + 360) % 360;
@@ -195,29 +216,63 @@ export function ensureReadableAccent(
 function buildPaletteFromHue(hue: number, edgeHue = hue, topBandLuminance = 0.24): ArtworkPalette {
   const safeHue = ((Math.round(hue) % 360) + 360) % 360;
   const safeEdge = ((Math.round(edgeHue) % 360) + 360) % 360;
+  const [vr, vg, vb] = hslToRgb(safeHue, 0.78, 0.58);
+  const [er, eg, eb] = hslToRgb(safeEdge, 0.45, 0.18);
+  const [ar, ag, ab] = hslToRgb(safeHue, 0.35, 0.08);
+  const [pr, pg, pb] = hslToRgb(safeHue, 0.42, 0.24);
+  const vibrantAccent = rgbToHex({ r: vr, g: vg, b: vb });
+  const edgeOpaque = rgbToHex({ r: er, g: eg, b: eb });
+  const ambientBackground = rgbToHex({ r: ar, g: ag, b: ab });
+  const playerOpaque = rgbToHex({ r: pr, g: pg, b: pb });
   return {
     dominantHue: safeHue,
-    vibrantAccent: `hsl(${safeHue}, 78%, 58%)`,
-    edgeWash: `hsla(${safeEdge}, 45%, 18%, 0.55)`,
-    ambientBackground: `hsl(${safeHue}, 35%, 8%)`,
-    playerTint: `hsla(${safeHue}, 42%, 24%, 0.65)`,
+    vibrantAccent,
+    edgeWash: `rgba(${er}, ${eg}, ${eb}, 0.55)`,
+    ambientBackground,
+    playerTint: `rgba(${pr}, ${pg}, ${pb}, 0.65)`,
     topBandLuminance,
+    meshColors: [vibrantAccent, edgeOpaque, ambientBackground, playerOpaque],
   };
 }
 
+const PALETTE_CACHE_MAX = 120;
 const paletteCache = new Map<string, ArtworkPalette>();
 
+function setCachedThemePalette(key: string, palette: ArtworkPalette): void {
+  if (paletteCache.has(key)) {
+    paletteCache.delete(key);
+  } else if (paletteCache.size >= PALETTE_CACHE_MAX) {
+    const oldest = paletteCache.keys().next().value;
+    if (oldest !== undefined) paletteCache.delete(oldest);
+  }
+  paletteCache.set(key, palette);
+}
+
+function cssColorToHex(color: string, fallbackHex: string): string {
+  const tuple = parseColorToRgbTuple(color);
+  return tuple ? rgbToHex({ r: tuple[0], g: tuple[1], b: tuple[2] }) : fallbackHex;
+}
+
+function cssColorToRgba(color: string, alpha: number, fallbackRgba: string): string {
+  const tuple = parseColorToRgbTuple(color);
+  return tuple ? `rgba(${tuple[0]}, ${tuple[1]}, ${tuple[2]}, ${alpha})` : fallbackRgba;
+}
+
 /**
- * Extracts a dynamic ArtworkPalette (ported from ArtworkPalette.kt in WaveForm-Rebuild)
- * Samples dominant hue, bottom 18% edge wash, and top 10% relative luminance from album cover art.
+ * Extracts a dynamic ArtworkPalette via shared OKLCH multi-peak extractor (IPC pixel bridge + CORS fallback),
+ * falling back deterministically to seedHue when artwork is absent or fails to load.
  */
 export async function extractArtworkPaletteFromUrl(
   imageUrl?: string | null,
   seedText = ''
 ): Promise<ArtworkPalette> {
-  const key = imageUrl || seedText || 'default';
-  if (paletteCache.has(key)) {
-    return paletteCache.get(key)!;
+  const trimmedUrl = typeof imageUrl === 'string' ? imageUrl.trim() : '';
+  const key = trimmedUrl || seedText || 'default';
+  const cached = paletteCache.get(key);
+  if (cached) {
+    paletteCache.delete(key);
+    paletteCache.set(key, cached);
+    return cached;
   }
 
   // Deterministic seed fallback based on URL/title characters
@@ -228,107 +283,45 @@ export async function extractArtworkPaletteFromUrl(
   const seedHue = Math.abs(hash) % 360;
   const fallbackPalette = buildPaletteFromHue(seedHue, (seedHue + 28) % 360, 0.25);
 
-  if (typeof window === 'undefined' || typeof document === 'undefined' || !imageUrl) {
-    paletteCache.set(key, fallbackPalette);
+  if (!trimmedUrl) {
+    setCachedThemePalette(key, fallbackPalette);
     return fallbackPalette;
   }
 
-  return new Promise<ArtworkPalette>((resolve) => {
-    try {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      const timeout = setTimeout(() => {
-        paletteCache.set(key, fallbackPalette);
-        resolve(fallbackPalette);
-      }, 1500);
+  try {
+    const extracted = await extractPaletteFromArtworkUrl(trimmedUrl);
+    if (!extracted.isFallback) {
+      const vibrantAccent = cssColorToHex(extracted.accentPrimary, fallbackPalette.vibrantAccent);
+      const ambientBackground = cssColorToHex(extracted.bgDeep, fallbackPalette.ambientBackground);
+      const bgMidHex = cssColorToHex(extracted.bgMid, ambientBackground);
+      const secondaryHex = cssColorToHex(extracted.accentSecondary, vibrantAccent);
+      const meshColors: [string, string, string, string] = extracted.meshColors
+        ? [
+            extracted.meshColors[0],
+            extracted.meshColors[1],
+            extracted.meshColors[2],
+            extracted.meshColors[3],
+          ]
+        : [vibrantAccent, secondaryHex, ambientBackground, bgMidHex];
 
-      img.onload = () => {
-        clearTimeout(timeout);
-        try {
-          const canvas = document.createElement('canvas');
-          const size = 32;
-          canvas.width = size;
-          canvas.height = size;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            paletteCache.set(key, fallbackPalette);
-            resolve(fallbackPalette);
-            return;
-          }
-          ctx.drawImage(img, 0, 0, size, size);
-          const data = ctx.getImageData(0, 0, size, size).data;
-
-          let bestWeight = -1;
-          let dominantHue = seedHue;
-          let edgeR = 0;
-          let edgeG = 0;
-          let edgeB = 0;
-          let edgeCount = 0;
-          let topLumSum = 0;
-          let topCount = 0;
-
-          const topRows = Math.max(1, Math.floor(size * 0.1));
-          const edgeStartRow = Math.floor(size * 0.82);
-
-          for (let y = 0; y < size; y++) {
-            for (let x = 0; x < size; x++) {
-              const idx = (y * size + x) * 4;
-              const r = data[idx];
-              const g = data[idx + 1];
-              const b = data[idx + 2];
-              const [h, s, l] = rgbToHsl(r, g, b);
-
-              if (y < topRows) {
-                const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-                topLumSum += lum;
-                topCount++;
-              }
-
-              if (y >= edgeStartRow) {
-                edgeR += r;
-                edgeG += g;
-                edgeB += b;
-                edgeCount++;
-              }
-
-              // Weight vibrant mid-lightness swatches highest (saturation * sqrt(population proxy))
-              if (l > 0.12 && l < 0.88 && s > 0.15) {
-                const weight = s * (1 - Math.abs(l - 0.5));
-                if (weight > bestWeight) {
-                  bestWeight = weight;
-                  dominantHue = h;
-                }
-              }
-            }
-          }
-
-          const [edgeHue] =
-            edgeCount > 0
-              ? rgbToHsl(edgeR / edgeCount, edgeG / edgeCount, edgeB / edgeCount)
-              : [dominantHue, 0.5, 0.2];
-          const topLum = topCount > 0 ? topLumSum / topCount : 0.24;
-
-          const extracted = buildPaletteFromHue(dominantHue, edgeHue, topLum);
-          paletteCache.set(key, extracted);
-          resolve(extracted);
-        } catch {
-          paletteCache.set(key, fallbackPalette);
-          resolve(fallbackPalette);
-        }
+      const palette: ArtworkPalette = {
+        dominantHue: ((Math.round(extracted.oklchH) % 360) + 360) % 360,
+        vibrantAccent,
+        edgeWash: cssColorToRgba(meshColors[1], 0.55, fallbackPalette.edgeWash),
+        ambientBackground,
+        playerTint: cssColorToRgba(extracted.bgMid, 0.65, fallbackPalette.playerTint),
+        topBandLuminance: Number(Math.min(0.95, Math.max(0.05, extracted.oklchL * 0.45)).toFixed(3)),
+        meshColors,
       };
-
-      img.onerror = () => {
-        clearTimeout(timeout);
-        paletteCache.set(key, fallbackPalette);
-        resolve(fallbackPalette);
-      };
-
-      img.src = imageUrl;
-    } catch {
-      paletteCache.set(key, fallbackPalette);
-      resolve(fallbackPalette);
+      setCachedThemePalette(key, palette);
+      return palette;
     }
-  });
+  } catch {
+    // Fall through to deterministic seed palette
+  }
+
+  setCachedThemePalette(key, fallbackPalette);
+  return fallbackPalette;
 }
 
 interface ThemeState {

@@ -2,6 +2,9 @@
 // Desktop audio controller managing AudioEngine lifecycle, track advancement, DSP sync, and media session
 
 import { useEffect, useRef } from 'react';
+import { isDeadOrStaleRestoredStreamUrl } from '../../audio/AudioEngine';
+import { getSharedWaveFormPlaybackBridge } from '../../lyricVisualizer/bridge/waveFormPlaybackBridge';
+import { StreamResolver } from '../../services/StreamResolver';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useSettingsStore } from '../../state/settingsStore';
@@ -20,7 +23,53 @@ export function useAudioController() {
 
     const engine = usePlayerStore.getState().audioEngine;
     if (engine && player.currentTrack) {
-      player.prepareRestoredTrack(player.currentTrack, player.positionMs);
+      const restoredTrack = player.currentTrack;
+      const restoredPosMs = player.pendingResumePositionMs ?? player.positionMs;
+      // Ensure bridge singleton is initialized and registered for forceResync
+      const bridge = getSharedWaveFormPlaybackBridge();
+      engine.onResumeResetToZeroCallback = () => {
+        usePlayerStore.getState().syncPositionFromEngine(0);
+        bridge.forceResync(0);
+      };
+
+      player.prepareRestoredTrack(restoredTrack, restoredPosMs).then(async () => {
+        if (!isDeadOrStaleRestoredStreamUrl(restoredTrack.streamUrl)) {
+          return;
+        }
+        try {
+          const resolver = new StreamResolver();
+          const resolved = await resolver.resolve(
+            restoredTrack.videoId,
+            restoredTrack.title,
+            restoredTrack.artist,
+            restoredTrack.durationSec
+          );
+          const latest = usePlayerStore.getState();
+          if (
+            !resolved?.url ||
+            latest.currentTrack?.videoId !== restoredTrack.videoId ||
+            latest.playbackState === 'PLAYING'
+          ) {
+            return;
+          }
+          const freshTrack = {
+            ...latest.currentTrack,
+            streamUrl: resolved.url,
+            sourceQuality: resolved.quality || latest.currentTrack.sourceQuality,
+          };
+          usePlayerStore.setState({
+            currentTrack: freshTrack,
+            activeStreamQuality: freshTrack.sourceQuality || null,
+          });
+          await engine.loadTrack(freshTrack as any, 'active');
+          if (restoredPosMs > 0 && usePlayerStore.getState().pendingResumePositionMs !== null) {
+            engine.setPendingResumePosition(restoredPosMs / 1000);
+            engine.applyPendingResumeSeek();
+          }
+        } catch {
+          // Non-fatal: user can still press play to trigger fresh resolution
+        }
+      });
     }
 
     // 2. Listen for track completion on audio deck to advance queue
@@ -142,12 +191,26 @@ export function useAudioController() {
         el.readyState >= 2;
 
       if (isRealMediaPlaying) {
-        const nextPos = engine.getCurrentPositionMs();
+        const engineTimeSec = engine.getCurrentTime();
+        const nextPos = Math.round(engineTimeSec * 1000);
         const engineDur = engine.getCurrentDurationMs();
         const nextDur = engineDur > 0 ? engineDur : state.durationMs;
+        const storeTimeSec = state.positionMs / 1000;
 
         const now = Date.now();
-        if (now - lastStoreSyncTime >= 1000 || Math.abs(nextPos - state.positionMs) > 1500) {
+        // Drift Watchdog: snap store + lyric visualizer if >1.0s out of sync
+        if (
+          !state.isScrubbing &&
+          !engine.isSeekingActive() &&
+          Math.abs(storeTimeSec - engineTimeSec) > 1.0
+        ) {
+          lastStoreSyncTime = now;
+          state.syncPositionFromEngine(nextPos);
+          if (nextDur !== state.durationMs) {
+            usePlayerStore.setState({ durationMs: nextDur });
+          }
+          getSharedWaveFormPlaybackBridge().forceResync(engineTimeSec);
+        } else if (!state.isScrubbing && now - lastStoreSyncTime >= 1000) {
           lastStoreSyncTime = now;
           usePlayerStore.setState({
             positionMs: nextPos,
@@ -158,6 +221,7 @@ export function useAudioController() {
         el &&
         (el.getAttribute('src') || el.src) &&
         el.paused &&
+        !el.ended &&
         !activeDeck.isPlaying &&
         state.playbackState === 'PLAYING'
       ) {
@@ -187,7 +251,9 @@ export function useAudioController() {
     const handleUnload = () => {
       const p = usePlayerStore.getState();
       const q = useQueueStore.getState();
-      const currentPos = p.audioEngine ? p.audioEngine.getCurrentPositionMs() : p.positionMs;
+      const enginePos = p.audioEngine ? p.audioEngine.getCurrentPositionMs() : p.positionMs;
+      const currentPos =
+        enginePos > 0 ? enginePos : (p.pendingResumePositionMs ?? p.positionMs);
 
       saveSyncSession({
         version: 1,

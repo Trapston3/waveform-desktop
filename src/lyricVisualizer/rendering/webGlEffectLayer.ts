@@ -22,6 +22,8 @@ export interface WebGlEffectParams {
   bgMidHex: string;
   accentPrimaryHex: string;
   accentSecondaryHex: string;
+  variationIndex?: number;
+  backgroundOpacity?: number;
 }
 
 const VERTEX_SHADER_SRC = `#version 300 es
@@ -46,6 +48,8 @@ uniform float u_bass;
 uniform float u_treble;
 uniform float u_beat;
 uniform float u_reduceMotion;
+uniform float u_variation;
+uniform float u_bgOpacity;
 uniform vec3 u_bgDeep;
 uniform vec3 u_bgMid;
 uniform vec3 u_accent1;
@@ -83,15 +87,43 @@ void main() {
   float t = u_time * (u_reduceMotion > 0.5 ? 0.08 : 0.32);
   vec2 q = vec2(fbm(uv * 2.2 + vec2(t, -t * 0.6)), fbm(uv * 2.2 + vec2(-t * 0.5, t * 0.8)));
   float f = fbm(uv * 2.8 + q * (1.8 + u_bass * 0.8));
-  float ridge = pow(1.0 - abs(f * 2.0 - 1.0), 2.4);
-  float spec = pow(max(0.0, ridge), 4.0) * (0.65 + u_treble * 0.55 + u_beat * 0.35);
+  float ridge = pow(max(0.0, 1.0 - abs(f * 2.0 - 1.0)), 3.6);
+  float spec = pow(max(0.0, ridge), 3.4) * (0.72 + u_treble * 0.6 + u_beat * 0.42);
 
-  vec3 chrome = mix(u_bgDeep, u_bgMid, clamp(f * 1.15, 0.0, 1.0));
-  vec3 irid = 0.5 + 0.5 * cos(6.28318 * (f * 1.3 + t * 0.25 + vec3(0.0, 0.33, 0.67)));
-  vec3 tint = mix(u_accent1, u_accent2, clamp(q.x, 0.0, 1.0));
-  vec3 col = mix(chrome, mix(tint, irid, 0.45), ridge * 0.52) + vec3(0.85, 0.9, 1.0) * spec * 0.38;
-  col *= (0.85 + u_rms * 0.25);
-  outColor = vec4(col, 1.0);
+  vec3 col;
+  if (u_variation < 0.5) {
+    // Variation 0: Obsidian Chrome (#07090e deep obsidian + crisp high-contrast silver specular ridges, NO grey wash)
+    vec3 obsidianDeep = vec3(0.027, 0.035, 0.055); // #07090e
+    vec3 obsidianValley = vec3(0.016, 0.020, 0.033);
+    vec3 silverRidge = vec3(0.76, 0.83, 0.93);
+    vec3 chromeHighlight = vec3(0.94, 0.97, 1.0);
+    vec3 base = mix(obsidianValley, obsidianDeep, smoothstep(0.15, 0.85, f));
+    col = base + silverRidge * (ridge * 0.24) + chromeHighlight * (spec * 0.34);
+  } else if (u_variation < 1.5) {
+    // Variation 1: Holo Vaporwave (#090517 deep midnight synthwave + cyan/magenta/violet sheen)
+    vec3 midnight = vec3(0.035, 0.020, 0.090); // #090517
+    vec3 deepViolet = vec3(0.068, 0.032, 0.155);
+    vec3 cyan = vec3(0.0, 0.90, 1.0);
+    vec3 magenta = vec3(1.0, 0.16, 0.58);
+    vec3 violet = vec3(0.56, 0.22, 0.96);
+    vec3 holo = mix(cyan, magenta, clamp(q.x * 1.2, 0.0, 1.0));
+    holo = mix(holo, violet, clamp(q.y, 0.0, 1.0));
+    col = mix(midnight, deepViolet, smoothstep(0.2, 0.9, f));
+    col += holo * (ridge * 0.30 + spec * 0.32);
+  } else {
+    // Variation 2: Mercury Album Tint (live album palette infused into dark liquid mercury)
+    vec3 obsidian = vec3(0.027, 0.035, 0.055);
+    vec3 base = mix(obsidian, u_bgDeep * 0.52, 0.48);
+    vec3 tint = mix(u_accent1, u_accent2, clamp(q.x * 1.15, 0.0, 1.0));
+    col = base + tint * (ridge * 0.28) + mix(tint, vec3(0.90, 0.95, 1.0), 0.55) * (spec * 0.32);
+  }
+
+  // Subtle center contrast scrim for crisp lyric legibility
+  float centerDist = length(uv * vec2(0.85, 1.25));
+  float vig = smoothstep(1.15, 0.25, centerDist);
+  col *= mix(0.62, 1.0, vig);
+  col *= (0.86 + u_rms * 0.16);
+  outColor = vec4(clamp(col, 0.0, 0.56), clamp(u_bgOpacity, 0.2, 1.0));
 }
 `,
 
@@ -106,6 +138,8 @@ uniform float u_bass;
 uniform float u_treble;
 uniform float u_beat;
 uniform float u_reduceMotion;
+uniform float u_variation;
+uniform float u_bgOpacity;
 uniform vec3 u_bgDeep;
 uniform vec3 u_bgMid;
 uniform vec3 u_accent1;
@@ -113,25 +147,25 @@ uniform vec3 u_accent2;
 
 void main() {
   vec2 uv = v_uv;
-  float horizon = 0.44;
-  float t = u_time * (u_reduceMotion > 0.5 ? 0.15 : 1.1);
-  vec3 col = mix(u_bgDeep * 0.7, u_bgMid * 0.85, smoothstep(0.0, 1.0, uv.y));
+  float horizon = 0.38;
+  float t = u_time * (u_reduceMotion > 0.5 ? 0.15 : 1.0);
+  vec3 midnightTop = vec3(0.035, 0.020, 0.090); // #090517
+  vec3 midnightMid = vec3(0.075, 0.035, 0.165);
+  vec3 col = mix(midnightMid, midnightTop, smoothstep(0.0, 1.0, uv.y));
 
   if (uv.y >= horizon) {
-    // Sky with synth sun glow
     float skyT = (uv.y - horizon) / max(0.001, 1.0 - horizon);
-    col = mix(u_accent2 * 0.45, u_bgDeep, pow(skyT, 0.75));
-    vec2 sunPos = vec2(0.5, horizon + 0.18);
+    col = mix(mix(midnightMid, u_bgMid * 0.45, 0.35), midnightTop, pow(skyT, 0.7));
+    vec2 sunPos = vec2(0.5, horizon + 0.14);
     vec2 d = (uv - sunPos) * vec2(u_res.x / max(1.0, u_res.y), 1.0);
     float dist = length(d);
-    float sun = smoothstep(0.21 + u_bass * 0.025, 0.19 + u_bass * 0.025, dist);
-    float stripes = step(0.18, fract((uv.y - horizon) * 28.0 - t * 0.2));
-    float sunMask = sun * mix(1.0, stripes, smoothstep(horizon + 0.22, horizon, uv.y));
-    vec3 sunCol = mix(u_accent1, u_accent2, clamp((uv.y - horizon) * 3.0, 0.0, 1.0));
-    col += sunCol * sunMask * 0.85;
-    col += u_accent1 * exp(-dist * 5.0) * (0.28 + u_beat * 0.2);
+    float sun = smoothstep(0.18 + u_bass * 0.02, 0.16 + u_bass * 0.02, dist);
+    float stripes = step(0.22, fract((uv.y - horizon) * 26.0 - t * 0.18));
+    float sunMask = sun * mix(1.0, stripes, smoothstep(horizon + 0.18, horizon, uv.y));
+    vec3 sunCol = mix(vec3(1.0, 0.18, 0.58), vec3(0.0, 0.90, 1.0), clamp((uv.y - horizon) * 3.0, 0.0, 1.0));
+    col += sunCol * sunMask * 0.32;
+    col += vec3(0.56, 0.22, 0.96) * exp(-dist * 5.5) * (0.14 + u_beat * 0.1);
   } else {
-    // Perspective neon grid floor
     float py = max(0.015, horizon - uv.y);
     float z = 0.28 / py;
     float x = (uv.x - 0.5) * z * (u_res.x / max(1.0, u_res.y));
@@ -139,15 +173,20 @@ void main() {
     float lineX = abs(fract(x * 0.9 - 0.5) - 0.5) / max(0.001, fwidth(x * 0.9));
     float lineZ = abs(fract(gz * 0.9 - 0.5) - 0.5) / max(0.001, fwidth(gz * 0.9));
     float grid = 1.0 - min(min(lineX, lineZ), 1.0);
-    float fade = exp(-py * 2.2) * (0.55 + u_rms * 0.45 + u_beat * 0.25);
-    col = mix(u_bgDeep * 0.65, u_bgMid * 0.55, exp(-py * 4.0));
-    col += mix(u_accent1, u_accent2, clamp(uv.x, 0.0, 1.0)) * grid * fade;
+    float fade = exp(-py * 2.4) * (0.42 + u_rms * 0.35 + u_beat * 0.18);
+    col = mix(midnightTop, midnightMid * 0.72, exp(-py * 4.0));
+    vec3 gridCol = mix(vec3(0.0, 0.90, 1.0), vec3(1.0, 0.18, 0.58), clamp(uv.x, 0.0, 1.0));
+    col += gridCol * grid * fade;
   }
 
-  // Subtle pastel scanline shimmer
-  float scan = 0.94 + 0.06 * sin(gl_FragCoord.y * 1.5);
+  // Dark center lyric scrim for crisp WCAG readability
+  vec2 centerD = (uv - vec2(0.5, 0.46)) * vec2(1.0, 1.5);
+  float centerScrim = exp(-dot(centerD, centerD) * 4.5);
+  col *= (1.0 - centerScrim * 0.52);
+
+  float scan = 0.96 + 0.04 * sin(gl_FragCoord.y * 1.5);
   col *= scan;
-  outColor = vec4(col, 1.0);
+  outColor = vec4(col, clamp(u_bgOpacity, 0.2, 1.0));
 }
 `,
 
@@ -162,6 +201,8 @@ uniform float u_bass;
 uniform float u_treble;
 uniform float u_beat;
 uniform float u_reduceMotion;
+uniform float u_variation;
+uniform float u_bgOpacity;
 uniform vec3 u_bgDeep;
 uniform vec3 u_bgMid;
 uniform vec3 u_accent1;
@@ -170,20 +211,39 @@ uniform vec3 u_accent2;
 void main() {
   vec2 c = v_uv * 2.0 - 1.0;
   float r2 = dot(c, c);
-  vec2 warped = c * (1.0 + 0.06 * r2);
+  vec2 warped = c * (1.0 + 0.055 * r2);
   vec2 uv = warped * 0.5 + 0.5;
 
-  float vig = smoothstep(1.38, 0.25, r2);
-  vec3 base = mix(u_bgDeep * 0.45, u_bgMid * 0.5, vig);
+  // True opaque deep CRT glass per variation (never washed-out grey)
+  vec3 glassDeep;
+  vec3 phosphorTint;
+  if (u_variation < 0.5) {
+    // Variation 0: P31 Green (#030605)
+    glassDeep = vec3(0.012, 0.024, 0.020);
+    phosphorTint = vec3(0.20, 0.84, 0.58);
+  } else if (u_variation < 1.5) {
+    // Variation 1: P3 Amber (#070503)
+    glassDeep = vec3(0.027, 0.020, 0.012);
+    phosphorTint = vec3(0.98, 0.74, 0.14);
+  } else {
+    // Variation 2: Trinitron RGB (#050709)
+    glassDeep = vec3(0.020, 0.027, 0.035);
+    phosphorTint = mix(vec3(0.38, 0.72, 0.98), u_accent1, 0.65);
+  }
 
-  float scan = 0.86 + 0.14 * sin(gl_FragCoord.y * 3.14159);
-  float rgbMask = 0.95 + 0.05 * sin(gl_FragCoord.x * 2.1);
-  float sweepY = fract(u_time * (u_reduceMotion > 0.5 ? 0.0 : 0.12));
-  float sweep = exp(-abs(uv.y - sweepY) * 18.0) * (u_reduceMotion > 0.5 ? 0.0 : 0.12);
+  float vig = smoothstep(1.45, 0.22, r2);
+  vec3 bezelBlack = vec3(0.006, 0.008, 0.010);
+  vec3 base = mix(bezelBlack, glassDeep, vig);
 
-  vec3 phosphor = base * scan * rgbMask + u_accent1 * (sweep + u_rms * 0.08 + u_beat * 0.06);
-  phosphor *= vig;
-  outColor = vec4(phosphor, 1.0);
+  // Dark scanlines & aperture grille mask
+  float scan = 0.84 + 0.16 * sin(gl_FragCoord.y * 3.14159);
+  float rgbMask = 0.93 + 0.07 * sin(gl_FragCoord.x * 2.094);
+  float sweepY = fract(u_time * (u_reduceMotion > 0.5 ? 0.0 : 0.1));
+  float sweep = exp(-abs(uv.y - sweepY) * 24.0) * (u_reduceMotion > 0.5 ? 0.0 : 0.042);
+
+  vec3 phosphor = base * scan * rgbMask + phosphorTint * (sweep + (u_rms * 0.024 + u_beat * 0.022) * vig);
+  phosphor *= mix(0.25, 1.0, vig);
+  outColor = vec4(clamp(phosphor, 0.0, 0.26), clamp(u_bgOpacity, 0.2, 1.0));
 }
 `,
 
@@ -198,6 +258,8 @@ uniform float u_bass;
 uniform float u_treble;
 uniform float u_beat;
 uniform float u_reduceMotion;
+uniform float u_variation;
+uniform float u_bgOpacity;
 uniform vec3 u_bgDeep;
 uniform vec3 u_bgMid;
 uniform vec3 u_accent1;
@@ -229,7 +291,7 @@ void main() {
     vec3 starTint = mix(vec3(0.88, 0.93, 1.0), mix(u_accent1, u_accent2, fract(n * 19.0)), 0.45);
     col += starTint * star * (0.7 + u_treble * 0.5);
   }
-  outColor = vec4(col, 1.0);
+  outColor = vec4(col, clamp(u_bgOpacity, 0.2, 1.0));
 }
 `,
 
@@ -244,6 +306,8 @@ uniform float u_bass;
 uniform float u_treble;
 uniform float u_beat;
 uniform float u_reduceMotion;
+uniform float u_variation;
+uniform float u_bgOpacity;
 uniform vec3 u_bgDeep;
 uniform vec3 u_bgMid;
 uniform vec3 u_accent1;
@@ -260,7 +324,7 @@ void main() {
   vec3 col = mix(u_bgDeep, u_bgMid, uv.y * 0.75 + 0.15);
   col += u_accent1 * g1 * (0.28 + u_bass * 0.18);
   col += u_accent2 * g2 * (0.24 + u_rms * 0.16);
-  outColor = vec4(col, 1.0);
+  outColor = vec4(col, clamp(u_bgOpacity, 0.2, 1.0));
 }
 `,
 };
@@ -274,36 +338,55 @@ interface CompiledProgram {
   uTreble: WebGLUniformLocation | null;
   uBeat: WebGLUniformLocation | null;
   uReduceMotion: WebGLUniformLocation | null;
+  uVariation: WebGLUniformLocation | null;
+  uBgOpacity: WebGLUniformLocation | null;
   uBgDeep: WebGLUniformLocation | null;
   uBgMid: WebGLUniformLocation | null;
   uAccent1: WebGLUniformLocation | null;
   uAccent2: WebGLUniformLocation | null;
 }
 
-function parseHexToRgbInto(hex: string, out: Float32Array): void {
-  const cleaned = hex.startsWith('#') ? hex.slice(1) : hex;
-  if (cleaned.length === 6) {
-    const r = parseInt(cleaned.slice(0, 2), 16);
-    const g = parseInt(cleaned.slice(2, 4), 16);
-    const b = parseInt(cleaned.slice(4, 6), 16);
-    if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) {
+export function parseColorToRgbInto(color: string, out: Float32Array): void {
+  const trimmed = typeof color === 'string' ? color.trim() : '';
+  if (trimmed.startsWith('#')) {
+    const cleaned = trimmed.slice(1);
+    if (cleaned.length === 6 || cleaned.length === 8) {
+      const r = parseInt(cleaned.slice(0, 2), 16);
+      const g = parseInt(cleaned.slice(2, 4), 16);
+      const b = parseInt(cleaned.slice(4, 6), 16);
+      if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) {
+        out[0] = r / 255;
+        out[1] = g / 255;
+        out[2] = b / 255;
+        return;
+      }
+    }
+    if (cleaned.length === 3) {
+      const r = parseInt(cleaned[0] + cleaned[0], 16);
+      const g = parseInt(cleaned[1] + cleaned[1], 16);
+      const b = parseInt(cleaned[2] + cleaned[2], 16);
+      if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) {
+        out[0] = r / 255;
+        out[1] = g / 255;
+        out[2] = b / 255;
+        return;
+      }
+    }
+  }
+
+  const rgbMatch = /^rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)/i.exec(trimmed);
+  if (rgbMatch) {
+    const r = Math.max(0, Math.min(255, Number(rgbMatch[1])));
+    const g = Math.max(0, Math.min(255, Number(rgbMatch[2])));
+    const b = Math.max(0, Math.min(255, Number(rgbMatch[3])));
+    if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
       out[0] = r / 255;
       out[1] = g / 255;
       out[2] = b / 255;
       return;
     }
   }
-  if (cleaned.length === 3) {
-    const r = parseInt(cleaned[0] + cleaned[0], 16);
-    const g = parseInt(cleaned[1] + cleaned[1], 16);
-    const b = parseInt(cleaned[2] + cleaned[2], 16);
-    if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) {
-      out[0] = r / 255;
-      out[1] = g / 255;
-      out[2] = b / 255;
-      return;
-    }
-  }
+
   out[0] = 0.08;
   out[1] = 0.09;
   out[2] = 0.14;
@@ -320,6 +403,7 @@ export class WebGlEffectLayer {
   private height = 1;
   private dpr = 1;
   private disposed = false;
+  private readonly boundContextLost: (e: Event) => void;
 
   // Pre-allocated RGB scratch buffers (zero per-frame heap allocations)
   private readonly rgbBgDeep = new Float32Array(3);
@@ -329,7 +413,32 @@ export class WebGlEffectLayer {
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
+    this.boundContextLost = (e: Event) => {
+      if (typeof (e as { preventDefault?: () => void }).preventDefault === 'function') {
+        e.preventDefault();
+      }
+      this.handleContextLost();
+    };
+    if (typeof this.canvas.addEventListener === 'function') {
+      this.canvas.addEventListener('webglcontextlost', this.boundContextLost);
+    }
     this.initContext();
+  }
+
+  private handleContextLost(): void {
+    if (this.disposed) return;
+    this.programs.clear();
+    this.vao = null;
+    this.vbo = null;
+    this.gl = null;
+    try {
+      this.fallbackCtx = this.canvas.getContext('2d');
+      if (this.fallbackCtx && typeof this.fallbackCtx.setTransform === 'function') {
+        this.fallbackCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      }
+    } catch {
+      this.fallbackCtx = null;
+    }
   }
 
   get isWebGlActive(): boolean {
@@ -437,6 +546,8 @@ export class WebGlEffectLayer {
       uTreble: gl.getUniformLocation(program, 'u_treble'),
       uBeat: gl.getUniformLocation(program, 'u_beat'),
       uReduceMotion: gl.getUniformLocation(program, 'u_reduceMotion'),
+      uVariation: gl.getUniformLocation(program, 'u_variation'),
+      uBgOpacity: gl.getUniformLocation(program, 'u_bgOpacity'),
       uBgDeep: gl.getUniformLocation(program, 'u_bgDeep'),
       uBgMid: gl.getUniformLocation(program, 'u_bgMid'),
       uAccent1: gl.getUniformLocation(program, 'u_accent1'),
@@ -489,14 +600,23 @@ export class WebGlEffectLayer {
       return;
     }
 
+    const variationIndex =
+      typeof params.variationIndex === 'number' && Number.isFinite(params.variationIndex)
+        ? params.variationIndex
+        : 0;
+    const bgOpacity =
+      typeof params.backgroundOpacity === 'number' && Number.isFinite(params.backgroundOpacity)
+        ? Math.max(0.2, Math.min(1.0, params.backgroundOpacity))
+        : 0.95;
+
     if (this.gl && this.vao) {
       const prog = this.getOrCompileProgram(mode);
       if (prog) {
         const gl = this.gl;
-        parseHexToRgbInto(params.bgDeepHex, this.rgbBgDeep);
-        parseHexToRgbInto(params.bgMidHex, this.rgbBgMid);
-        parseHexToRgbInto(params.accentPrimaryHex, this.rgbAccent1);
-        parseHexToRgbInto(params.accentSecondaryHex, this.rgbAccent2);
+        parseColorToRgbInto(params.bgDeepHex, this.rgbBgDeep);
+        parseColorToRgbInto(params.bgMidHex, this.rgbBgMid);
+        parseColorToRgbInto(params.accentPrimaryHex, this.rgbAccent1);
+        parseColorToRgbInto(params.accentSecondaryHex, this.rgbAccent2);
 
         gl.useProgram(prog.program);
         gl.uniform2f(prog.uRes, this.canvas.width, this.canvas.height);
@@ -506,6 +626,8 @@ export class WebGlEffectLayer {
         gl.uniform1f(prog.uTreble, params.trebleEnergy);
         gl.uniform1f(prog.uBeat, params.beatDetected ? 1.0 : 0.0);
         gl.uniform1f(prog.uReduceMotion, params.reduceMotion ? 1.0 : 0.0);
+        gl.uniform1f(prog.uVariation, variationIndex);
+        gl.uniform1f(prog.uBgOpacity, bgOpacity);
         gl.uniform3f(prog.uBgDeep, this.rgbBgDeep[0], this.rgbBgDeep[1], this.rgbBgDeep[2]);
         gl.uniform3f(prog.uBgMid, this.rgbBgMid[0], this.rgbBgMid[1], this.rgbBgMid[2]);
         gl.uniform3f(prog.uAccent1, this.rgbAccent1[0], this.rgbAccent1[1], this.rgbAccent1[2]);
@@ -529,11 +651,44 @@ export class WebGlEffectLayer {
     const w = this.width;
     const h = this.height;
     const t = params.reduceMotion ? 0 : params.timeSeconds;
+    const variationIndex =
+      typeof params.variationIndex === 'number' && Number.isFinite(params.variationIndex)
+        ? Math.round(params.variationIndex)
+        : 0;
+    const bgOpacity =
+      typeof params.backgroundOpacity === 'number' && Number.isFinite(params.backgroundOpacity)
+        ? Math.max(0.2, Math.min(1.0, params.backgroundOpacity))
+        : 0.95;
 
     ctx.save();
+    ctx.globalAlpha = bgOpacity;
     const grad = ctx.createLinearGradient(0, 0, 0, h);
-    grad.addColorStop(0, params.bgDeepHex);
-    grad.addColorStop(1, params.bgMidHex);
+    if (mode === 'crtScanline') {
+      if (variationIndex === 1) {
+        grad.addColorStop(0, '#070503');
+        grad.addColorStop(1, '#040302');
+      } else if (variationIndex === 2) {
+        grad.addColorStop(0, '#050709');
+        grad.addColorStop(1, '#030406');
+      } else {
+        grad.addColorStop(0, '#030605');
+        grad.addColorStop(1, '#020403');
+      }
+    } else if (mode === 'holoVaporwave') {
+      grad.addColorStop(0, '#090517');
+      grad.addColorStop(1, '#120828');
+    } else if (mode === 'liquidMetal') {
+      if (variationIndex === 1) {
+        grad.addColorStop(0, '#090517');
+        grad.addColorStop(1, '#120828');
+      } else {
+        grad.addColorStop(0, '#07090e');
+        grad.addColorStop(1, '#0b0e17');
+      }
+    } else {
+      grad.addColorStop(0, params.bgDeepHex);
+      grad.addColorStop(1, params.bgMidHex);
+    }
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, w, h);
 
@@ -542,16 +697,26 @@ export class WebGlEffectLayer {
       const cy = h * (0.45 + 0.1 * Math.cos(t * 0.35));
       const rad = Math.max(w, h) * (0.42 + params.bassEnergy * 0.12);
       const sheen = ctx.createRadialGradient(cx, cy, rad * 0.05, cx, cy, rad);
-      sheen.addColorStop(0, params.accentPrimaryHex);
-      sheen.addColorStop(0.5, params.accentSecondaryHex);
-      sheen.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.globalAlpha = 0.28 + params.rmsLevel * 0.18;
+      if (variationIndex === 0) {
+        sheen.addColorStop(0, '#e2e8f0');
+        sheen.addColorStop(0.45, '#64748b');
+        sheen.addColorStop(1, 'rgba(0,0,0,0)');
+      } else if (variationIndex === 1) {
+        sheen.addColorStop(0, '#00e5ff');
+        sheen.addColorStop(0.5, '#ff2a94');
+        sheen.addColorStop(1, 'rgba(0,0,0,0)');
+      } else {
+        sheen.addColorStop(0, params.accentPrimaryHex);
+        sheen.addColorStop(0.5, params.accentSecondaryHex);
+        sheen.addColorStop(1, 'rgba(0,0,0,0)');
+      }
+      ctx.globalAlpha = (0.14 + params.rmsLevel * 0.1) * bgOpacity;
       ctx.fillStyle = sheen;
       ctx.fillRect(0, 0, w, h);
     } else if (mode === 'holoVaporwave') {
       const horizonY = h * 0.56;
-      ctx.strokeStyle = params.accentPrimaryHex;
-      ctx.globalAlpha = 0.28 + params.bassEnergy * 0.2;
+      ctx.strokeStyle = '#00e5ff';
+      ctx.globalAlpha = (0.24 + params.bassEnergy * 0.16) * bgOpacity;
       ctx.lineWidth = 1;
       for (let i = 1; i <= 8; i++) {
         const y = horizonY + ((h - horizonY) * (i * i)) / 64;
@@ -568,9 +733,21 @@ export class WebGlEffectLayer {
       }
     } else if (mode === 'crtScanline') {
       ctx.fillStyle = 'rgba(0,0,0,0.22)';
-      for (let y = 0; y < h; y += 4) {
-        ctx.fillRect(0, y, w, 1.5);
+      for (let y = 0; y < h; y += 3) {
+        ctx.fillRect(0, y, w, 1);
       }
+      const vig = ctx.createRadialGradient(
+        w * 0.5,
+        h * 0.5,
+        Math.min(w, h) * 0.25,
+        w * 0.5,
+        h * 0.5,
+        Math.max(w, h) * 0.75
+      );
+      vig.addColorStop(0, 'rgba(0,0,0,0)');
+      vig.addColorStop(1, 'rgba(1,2,3,0.75)');
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, w, h);
     } else if (mode === 'starfield' || mode === 'ambientFlow') {
       const cx = w * (0.35 + 0.1 * Math.sin(t * 0.3));
       const cy = h * (0.4 + 0.1 * Math.cos(t * 0.25));
@@ -578,7 +755,7 @@ export class WebGlEffectLayer {
       const glow = ctx.createRadialGradient(cx, cy, 4, cx, cy, rad);
       glow.addColorStop(0, params.accentPrimaryHex);
       glow.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.globalAlpha = 0.22 + params.rmsLevel * 0.14;
+      ctx.globalAlpha = (0.22 + params.rmsLevel * 0.14) * bgOpacity;
       ctx.fillStyle = glow;
       ctx.fillRect(0, 0, w, h);
     }
@@ -588,6 +765,9 @@ export class WebGlEffectLayer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (typeof this.canvas.removeEventListener === 'function') {
+      this.canvas.removeEventListener('webglcontextlost', this.boundContextLost);
+    }
 
     if (this.gl) {
       const gl = this.gl;

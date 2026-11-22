@@ -144,6 +144,50 @@ export interface ResolvedStream {
   loudnessDb?: number;
   durationMs?: number;
   expiresAtMs?: number;
+  isLossless?: boolean;
+  isDolbyAtmos?: boolean;
+  sampleRate?: number;
+  bitDepth?: number;
+}
+
+export interface LosslessTrackQuery {
+  videoId?: string;
+  id?: string;
+  title?: string;
+  artist?: string;
+  durationSec?: number;
+  totalPlayTimeMs?: number;
+  isrc?: string;
+}
+
+const DEEZER_LOSSLESS_PROXY_BASE = 'https://dzr.tabs-vs-spaces.wtf';
+
+const BLOCKED_MONOCHROME_HOSTS = new Set([
+  'api.monochrome.tf',
+  'monochrome.tf',
+  'hifi.401658.xyz',
+  'wolf.qqdl.site',
+  'maus.qqdl.site',
+  'vogel.qqdl.site',
+  'katze.qqdl.site',
+  'hund.qqdl.site',
+  'tidal.kinoplus.online',
+  'triton.squid.wtf',
+]);
+
+export function wrapLosslessStreamUrl(rawUrl: string): string {
+  if (!rawUrl) return rawUrl;
+  if (rawUrl.startsWith('waveform-stream://') || rawUrl.startsWith('waveform-local://')) {
+    return rawUrl;
+  }
+  if (
+    typeof window !== 'undefined' &&
+    (window as any).electronAPI &&
+    /^https?:\/\//i.test(rawUrl)
+  ) {
+    return `waveform-stream://proxy?url=${encodeURIComponent(rawUrl)}`;
+  }
+  return toPlayableStreamUrl(rawUrl);
 }
 
 export function rankAudioFormats(formats: InnerTubeFormat[]): InnerTubeFormat[] {
@@ -748,5 +792,343 @@ export class StreamResolver {
     };
     this.cache.set(songId, { stream: fallback, cachedAt: Date.now() });
     return fallback;
+  }
+
+  public async resolveYouTubeOnly(
+    songId: string,
+    title?: string,
+    artist?: string,
+    targetDurationSec?: number
+  ): Promise<ResolvedStream | null> {
+    const mappedFixture = FIXTURE_VIDEO_ID_MAP[songId];
+    const targetVideoId = mappedFixture ? mappedFixture.videoId : songId;
+    const isDirectYtId = /^[A-Za-z0-9_-]{11}$/.test(targetVideoId);
+
+    if (isDirectYtId) {
+      const sabr = await this.resolveViaElectronSabr(targetVideoId);
+      if (sabr) return sabr;
+      const direct = await this.resolveViaDirectClients(targetVideoId);
+      if (direct) return direct;
+    }
+
+    const query = title && artist ? `${title} ${artist}`.trim() : (title || mappedFixture?.query || '').trim();
+    const target: MatchTarget | undefined =
+      title && artist ? { title, artist, durationSec: targetDurationSec } : undefined;
+    if (query) {
+      return await this.resolveViaYouTubeSearch(query, target);
+    }
+    return null;
+  }
+
+  private getConfiguredHifiApiBase(): string | null {
+    try {
+      const storage =
+        typeof localStorage !== 'undefined'
+          ? localStorage
+          : typeof globalThis !== 'undefined'
+          ? (globalThis as any).localStorage
+          : null;
+      const raw = storage?.getItem?.('waveform.hifiApiUrl');
+      if (!raw || typeof raw !== 'string' || !raw.trim()) return null;
+      const parsed = new URL(raw.trim());
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+      if (BLOCKED_MONOCHROME_HOSTS.has(parsed.hostname.toLowerCase())) {
+        return null;
+      }
+      return parsed.origin + parsed.pathname.replace(/\/+$/, '');
+    } catch {
+      return null;
+    }
+  }
+
+  private extractFlacUrlFromTrackPayload(payload: any): {
+    url: string | null;
+    quality: '16-bit / 44.1kHz FLAC' | '24-bit / 96kHz FLAC';
+  } {
+    const root = Array.isArray(payload) ? payload[0] : payload?.data || payload?.track || payload;
+    if (!root || typeof root !== 'object') {
+      return { url: null, quality: '16-bit / 44.1kHz FLAC' };
+    }
+
+    const bitDepth = Number(root.bitDepth || root.bit_depth || root.bits || 0);
+    const sampleRate = Number(root.sampleRate || root.sample_rate || 0);
+    const qualityTag = String(root.audioQuality || root.quality || root.format || '');
+    const isHiRes =
+      bitDepth >= 24 ||
+      sampleRate >= 88200 ||
+      /24[-_ ]?bit|96\s*khz|192\s*khz|hi[-_]?res/i.test(qualityTag);
+    const quality: '16-bit / 44.1kHz FLAC' | '24-bit / 96kHz FLAC' = isHiRes
+      ? '24-bit / 96kHz FLAC'
+      : '16-bit / 44.1kHz FLAC';
+
+    const directCandidates = [
+      root.OriginalTrackUrl,
+      root.flacUrl,
+      root.streamUrl,
+      root.downloadUrl,
+      root.url,
+      payload?.OriginalTrackUrl,
+      payload?.flacUrl,
+      payload?.streamUrl,
+      payload?.url,
+    ];
+    for (const candidate of directCandidates) {
+      if (
+        typeof candidate === 'string' &&
+        /^https?:\/\//i.test(candidate) &&
+        !candidate.includes('cdns-preview-') &&
+        !candidate.endsWith('.mp3')
+      ) {
+        return { url: candidate, quality };
+      }
+    }
+
+    const manifestB64 = root.manifest || payload?.manifest;
+    if (typeof manifestB64 === 'string' && manifestB64.length > 0) {
+      try {
+        const decoded =
+          typeof atob === 'function'
+            ? atob(manifestB64)
+            : Buffer.from(manifestB64, 'base64').toString('utf8');
+        const manifestObj = JSON.parse(decoded);
+        const manifestUrl = manifestObj?.urls?.[0];
+        if (typeof manifestUrl === 'string' && /^https?:\/\//i.test(manifestUrl)) {
+          return { url: manifestUrl, quality };
+        }
+      } catch {
+        // Ignore invalid manifest
+      }
+    }
+
+    return { url: null, quality };
+  }
+
+  /**
+   * Stage 2 background Lossless FLAC resolution.
+   * NEVER calls blocked official Monochrome instances.
+   * Uses ONLY:
+   *  1) User-configured self-hosted hifi-api (localStorage 'waveform.hifiApiUrl' if set)
+   *  2) Working Deezer ISRC / track proxy (https://dzr.tabs-vs-spaces.wtf)
+   * Enforces strict TrackMatcher candidate scoring + duration validation (<= 5s)
+   * and wraps FLAC stream URLs via waveform-stream://proxy?url=<encoded> in Electron.
+   */
+  public async resolveLosslessStream(
+    trackOrId: LosslessTrackQuery | string,
+    titleArg?: string,
+    artistArg?: string,
+    durationSecArg?: number
+  ): Promise<ResolvedStream | null> {
+    if (!this.client.getOnlineStatus()) return null;
+
+    const track: LosslessTrackQuery =
+      typeof trackOrId === 'string'
+        ? {
+            videoId: trackOrId,
+            title: titleArg,
+            artist: artistArg,
+            durationSec: durationSecArg,
+          }
+        : trackOrId || {};
+
+    const title = (track.title || titleArg || '').trim();
+    const artist = (track.artist || artistArg || '').trim();
+    const targetDurationSec =
+      track.durationSec && track.durationSec > 0
+        ? track.durationSec
+        : track.totalPlayTimeMs && track.totalPlayTimeMs > 0
+        ? Math.round(track.totalPlayTimeMs / 1000)
+        : durationSecArg;
+
+    if (!title) return null;
+
+    const query = artist ? `${title} ${artist}`.trim() : title;
+    const target: MatchTarget = {
+      title,
+      artist,
+      durationSec: targetDurationSec,
+    };
+
+    const validateAndSelectCandidate = (rawItems: any[]): { item: any; candidate: MatchCandidate } | null => {
+      if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+
+      const mapped: Array<{ item: any; candidate: MatchCandidate }> = rawItems.map((item, idx) => {
+        const durRaw =
+          item.duration ??
+          item.durationSec ??
+          item.duration_seconds ??
+          (item.durationMs ? Math.round(item.durationMs / 1000) : 0);
+        const durSec = typeof durRaw === 'number' ? durRaw : parseInt(String(durRaw || '0'), 10) || 0;
+        const artistName =
+          item.artist?.name ||
+          (typeof item.artist === 'string' ? item.artist : '') ||
+          item.artists?.[0]?.name ||
+          (typeof item.artists?.[0] === 'string' ? item.artists[0] : '') ||
+          item.performer?.name ||
+          '';
+        return {
+          item,
+          candidate: {
+            id: String(item.id ?? item.trackId ?? idx),
+            title: String(item.title || item.title_short || item.name || ''),
+            artist: String(artistName),
+            album: String(item.album?.title || item.album || ''),
+            durationSec: durSec,
+          },
+        };
+      });
+
+      const ranked = TrackMatcher.rankCandidates(
+        mapped.map((m) => m.candidate),
+        target
+      );
+      for (const top of ranked) {
+        const score = TrackMatcher.score(top, target);
+        if (score === null || score < 100) continue;
+        if (
+          targetDurationSec &&
+          targetDurationSec > 0 &&
+          top.durationSec &&
+          top.durationSec > 0 &&
+          Math.abs(top.durationSec - targetDurationSec) > 5
+        ) {
+          continue;
+        }
+        const entry = mapped.find((m) => m.candidate.id === top.id);
+        if (entry) return entry;
+      }
+      return null;
+    };
+
+    // 1. Optional self-hosted hifi-api (ONLY if explicitly configured in localStorage 'waveform.hifiApiUrl')
+    const hifiBase = this.getConfiguredHifiApiBase();
+    if (hifiBase) {
+      try {
+        const searchRes = await universalFetch(
+          `${hifiBase}/search?s=${encodeURIComponent(query)}`,
+          { method: 'GET', headers: { Accept: 'application/json' } }
+        );
+        if (searchRes.ok) {
+          const searchData = await searchRes.json<any>();
+          const items =
+            searchData?.data?.items ||
+            searchData?.items ||
+            searchData?.tracks?.items ||
+            (Array.isArray(searchData) ? searchData : []);
+          const matched = validateAndSelectCandidate(items);
+          if (matched) {
+            const directExtracted = this.extractFlacUrlFromTrackPayload(matched.item);
+            let flacUrl = directExtracted.url;
+            let quality = directExtracted.quality;
+
+            if (!flacUrl && matched.candidate.id) {
+              const trackRes = await universalFetch(
+                `${hifiBase}/track?id=${encodeURIComponent(matched.candidate.id)}&quality=HI_RES_LOSSLESS`,
+                { method: 'GET', headers: { Accept: 'application/json' } }
+              );
+              if (trackRes.ok) {
+                const trackData = await trackRes.json<any>();
+                const extracted = this.extractFlacUrlFromTrackPayload(trackData);
+                flacUrl = extracted.url;
+                quality = extracted.quality;
+              }
+            }
+
+            if (flacUrl) {
+              const durSec = matched.candidate.durationSec || targetDurationSec || 0;
+              return {
+                url: wrapLosslessStreamUrl(flacUrl),
+                quality,
+                format: 'audio/flac',
+                bitrate: quality.startsWith('24-bit') ? 4608000 : 1411000,
+                durationMs: durSec > 0 ? durSec * 1000 : undefined,
+                expiresAtMs: Date.now() + StreamResolver.TTL_MS,
+                isLossless: true,
+                isDolbyAtmos: false,
+              };
+            }
+          }
+        }
+      } catch {
+        // Fall through to Deezer lossless proxy
+      }
+    }
+
+    // 2. Working Deezer ISRC / track proxy (https://dzr.tabs-vs-spaces.wtf)
+    try {
+      if (track.isrc) {
+        const isrcRes = await universalFetch(
+          `${DEEZER_LOSSLESS_PROXY_BASE}/isrc/${encodeURIComponent(track.isrc)}`,
+          { method: 'GET', headers: { Accept: 'application/json' } }
+        );
+        if (isrcRes.ok) {
+          const isrcData = await isrcRes.json<any>();
+          const matched = validateAndSelectCandidate([isrcData?.data || isrcData]);
+          if (matched) {
+            const extracted = this.extractFlacUrlFromTrackPayload(matched.item);
+            if (extracted.url) {
+              const durSec = matched.candidate.durationSec || targetDurationSec || 0;
+              return {
+                url: wrapLosslessStreamUrl(extracted.url),
+                quality: extracted.quality,
+                format: 'audio/flac',
+                bitrate: extracted.quality.startsWith('24-bit') ? 4608000 : 1411000,
+                durationMs: durSec > 0 ? durSec * 1000 : undefined,
+                expiresAtMs: Date.now() + StreamResolver.TTL_MS,
+                isLossless: true,
+                isDolbyAtmos: false,
+              };
+            }
+          }
+        }
+      }
+
+      const dzrSearchRes = await universalFetch(
+        `${DEEZER_LOSSLESS_PROXY_BASE}/search?q=${encodeURIComponent(query)}`,
+        { method: 'GET', headers: { Accept: 'application/json' } }
+      );
+      if (dzrSearchRes.ok) {
+        const dzrSearchData = await dzrSearchRes.json<any>();
+        const items =
+          dzrSearchData?.data ||
+          dzrSearchData?.results ||
+          dzrSearchData?.tracks ||
+          (Array.isArray(dzrSearchData) ? dzrSearchData : []);
+        const matched = validateAndSelectCandidate(items);
+        if (matched) {
+          let { url: flacUrl, quality } = this.extractFlacUrlFromTrackPayload(matched.item);
+
+          if (!flacUrl && matched.candidate.id) {
+            const trackRes = await universalFetch(
+              `${DEEZER_LOSSLESS_PROXY_BASE}/track/${encodeURIComponent(matched.candidate.id)}`,
+              { method: 'GET', headers: { Accept: 'application/json' } }
+            );
+            if (trackRes.ok) {
+              const trackData = await trackRes.json<any>();
+              const extracted = this.extractFlacUrlFromTrackPayload(trackData);
+              flacUrl = extracted.url;
+              quality = extracted.quality;
+            }
+          }
+
+          if (flacUrl) {
+            const durSec = matched.candidate.durationSec || targetDurationSec || 0;
+            return {
+              url: wrapLosslessStreamUrl(flacUrl),
+              quality,
+              format: 'audio/flac',
+              bitrate: quality.startsWith('24-bit') ? 4608000 : 1411000,
+              durationMs: durSec > 0 ? durSec * 1000 : undefined,
+              expiresAtMs: Date.now() + StreamResolver.TTL_MS,
+              isLossless: true,
+              isDolbyAtmos: false,
+            };
+          }
+        }
+      }
+    } catch {
+      // Silently return null if Deezer proxy is unreachable or track is unavailable
+    }
+
+    return null;
   }
 }

@@ -1,46 +1,67 @@
 // src/lyricVisualizer/ui/LyricStageControl.tsx
 // Interactive LyricVisualizer stage combining WebGL2 + Canvas2D LyricStageRenderer,
 // SyncEngine, LyricsPipeline, OKLCH album palette extraction, click-line-to-seek,
-// Sandbox "Demo: Starlight Harbor (Original)" badge, and hover VisualizerControlBar.
+// Sandbox "Demo: Starlight Harbor (Original)" badge, seamless transparent blending,
+// and right-click VisualizerContextMenu integration.
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 import {
+  type AudioFrameMetrics,
   buildLyricsCacheKey,
   DEMO_FALLBACK_PALETTE,
   extractPaletteFromArtworkUrl,
   getBundledFontCssFamily,
+  getSyncButtonTheme,
   type Lyrics,
   LyricsPipeline,
+  resolveStyleVariationId,
+  SF_PRO_DISPLAY_STACK,
   STARLIGHT_HARBOR_LYRICS,
   STARLIGHT_HARBOR_TRACK,
+  type StyleTrackMetadata,
   SyncEngine,
   type TrackInfo,
 } from '../core';
-import { LyricStageRenderer } from '../rendering';
+import { type LyricStageFrameInput, LyricStageRenderer } from '../rendering';
 import {
   convertParsedLyricsToVisualizerLyrics,
   getSharedWaveFormPlaybackBridge,
 } from '../bridge/waveFormPlaybackBridge';
 import { useLyricVisualizerStore } from '../state/lyricVisualizerStore';
 import { VisualizerControlBar } from './VisualizerControlBar';
+import { VisualizerContextMenu } from '../../ui/common/VisualizerContextMenu';
 import { usePlayerStore } from '../../state/playerStore';
 import { useLyricsStore } from '../../state/lyricsStore';
 
 export interface LyricStageControlProps {
   className?: string;
   showControls?: boolean;
+  blendWithParent?: boolean;
+  isBackdrop?: boolean;
+  contentInsetLeft?: number;
+  hasBottomDock?: boolean;
   isAmbientMode?: boolean;
   isOverlayMode?: boolean;
   onSwitchToClassic?: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
+  isFullBleed?: boolean;
+  onToggleFullBleed?: () => void;
 }
 
 export const LyricStageControl: React.FC<LyricStageControlProps> = ({
   className = '',
-  showControls = true,
+  showControls = false,
+  blendWithParent = false,
+  isBackdrop = false,
+  contentInsetLeft = 0,
+  hasBottomDock = false,
   isAmbientMode = false,
   isOverlayMode = false,
   onSwitchToClassic,
+  onContextMenu,
+  isFullBleed = false,
+  onToggleFullBleed,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const webGlCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -49,8 +70,64 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
   const syncEngineRef = useRef<SyncEngine>(new SyncEngine());
   const pipelineRef = useRef<LyricsPipeline | null>(null);
   const activeLyricsRef = useRef<Lyrics | null>(null);
+  const lastTrackIdRef = useRef<string | null>(null);
+  const sampleFrameOutRef = useRef<LyricStageFrameInput>({
+    timeSeconds: 0,
+    activeLineIndex: -1,
+    activeWordIndex: -1,
+    wordProgress: 0,
+    lineFadeAlpha: 1,
+    didSeekThisFrame: false,
+  });
+  const broadcastPayloadRef = useRef<{
+    track: TrackInfo | null;
+    trackId: string | null;
+    lyrics: Lyrics | null;
+    positionSeconds: number;
+    isPlaying: boolean;
+    audio: AudioFrameMetrics;
+  }>({
+    track: null,
+    trackId: null,
+    lyrics: null,
+    positionSeconds: 0,
+    isPlaying: false,
+    audio: {
+      rmsLevel: 0,
+      bassEnergy: 0,
+      midEnergy: 0,
+      trebleEnergy: 0,
+      beatDetected: false,
+      beatStrength: 0,
+    },
+  });
 
   const [isHovered, setIsHovered] = useState(false);
+  const [isFollowingPlayback, setIsFollowingPlayback] = useState(true);
+  const [isHoveringLine, setIsHoveringLine] = useState(false);
+  const [isDraggingStage, setIsDraggingStage] = useState(false);
+  const [liveBpm, setLiveBpm] = useState<number | undefined>(undefined);
+  const lastBpmRef = useRef<number | undefined>(undefined);
+  const dragStateRef = useRef<{
+    active: boolean;
+    pointerId: number;
+    startY: number;
+    lastY: number;
+    moved: boolean;
+    suppressClick: boolean;
+  }>({
+    active: false,
+    pointerId: -1,
+    startY: 0,
+    lastY: 0,
+    moved: false,
+    suppressClick: false,
+  });
+  const [internalMenu, setInternalMenu] = useState<{ isOpen: boolean; x: number; y: number }>({
+    isOpen: false,
+    x: 0,
+    y: 0,
+  });
 
   const config = useLyricVisualizerStore((s) => s.config);
   const currentSongOffsetMs = useLyricVisualizerStore((s) => s.currentSongOffsetMs);
@@ -68,6 +145,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const lyricsData = useLyricsStore((s) => s.lyricsData);
+  const lyricsTrackId = useLyricsStore((s) => s.currentTrackId);
 
   // Initialize LyricsPipeline with Electron IPC disk cache adapter
   useEffect(() => {
@@ -137,12 +215,23 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
     const syncTrackAndLyrics = async (track: TrackInfo | null) => {
       if (config.sandboxEnabled) {
+        lastTrackIdRef.current = STARLIGHT_HARBOR_TRACK.id;
         activeLyricsRef.current = STARLIGHT_HARBOR_LYRICS;
         setActiveTrack(STARLIGHT_HARBOR_TRACK);
         setActiveLyrics(STARLIGHT_HARBOR_LYRICS);
         setCurrentSongKey(STARLIGHT_HARBOR_TRACK.id).catch(() => {});
         rendererRef.current?.setLyrics(STARLIGHT_HARBOR_LYRICS);
         return;
+      }
+
+      const nextTrackId = track?.id ?? null;
+      const trackChanged = nextTrackId !== lastTrackIdRef.current;
+
+      // Immediately clear old lyrics on track change so previous song lines never linger
+      if (trackChanged) {
+        lastTrackIdRef.current = nextTrackId;
+        activeLyricsRef.current = null;
+        rendererRef.current?.setLyrics(null);
       }
 
       setActiveTrack(track);
@@ -157,8 +246,13 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       const songKey = buildLyricsCacheKey(track);
       setCurrentSongKey(songKey).catch(() => {});
 
-      // Prefer already loaded lyrics from useLyricsStore if matching current track
-      const storeLyrics = convertParsedLyricsToVisualizerLyrics(useLyricsStore.getState().lyricsData);
+      // Prefer already loaded lyrics from useLyricsStore ONLY when they match the active track
+      const lState = useLyricsStore.getState();
+      const lyricsMatchesTrack = !lState.currentTrackId || lState.currentTrackId === track.id;
+      const storeLyrics = lyricsMatchesTrack
+        ? convertParsedLyricsToVisualizerLyrics(lState.lyricsData)
+        : null;
+
       if (storeLyrics && storeLyrics.lines.length > 0) {
         activeLyricsRef.current = storeLyrics;
         setActiveLyrics(storeLyrics);
@@ -168,7 +262,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
           track,
           abortController.signal
         );
-        if (!abortController.signal.aborted) {
+        if (!abortController.signal.aborted && lastTrackIdRef.current === track.id) {
           activeLyricsRef.current = resolved;
           setActiveLyrics(resolved);
           rendererRef.current?.setLyrics(resolved);
@@ -208,11 +302,36 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     currentTrack?.videoId,
     currentTrack?.thumbnailUrl,
     lyricsData,
+    lyricsTrackId,
     setActiveLyrics,
     setActivePalette,
     setActiveTrack,
     setCurrentSongKey,
   ]);
+
+  const activeVariationId = resolveStyleVariationId(config.styleId, config.variationByStyle);
+
+  const trackMetadata = useMemo<StyleTrackMetadata | null>(() => {
+    if (config.sandboxEnabled) {
+      return {
+        id: STARLIGHT_HARBOR_TRACK.id,
+        title: STARLIGHT_HARBOR_TRACK.title,
+        artist: STARLIGHT_HARBOR_TRACK.artist,
+        album: STARLIGHT_HARBOR_TRACK.album || 'Original Sandbox Sessions',
+        bpm: liveBpm ?? 108,
+      };
+    }
+    if (!currentTrack) return null;
+    const rawYear = (currentTrack as any).year ?? (currentTrack as any).releaseYear;
+    return {
+      id: currentTrack.videoId || (currentTrack as any).id || currentTrack.title,
+      title: currentTrack.title || 'Unknown Title',
+      artist: currentTrack.artist || 'Unknown Artist',
+      album: currentTrack.albumName || (currentTrack as any).album || '',
+      year: rawYear ? String(rawYear) : undefined,
+      bpm: liveBpm ?? ((currentTrack as any).bpm || undefined),
+    };
+  }, [config.sandboxEnabled, currentTrack, liveBpm]);
 
   // Mount LyricStageRenderer and ResizeObserver
   useEffect(() => {
@@ -223,18 +342,30 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
     const bridge = getSharedWaveFormPlaybackBridge();
     const state = useLyricVisualizerStore.getState();
+    const initialVarId = resolveStyleVariationId(state.config.styleId, state.config.variationByStyle);
 
     const renderer = new LyricStageRenderer({
       canvas,
       webGlCanvas,
       styleId: state.config.styleId,
+      variationId: initialVarId,
       fontFamily: getBundledFontCssFamily(state.config.fontId),
       fontSizeScale: state.config.fontSizeScale,
       palette: state.config.albumArtColorMatch ? state.activePalette : DEMO_FALLBACK_PALETTE,
       reduceMotion: state.config.reduceMotion,
+      motionIntensity: state.config.motionIntensity,
+      backgroundOpacity: state.config.backgroundOpacity,
+      vignetteStrength: state.config.vignetteStrength,
+      textAlign: state.config.textAlign,
+      trackMetadata,
       isAmbientMode,
       isOverlayMode,
+      isEmbeddedTransparent: blendWithParent,
+      contentInsetLeft,
       audioReactive: state.config.audioReactive,
+      onFollowStateChange: (following) => {
+        setIsFollowingPlayback(following);
+      },
       onSampleFrame: (outAudio) => {
         const snapshot = bridge.currentSnapshot;
         if (useLyricVisualizerStore.getState().config.audioReactive) {
@@ -245,26 +376,38 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
           outAudio.midEnergy = 0;
           outAudio.trebleEnergy = 0;
           outAudio.beatDetected = false;
+          outAudio.beatStrength = 0;
+        }
+
+        if (typeof outAudio.estimatedBpm === 'number' && Number.isFinite(outAudio.estimatedBpm) && outAudio.estimatedBpm > 0) {
+          const roundedBpm = Math.round(outAudio.estimatedBpm);
+          if (roundedBpm !== lastBpmRef.current) {
+            lastBpmRef.current = roundedBpm;
+            setLiveBpm(roundedBpm);
+          }
         }
 
         const lyrics = activeLyricsRef.current;
         const syncResult = syncEngineRef.current.update(snapshot, lyrics);
 
-        // Throttled broadcast to open overlay / ambient windows (~20Hz)
-        useLyricVisualizerStore.getState().broadcastSnapshot({
-          positionSeconds: syncResult.timeSeconds,
-          isPlaying: snapshot.isPlaying,
-          audio: outAudio,
-        });
+        // Throttled broadcast to open overlay / ambient windows (~20Hz) without per-frame allocation
+        const bp = broadcastPayloadRef.current;
+        bp.track = snapshot.track;
+        bp.trackId = snapshot.track?.id ?? null;
+        bp.lyrics = lyrics;
+        bp.positionSeconds = syncResult.timeSeconds;
+        bp.isPlaying = snapshot.isPlaying;
+        bp.audio = outAudio;
+        useLyricVisualizerStore.getState().broadcastSnapshot(bp);
 
-        return {
-          timeSeconds: syncResult.timeSeconds,
-          activeLineIndex: syncResult.activeLineIndex,
-          activeWordIndex: syncResult.activeWordIndex,
-          wordProgress: syncResult.wordProgress,
-          lineFadeAlpha: syncResult.lineFadeAlpha,
-          didSeekThisFrame: syncResult.didSeekThisFrame,
-        };
+        const out = sampleFrameOutRef.current;
+        out.timeSeconds = syncResult.timeSeconds;
+        out.activeLineIndex = syncResult.activeLineIndex;
+        out.activeWordIndex = syncResult.activeWordIndex;
+        out.wordProgress = syncResult.wordProgress;
+        out.lineFadeAlpha = syncResult.lineFadeAlpha;
+        out.didSeekThisFrame = syncResult.didSeekThisFrame;
+        return out;
       },
     });
 
@@ -292,37 +435,127 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       renderer.dispose();
       rendererRef.current = null;
     };
-  }, [isAmbientMode, isOverlayMode]);
+  }, [isAmbientMode, isOverlayMode, blendWithParent]);
+
+  // Non-passive wheel listener for smooth manual lyric scrolling
+  useEffect(() => {
+    const canvas = canvas2dRef.current;
+    if (!canvas || isOverlayMode) return;
+    const onWheel = (e: WheelEvent) => {
+      const renderer = rendererRef.current;
+      if (!renderer || !activeLyricsRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      renderer.scrollBy(e.deltaY);
+    };
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', onWheel);
+    };
+  }, [isOverlayMode]);
 
   // Synchronize live config changes to LyricStageRenderer without remounting
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     renderer.setStyle(config.styleId);
+    renderer.setVariation(activeVariationId);
     renderer.setTypography(getBundledFontCssFamily(config.fontId), config.fontSizeScale);
     renderer.setPalette(config.albumArtColorMatch ? activePalette : DEMO_FALLBACK_PALETTE);
+    renderer.setVisualSettings({
+      backgroundOpacity: config.backgroundOpacity,
+      vignetteStrength: config.vignetteStrength,
+      textAlign: config.textAlign,
+    });
+    renderer.setTrackMetadata(trackMetadata);
     renderer.setModes({
       reduceMotion: config.reduceMotion,
+      motionIntensity: config.motionIntensity,
       isAmbientMode,
       isOverlayMode,
+      isEmbeddedTransparent: blendWithParent,
       audioReactive: config.audioReactive,
     });
+    renderer.setContentInsetLeft(contentInsetLeft);
     renderer.setLocked(isScreenLocked);
   }, [
     config.styleId,
+    activeVariationId,
     config.fontId,
     config.fontSizeScale,
     config.albumArtColorMatch,
     config.reduceMotion,
+    config.motionIntensity,
     config.audioReactive,
+    config.backgroundOpacity,
+    config.vignetteStrength,
+    config.textAlign,
+    trackMetadata,
     activePalette,
     isAmbientMode,
     isOverlayMode,
+    blendWithParent,
+    contentInsetLeft,
     isScreenLocked,
   ]);
 
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0 || isOverlayMode) return;
+    dragStateRef.current.active = true;
+    dragStateRef.current.pointerId = e.pointerId;
+    dragStateRef.current.startY = e.clientY;
+    dragStateRef.current.lastY = e.clientY;
+    dragStateRef.current.moved = false;
+    dragStateRef.current.suppressClick = false;
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const renderer = rendererRef.current;
+    const canvas = canvas2dRef.current;
+    if (!renderer || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const hovered = renderer.setPointerPosition(x, y);
+    setIsHoveringLine(hovered >= 0);
+
+    const drag = dragStateRef.current;
+    if (drag.active && drag.pointerId === e.pointerId) {
+      const totalDy = Math.abs(e.clientY - drag.startY);
+      if (!drag.moved && totalDy > 6) {
+        drag.moved = true;
+        drag.suppressClick = true;
+        setIsDraggingStage(true);
+      }
+      if (drag.moved) {
+        const deltaY = drag.lastY - e.clientY;
+        drag.lastY = e.clientY;
+        renderer.scrollBy(deltaY);
+      }
+    }
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragStateRef.current;
+    if (drag.active && drag.pointerId === e.pointerId) {
+      drag.active = false;
+      setIsDraggingStage(false);
+    }
+  };
+
+  const handlePointerLeave = () => {
+    dragStateRef.current.active = false;
+    setIsDraggingStage(false);
+    setIsHoveringLine(false);
+    rendererRef.current?.clearPointerPosition();
+  };
+
   // Click-line-to-seek handler
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (dragStateRef.current.suppressClick) {
+      dragStateRef.current.suppressClick = false;
+      return;
+    }
     const renderer = rendererRef.current;
     const canvas = canvas2dRef.current;
     const lyrics = activeLyricsRef.current;
@@ -336,42 +569,106 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
     const targetLine = lyrics.lines[lineIndex];
     const targetSec = Math.max(0, targetLine.startSeconds);
-    const targetMs = Math.round(targetSec * 1000);
 
     const bridge = getSharedWaveFormPlaybackBridge();
-    if (config.sandboxEnabled) {
-      bridge.seek(targetSec);
-    } else {
-      const engine = usePlayerStore.getState().audioEngine;
-      if (engine && typeof engine.seekTo === 'function') {
-        engine.seekTo(targetMs);
-      }
-      bridge.seek(targetSec);
-    }
+    bridge.seek(targetSec);
+    renderer.resumeFollowPlayback();
     broadcastSnapshot({ positionSeconds: targetSec }, true);
   };
+
+  const handleStageContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (onContextMenu) {
+      onContextMenu(e);
+    } else {
+      setInternalMenu({ isOpen: true, x: e.clientX, y: e.clientY });
+    }
+  };
+
+  const syncTheme = useMemo(
+    () =>
+      getSyncButtonTheme(
+        config.styleId,
+        activeVariationId,
+        config.albumArtColorMatch ? activePalette : DEMO_FALLBACK_PALETTE
+      ),
+    [config.styleId, activeVariationId, config.albumArtColorMatch, activePalette]
+  );
 
   return (
     <div
       ref={containerRef}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      style={{ fontFamily: 'Inter, "Segoe UI", sans-serif' }}
-      className={`relative w-full h-full flex flex-col overflow-hidden rounded-3xl select-none ${className}`}
+      onContextMenu={handleStageContextMenu}
+      style={{
+        fontFamily: SF_PRO_DISPLAY_STACK,
+        background: blendWithParent ? 'transparent' : (activePalette?.bgDeep || '#08080c'),
+      }}
+      className={`${
+        /\b(absolute|fixed|relative|sticky)\b/.test(className)
+          ? ''
+          : isBackdrop
+          ? 'absolute inset-0'
+          : 'relative'
+      } w-full h-full flex flex-col overflow-hidden select-none ${
+        blendWithParent ? 'bg-transparent' : isBackdrop ? '' : 'rounded-3xl'
+      } ${className}`}
     >
       {/* WebGL2 Background Shader Layer */}
       <canvas
         ref={webGlCanvasRef}
-        className="absolute inset-0 w-full h-full pointer-events-none z-0"
+        className="absolute inset-0 block w-full h-full pointer-events-none z-0 bg-transparent"
       />
 
-      {/* Primary 2D Lyric Stage Canvas (Click-line-to-seek enabled) */}
+      {/* Primary 2D Lyric Stage Canvas (Click-line-to-seek, wheel & drag scroll enabled) */}
       <canvas
         ref={canvas2dRef}
         onClick={handleCanvasClick}
-        title="Click any lyric line to seek"
-        className="relative z-[1] w-full h-full cursor-pointer"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onPointerLeave={handlePointerLeave}
+        title="Click any lyric line to seek · Scroll or drag to browse · Right-click for Visualizer options"
+        style={{
+          cursor: isDraggingStage ? 'grabbing' : isHoveringLine ? 'pointer' : 'default',
+          touchAction: 'none',
+        }}
+        className="absolute inset-0 block w-full h-full z-[1] bg-transparent"
       />
+
+      {/* Theme-adapted Floating "Sync with Playback" button when manually browsing */}
+      {!isFollowingPlayback && !isOverlayMode && (
+        <button
+          type="button"
+          data-testid="visualizer-sync-playback-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            rendererRef.current?.resumeFollowPlayback();
+          }}
+          style={{
+            ...syncTheme.style,
+            left:
+              contentInsetLeft > 2
+                ? `calc(${Math.round(contentInsetLeft)}px + (100% - ${Math.round(contentInsetLeft)}px) / 2)`
+                : '50%',
+            transform: 'translateX(-50%)',
+          }}
+          className={`absolute ${
+            hasBottomDock ? 'bottom-24' : showControls ? 'bottom-20' : 'bottom-6'
+          } z-20 inline-flex items-center gap-2 transition-all duration-200 hover:scale-[1.03] active:scale-[0.97] cursor-pointer`}
+        >
+          {syncTheme.showDot && (
+            <span
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{ backgroundColor: syncTheme.dotColor }}
+            />
+          )}
+          <span>{syncTheme.label}</span>
+        </button>
+      )}
 
       {/* Small clear Sandbox Demo badge when Sandbox mode is active */}
       {config.sandboxEnabled && (
@@ -384,7 +681,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
         </div>
       )}
 
-      {/* Hover / Active VisualizerControlBar at bottom of stage */}
+      {/* Optional VisualizerControlBar when explicitly enabled */}
       {showControls && (
         <div
           className={`absolute inset-x-3 bottom-3 z-20 transition-all duration-200 ${
@@ -395,6 +692,19 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
         >
           <VisualizerControlBar onSwitchToClassic={onSwitchToClassic} />
         </div>
+      )}
+
+      {/* Built-in Glassmorphic VisualizerContextMenu when parent doesn't supply custom handler */}
+      {!onContextMenu && (
+        <VisualizerContextMenu
+          isOpen={internalMenu.isOpen}
+          x={internalMenu.x}
+          y={internalMenu.y}
+          onClose={() => setInternalMenu((prev) => ({ ...prev, isOpen: false }))}
+          isFullBleed={isFullBleed}
+          onToggleFullBleed={onToggleFullBleed}
+          context="now-playing"
+        />
       )}
     </div>
   );

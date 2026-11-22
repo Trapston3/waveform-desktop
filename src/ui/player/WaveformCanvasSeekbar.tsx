@@ -86,6 +86,18 @@ function formatTime(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+function resolveEffectiveDurationMs(
+  durationMs: number,
+  propEngine?: AudioEngine | null
+): number {
+  const engine = propEngine ?? usePlayerStore.getState().audioEngine;
+  const engineDur =
+    engine && typeof engine.getCurrentDurationMs === 'function'
+      ? engine.getCurrentDurationMs() || 0
+      : 0;
+  return Math.max(durationMs || 0, engineDur);
+}
+
 export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React.memo(({
   amplitudes,
   currentPositionMs = 0,
@@ -310,7 +322,9 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
 
       // 3. Sub-Pixel Playhead Position Resolution
       let activeMs: number;
-      const safeDuration = p.durationMs > 0 ? p.durationMs : 1;
+      const effectiveDurationMs = resolveEffectiveDurationMs(p.durationMs, p.audioEngine);
+      const safeDuration = effectiveDurationMs > 0 ? effectiveDurationMs : 1;
+      const liveEngine = p.audioEngine ?? usePlayerStore.getState().audioEngine;
 
       if (interaction.isDragging && interaction.scrubPositionMs !== null) {
         // Zero-latency drag tracking
@@ -324,11 +338,8 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
         let authoritativePos: number | null = null;
         if (p.getPositionMs) {
           authoritativePos = p.getPositionMs();
-        } else {
-          const engine = p.audioEngine ?? usePlayerStore.getState().audioEngine;
-          if (engine) {
-            authoritativePos = engine.getCurrentPositionMs();
-          }
+        } else if (liveEngine) {
+          authoritativePos = liveEngine.getCurrentPositionMs();
         }
 
         if (authoritativePos !== null && authoritativePos >= 0) {
@@ -353,7 +364,8 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
         }
 
         // Sub-pixel continuous extrapolation
-        if (p.isPlaying) {
+        const isEngineSeeking = Boolean((liveEngine as any)?.isSeeking?.());
+        if (p.isPlaying && !isEngineSeeking) {
           const dt = Math.max(0, now - clock.baseTimestamp);
           const targetMs = Math.min(safeDuration, clock.basePositionMs + dt);
           clock.interpolatedMs += (targetMs - clock.interpolatedMs) * 0.22;
@@ -477,21 +489,41 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
   }, []); // Run ONCE on mount; clean up ONCE on unmount!
 
   // Unified Mouse & Drag Interactions
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+      if (interactionRef.current.isDragging) {
+        interactionRef.current.isDragging = false;
+        interactionRef.current.scrubPositionMs = null;
+        usePlayerStore.getState().setIsScrubbing(false);
+      }
+    };
+  }, []);
+
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
     if (!containerRef.current) return;
 
+    dragCleanupRef.current?.();
+
     const rect = containerRef.current.getBoundingClientRect();
     const startX = e.clientX;
-    const duration = propsRef.current.durationMs;
 
     interactionRef.current.isDragging = true;
     interactionRef.current.hasMoved = false;
+    usePlayerStore.getState().setIsScrubbing(true);
 
     const calcPositionMs = (clientX: number): number => {
+      const effectiveDuration = resolveEffectiveDurationMs(
+        propsRef.current.durationMs,
+        propsRef.current.audioEngine
+      );
       const x = clientX - rect.left;
-      const fraction = Math.max(0, Math.min(1.0, x / rect.width));
-      return fraction * duration;
+      const fraction = rect.width > 0 ? Math.max(0, Math.min(1.0, x / rect.width)) : 0;
+      return Math.round(fraction * effectiveDuration);
     };
 
     const initialMs = calcPositionMs(startX);
@@ -504,8 +536,9 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
       const ms = calcPositionMs(moveEvent.clientX);
       interactionRef.current.scrubPositionMs = ms;
 
-      // Update hover tooltip
-      const x = moveEvent.clientX - rect.left;
+      // Update hover tooltip (clamped within [28, width - 28])
+      const rawX = moveEvent.clientX - rect.left;
+      const x = rect.width > 56 ? Math.max(28, Math.min(rect.width - 28, rawX)) : Math.max(0, rawX);
       setTooltipState({
         visible: true,
         x,
@@ -513,9 +546,16 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
       });
     };
 
-    const handleMouseUpWindow = (upEvent: MouseEvent) => {
+    const cleanupDragListeners = () => {
       window.removeEventListener('mousemove', handleMouseMoveWindow);
       window.removeEventListener('mouseup', handleMouseUpWindow);
+      if (dragCleanupRef.current === cleanupDragListeners) {
+        dragCleanupRef.current = null;
+      }
+    };
+
+    const handleMouseUpWindow = (upEvent: MouseEvent) => {
+      cleanupDragListeners();
 
       const targetMs = calcPositionMs(upEvent.clientX);
 
@@ -528,11 +568,13 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
 
       interactionRef.current.isDragging = false;
       interactionRef.current.scrubPositionMs = null;
+      usePlayerStore.getState().setIsScrubbing(false);
 
       // Dispatch single seek event
       propsRef.current.onSeek(targetMs);
     };
 
+    dragCleanupRef.current = cleanupDragListeners;
     window.addEventListener('mousemove', handleMouseMoveWindow);
     window.addEventListener('mouseup', handleMouseUpWindow);
   };
@@ -540,10 +582,16 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
   // Mouse wheel scrubbing (±5000ms)
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const duration = propsRef.current.durationMs;
+    const duration = resolveEffectiveDurationMs(
+      propsRef.current.durationMs,
+      propsRef.current.audioEngine
+    );
     const deltaMs = e.deltaY < 0 ? 5000 : -5000;
     const currentMs = clockRef.current.interpolatedMs;
-    const targetMs = Math.max(0, Math.min(duration, currentMs + deltaMs));
+    const rawTarget = currentMs + deltaMs;
+    const targetMs = Math.round(
+      duration > 0 ? Math.max(0, Math.min(duration, rawTarget)) : Math.max(0, rawTarget)
+    );
 
     clockRef.current.optimisticSeekMs = targetMs;
     clockRef.current.optimisticSeekTime = performance.now();
@@ -557,9 +605,14 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
   const handleMouseMoveHover = (e: React.MouseEvent<HTMLDivElement>) => {
     if (interactionRef.current.isDragging || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const fraction = Math.max(0, Math.min(1.0, x / rect.width));
-    const timeMs = fraction * propsRef.current.durationMs;
+    const rawX = e.clientX - rect.left;
+    const x = rect.width > 56 ? Math.max(28, Math.min(rect.width - 28, rawX)) : Math.max(0, rawX);
+    const fraction = rect.width > 0 ? Math.max(0, Math.min(1.0, rawX / rect.width)) : 0;
+    const effectiveDuration = resolveEffectiveDurationMs(
+      propsRef.current.durationMs,
+      propsRef.current.audioEngine
+    );
+    const timeMs = fraction * effectiveDuration;
 
     interactionRef.current.hoverX = x;
     setTooltipState({
@@ -601,7 +654,11 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
       {tooltipState && tooltipState.visible && (
         <div
           style={{
-            transform: `translateX(${tooltipState.x}px) translateX(-50%)`,
+            transform: `translateX(${
+              layoutRef.current.width > 56
+                ? Math.max(28, Math.min(layoutRef.current.width - 28, tooltipState.x))
+                : Math.max(0, tooltipState.x)
+            }px) translateX(-50%)`,
           }}
           className="absolute -top-7 left-0 px-2 py-0.5 rounded-md bg-[var(--color-surface)] border border-[var(--color-outline)] text-[10px] font-mono text-[var(--color-primary)] shadow-lg pointer-events-none z-30"
         >

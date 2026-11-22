@@ -4,19 +4,25 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ChevronLeft, ChevronRight, Play } from 'lucide-react';
-import type { BrowseItem } from '../../models/Navigation';
+import { DEFAULT_LOCAL_ALBUM_ART_SVG } from '../../state/libraryStore';
+import type { Song } from '../../models/Song';
 
 export interface CoverFlowAlbum {
   id: string;
   title: string;
   artist: string;
+  albumArtist?: string;
   year?: string;
   coverUrl: string;
+  source?: 'local' | 'online' | 'mixed';
+  isLocal?: boolean;
+  songs?: Song[];
 }
 
 export interface AlbumCoverFlowProps {
   albums: CoverFlowAlbum[];
   onSelectAlbum?: (album: CoverFlowAlbum) => void;
+  onActiveAlbumChange?: (album: CoverFlowAlbum) => void;
   onPlayAlbum?: (album: CoverFlowAlbum) => void;
   className?: string;
 }
@@ -24,10 +30,12 @@ export interface AlbumCoverFlowProps {
 export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
   albums,
   onSelectAlbum,
+  onActiveAlbumChange,
   onPlayAlbum,
   className = '',
 }) => {
   const [activeIndex, setActiveIndex] = useState(0);
+  const [failedCovers, setFailedCovers] = useState<Record<string, boolean>>({});
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const startXRef = useRef(0);
@@ -37,10 +45,26 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
 
   const clampIndex = useCallback(
     (idx: number) => {
+      if (total <= 0) return 0;
       return Math.max(0, Math.min(total - 1, idx));
     },
     [total]
   );
+
+  // Clamp activeIndex if albums list shrinks or changes
+  useEffect(() => {
+    setActiveIndex((prev) => clampIndex(prev));
+  }, [clampIndex]);
+
+  const safeActiveIndex = clampIndex(activeIndex);
+  const activeAlbum = albums[safeActiveIndex] || null;
+
+  // Sync active album changes back to parent (e.g. CoverFlowView track table)
+  useEffect(() => {
+    if (activeAlbum && onActiveAlbumChange) {
+      onActiveAlbumChange(activeAlbum);
+    }
+  }, [activeAlbum, onActiveAlbumChange]);
 
   const handlePrev = useCallback(() => {
     setActiveIndex((prev) => clampIndex(prev - 1));
@@ -60,15 +84,15 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
         e.preventDefault();
         handleNext();
       } else if (e.key === 'Enter') {
-        if (albums[activeIndex] && onPlayAlbum) {
-          onPlayAlbum(albums[activeIndex]);
+        if (albums[safeActiveIndex] && onPlayAlbum) {
+          onPlayAlbum(albums[safeActiveIndex]);
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handlePrev, handleNext, albums, activeIndex, onPlayAlbum]);
+  }, [handlePrev, handleNext, albums, safeActiveIndex, onPlayAlbum]);
 
   // Mouse wheel navigation
   const handleWheel = (e: React.WheelEvent) => {
@@ -119,7 +143,7 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
     );
   }
 
-  const currentAlbum = albums[activeIndex] || albums[0];
+  const currentAlbum = albums[safeActiveIndex] || albums[0];
 
   return (
     <div
@@ -135,7 +159,7 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
         style={{ transformStyle: 'preserve-3d' }}
       >
         {albums.map((album, i) => {
-          const offset = i - activeIndex;
+          const offset = i - safeActiveIndex;
           const absOffset = Math.min(1.0, Math.abs(offset));
 
           // Only render visible neighborhood cards to optimize performance
@@ -147,6 +171,11 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
           const translateZ = -150 * absOffset;
           const opacity = 1.0 - 0.45 * absOffset;
           const zIndex = 100 - Math.abs(offset) * 10;
+
+          const resolvedCover =
+            failedCovers[album.id] || !album.coverUrl
+              ? DEFAULT_LOCAL_ALBUM_ART_SVG
+              : album.coverUrl;
 
           return (
             <div
@@ -171,8 +200,13 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
               {/* Primary Album Cover */}
               <div className="relative w-full h-full rounded-2xl overflow-hidden shadow-2xl border border-[var(--color-outline)] bg-neutral-900">
                 <img
-                  src={album.coverUrl}
+                  src={resolvedCover}
                   alt={album.title}
+                  onError={() => {
+                    if (!failedCovers[album.id]) {
+                      setFailedCovers((prev) => ({ ...prev, [album.id]: true }));
+                    }
+                  }}
                   className="w-full h-full object-cover"
                 />
 
@@ -206,7 +240,7 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
                 className="w-full overflow-hidden rounded-2xl pointer-events-none mt-2"
               >
                 <img
-                  src={album.coverUrl}
+                  src={resolvedCover}
                   alt="reflection"
                   className="w-full h-full object-cover filter blur-[1px]"
                 />
@@ -229,7 +263,7 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
       {/* Navigation Buttons */}
       <button
         onClick={handlePrev}
-        disabled={activeIndex === 0}
+        disabled={safeActiveIndex === 0}
         className="absolute left-6 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[var(--color-surface)]/80 hover:bg-[var(--color-surface)] disabled:opacity-30 border border-[var(--color-outline)] shadow-lg flex items-center justify-center text-[var(--color-primary)] transition-all cursor-pointer z-30"
       >
         <ChevronLeft size={20} />
@@ -237,7 +271,7 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
 
       <button
         onClick={handleNext}
-        disabled={activeIndex === total - 1}
+        disabled={safeActiveIndex === total - 1}
         className="absolute right-6 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[var(--color-surface)]/80 hover:bg-[var(--color-surface)] disabled:opacity-30 border border-[var(--color-outline)] shadow-lg flex items-center justify-center text-[var(--color-primary)] transition-all cursor-pointer z-30"
       >
         <ChevronRight size={20} />

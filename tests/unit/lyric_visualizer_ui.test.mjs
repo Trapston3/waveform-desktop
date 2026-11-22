@@ -2,7 +2,7 @@
 // Unit & behavioral integration test suite for Wave 2 Ticket 4:
 // AudioEngine.sampleAudioMetrics, WaveFormPlaybackBridge, useLyricVisualizerStore,
 // VisualizerControlBar, LyricStageControl, OverlayViewportApp, AmbientViewportApp,
-// 7 bundled OFL @fontsource/* imports, hash routing, and NowPlayingScreen invariants.
+// 8 bundled fonts (SF Pro Display default + 7 OFL @fontsource/* imports), hash routing, and NowPlayingScreen invariants.
 
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -55,6 +55,10 @@ const {
   MAX_FONT_SIZE_SCALE,
   MIN_OVERLAY_OPACITY,
   MAX_OVERLAY_OPACITY,
+  MIN_BACKGROUND_OPACITY,
+  MAX_BACKGROUND_OPACITY,
+  MIN_VIGNETTE_STRENGTH,
+  MAX_VIGNETTE_STRENGTH,
 } = await import('../../src/lyricVisualizer/state/lyricVisualizerStore.ts');
 
 function walkFiles(dir, result = []) {
@@ -71,15 +75,19 @@ function walkFiles(dir, result = []) {
 
 describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Routing & UI', () => {
   let origWindow;
+  let origLocalStorageDesc;
 
   beforeEach(() => {
     origWindow = globalThis.window;
+    origLocalStorageDesc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   });
 
   afterEach(() => {
     usePlayerStore.getState().cleanupEngine();
     if (origWindow === undefined) delete globalThis.window;
     else globalThis.window = origWindow;
+    if (origLocalStorageDesc) Object.defineProperty(globalThis, 'localStorage', origLocalStorageDesc);
+    else delete globalThis.localStorage;
   });
 
   test('1. main.tsx statically imports all 7 OFL @fontsource/* packages and routes #/overlay, #/ambient, and App', () => {
@@ -95,7 +103,9 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
       '@fontsource/outfit',
     ];
 
-    assert.strictEqual(BUNDLED_FONTS.length, 7);
+    assert.strictEqual(BUNDLED_FONTS.length, 8);
+    assert.strictEqual(BUNDLED_FONTS[0].id, 'SFProDisplay');
+    assert.strictEqual(DEFAULT_LYRIC_VISUALIZER_CONFIG.fontId, 'SFProDisplay');
     for (const pkg of expectedPackages) {
       assert.ok(
         mainSrc.includes(`import '${pkg}';`) || mainSrc.includes(`import "${pkg}";`),
@@ -110,17 +120,15 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     assert.ok(mainSrc.includes('<App'), 'src/main.tsx must render default App');
   });
 
-  test('2. Zero Apple SF Symbols or Apple system fonts anywhere in src/lyricVisualizer/**', () => {
+  test('2. Zero forbidden Apple SF Symbols, SF Mono, or SF Compact anywhere in src/lyricVisualizer/** and SF Pro Display wired cleanly', () => {
     const lvDir = path.join(rootDir, 'src/lyricVisualizer');
     const files = walkFiles(lvDir);
     assert.ok(files.length >= 10, 'src/lyricVisualizer should contain core, rendering, bridge, state, and ui files');
 
     const forbiddenPatterns = [
-      /-apple-system/i,
-      /BlinkMacSystemFont/i,
-      /SF\s*Pro/i,
       /SF\s*Symbols/i,
       /SF\s*Mono/i,
+      /SF\s*Compact/i,
       /New\s*York\s*Serif/i,
     ];
 
@@ -133,6 +141,11 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
         );
       }
     }
+
+    const modelsSrc = fs.readFileSync(path.join(lvDir, 'core/models.ts'), 'utf8');
+    const iosSrc = fs.readFileSync(path.join(lvDir, 'rendering/styles/iosTextingMotion.ts'), 'utf8');
+    assert.ok(modelsSrc.includes("SF_PRO_DISPLAY_STACK = \"'SF Pro Display'"));
+    assert.ok(iosSrc.includes("IOS_FONT_STACK = \"'SF Pro Display'"));
   });
 
   test('3. Sandbox "Starlight Harbor" demo track and lyrics are original, non-copyrighted, and word-synced', () => {
@@ -313,7 +326,17 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
       closeAmbient: 0,
     };
 
+    const storageMap = new Map();
+    const mockStorage = {
+      getItem: (k) => storageMap.get(k) ?? null,
+      setItem: (k, v) => storageMap.set(k, String(v)),
+    };
+    const activeStorage = typeof globalThis.localStorage?.getItem === 'function' ? globalThis.localStorage : mockStorage;
+    if (activeStorage === mockStorage) {
+      Object.defineProperty(globalThis, 'localStorage', { value: mockStorage, configurable: true, writable: true });
+    }
     globalThis.window = {
+      localStorage: activeStorage,
       electronAPI: {
         lvGetMonitors: async () => [
           { id: 'disp-1', label: 'Primary 4K', isPrimary: true },
@@ -333,15 +356,53 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
 
     const store = useLyricVisualizerStore.getState();
 
-    // 6a. 13 Visual Styles & 7 Bundled Fonts
-    assert.strictEqual(VISUAL_STYLE_DEFINITIONS.length, 13);
+    // 6a. 12 Consolidated Visual Styles (including CodeEditorKinetic), legacy migrations, & 8 Bundled Fonts
+    assert.strictEqual(VISUAL_STYLE_DEFINITIONS.length, 12);
+    assert.ok(
+      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'IosTextingMotion'),
+      'VISUAL_STYLE_DEFINITIONS must include IosTextingMotion'
+    );
+    assert.ok(
+      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'CodeEditorKinetic'),
+      'VISUAL_STYLE_DEFINITIONS must include CodeEditorKinetic'
+    );
     for (const style of VISUAL_STYLE_DEFINITIONS) {
       store.setStyleId(style.id);
       assert.strictEqual(useLyricVisualizerStore.getState().config.styleId, style.id);
     }
+    store.setStyleId('HoloVaporwave');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.styleId, 'LiquidMetal');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.variationByStyle?.LiquidMetal, 'holo-vaporwave');
+    store.setStyleId('SpectrumRibbon');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.styleId, 'GenerativeParticleInk');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.variationByStyle?.GenerativeParticleInk, 'spectrum-ribbon');
+
+    store.setNowPlayingLayout('centered');
+    store.setHideAlbumCover(true);
+    store.setBackgroundOpacity(0.05);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.backgroundOpacity, MIN_BACKGROUND_OPACITY);
+    store.setBackgroundOpacity(1.8);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.backgroundOpacity, MAX_BACKGROUND_OPACITY);
+    store.setVignetteStrength(-0.5);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.vignetteStrength, MIN_VIGNETTE_STRENGTH);
+    store.setVignetteStrength(2.5);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.vignetteStrength, MAX_VIGNETTE_STRENGTH);
+    store.setTextAlign('left');
+    store.setTextAlign('invalid');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.textAlign, 'left');
+    const persisted = JSON.parse(activeStorage.getItem('waveform.lyricVisualizer.v1'));
+    assert.strictEqual(persisted.config.nowPlayingLayout, 'centered');
+    assert.strictEqual(persisted.config.hideAlbumCover, true);
+    assert.strictEqual(persisted.config.backgroundOpacity, MAX_BACKGROUND_OPACITY);
+    assert.strictEqual(persisted.config.vignetteStrength, MAX_VIGNETTE_STRENGTH);
+    assert.strictEqual(persisted.config.textAlign, 'left');
     for (const font of BUNDLED_FONTS) {
       store.setFontId(font.id);
       assert.strictEqual(useLyricVisualizerStore.getState().config.fontId, font.id);
+    }
+    for (const intensity of ['subtle', 'normal', 'vivid']) {
+      store.setMotionIntensity(intensity);
+      assert.strictEqual(useLyricVisualizerStore.getState().config.motionIntensity, intensity);
     }
 
     // 6b. Typography size scale clamping [0.7, 1.8]
@@ -404,15 +465,124 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     assert.strictEqual(useLyricVisualizerStore.getState().activeTrack?.id, STARLIGHT_HARBOR_TRACK.id);
     store.setSandboxEnabled(false);
 
+    // 6f. In-app fullscreen portal path when setFullscreen + lvSetKeepAwake exist on electronAPI
+    const fsCalls = [];
+    const keepAwakeCalls = [];
+    let legacyOpenAmbientCount = 0;
+    globalThis.window = {
+      electronAPI: {
+        setFullscreen: async (flag) => {
+          fsCalls.push(flag);
+          return flag;
+        },
+        lvSetKeepAwake: async (flag) => {
+          keepAwakeCalls.push(flag);
+          return flag;
+        },
+        lvOpenAmbient: () => {
+          legacyOpenAmbientCount++;
+        },
+        lvBroadcastState: (payload) => ipcCalls.broadcasts.push(payload),
+      },
+    };
+    store.setKeepAwakeInAmbient(true);
+    await store.openAmbientMode();
+    assert.strictEqual(useLyricVisualizerStore.getState().isAmbientOpen, true);
+    assert.deepStrictEqual(fsCalls, [true]);
+    assert.deepStrictEqual(keepAwakeCalls, [true]);
+    assert.strictEqual(legacyOpenAmbientCount, 0, 'Must use setFullscreen instead of lvOpenAmbient when available');
+    await store.closeAmbientMode();
+    assert.strictEqual(useLyricVisualizerStore.getState().isAmbientOpen, false);
+    assert.deepStrictEqual(fsCalls, [true, false]);
+    assert.deepStrictEqual(keepAwakeCalls, [true, false]);
+
+    // 6g. Broadcast revisionId ordering guard and trackId-change lyrics clearing
+    useLyricVisualizerStore.setState({ lastAppliedRevisionId: 0, activeTrack: null, activeLyrics: null });
+    const trackA = { id: 'track-a', title: 'Song A', artist: 'Artist A', durationSeconds: 200 };
+    const trackB = { id: 'track-b', title: 'Song B', artist: 'Artist B', durationSeconds: 180 };
+    const lyricsA = {
+      providerName: 'Test',
+      sourceKind: 'LineSynced',
+      lines: [{ startSeconds: 1, endSeconds: 4, text: 'Line from A', words: [], isSynthesizedWords: false }],
+    };
+    store.applyBroadcastPayload({
+      revisionId: 10,
+      trackId: 'track-a',
+      config: DEFAULT_LYRIC_VISUALIZER_CONFIG,
+      track: trackA,
+      lyrics: lyricsA,
+      palette: useLyricVisualizerStore.getState().activePalette,
+      positionSeconds: 2,
+      isPlaying: true,
+      songOffsetMs: 0,
+      audio: { rmsLevel: 0, bassEnergy: 0, midEnergy: 0, trebleEnergy: 0, beatDetected: false },
+      isScreenLocked: false,
+      timestampMs: 1000,
+    });
+    assert.strictEqual(useLyricVisualizerStore.getState().activeTrack?.id, 'track-a');
+    assert.strictEqual(useLyricVisualizerStore.getState().activeLyrics?.lines[0].text, 'Line from A');
+
+    // Stale older revisionId must be rejected
+    store.applyBroadcastPayload({
+      revisionId: 8,
+      trackId: 'track-stale',
+      config: DEFAULT_LYRIC_VISUALIZER_CONFIG,
+      track: { id: 'track-stale', title: 'Stale', artist: 'Stale', durationSeconds: 100 },
+      lyrics: null,
+      palette: useLyricVisualizerStore.getState().activePalette,
+      positionSeconds: 0,
+      isPlaying: false,
+      songOffsetMs: 0,
+      audio: { rmsLevel: 0, bassEnergy: 0, midEnergy: 0, trebleEnergy: 0, beatDetected: false },
+      isScreenLocked: false,
+      timestampMs: 900,
+    });
+    assert.strictEqual(useLyricVisualizerStore.getState().activeTrack?.id, 'track-a', 'Stale revisionId must be rejected');
+
+    // New revisionId with changed trackId and omitted/null lyrics must immediately clear activeLyrics
+    store.applyBroadcastPayload({
+      revisionId: 11,
+      trackId: 'track-b',
+      config: DEFAULT_LYRIC_VISUALIZER_CONFIG,
+      track: trackB,
+      lyrics: null,
+      palette: useLyricVisualizerStore.getState().activePalette,
+      positionSeconds: 0,
+      isPlaying: true,
+      songOffsetMs: 0,
+      audio: { rmsLevel: 0, bassEnergy: 0, midEnergy: 0, trebleEnergy: 0, beatDetected: false },
+      isScreenLocked: false,
+      timestampMs: 1100,
+    });
+    assert.strictEqual(useLyricVisualizerStore.getState().activeTrack?.id, 'track-b');
+    assert.strictEqual(useLyricVisualizerStore.getState().activeLyrics, null, 'activeLyrics must clear immediately on trackId change');
+
+    // broadcastSnapshot includes monotonic revisionId and trackId
+    const beforeLen = ipcCalls.broadcasts.length;
+    store.broadcastSnapshot({ track: trackB, positionSeconds: 5 }, true);
+    store.broadcastSnapshot({ track: trackB, positionSeconds: 6 }, true);
+    assert.ok(ipcCalls.broadcasts.length >= beforeLen + 2);
+    const snap1 = ipcCalls.broadcasts[ipcCalls.broadcasts.length - 2];
+    const snap2 = ipcCalls.broadcasts[ipcCalls.broadcasts.length - 1];
+    assert.strictEqual(snap2.trackId, 'track-b');
+    assert.ok(typeof snap1.revisionId === 'number' && snap2.revisionId > snap1.revisionId);
+
     // Reset config back to defaults
-    useLyricVisualizerStore.setState({ config: DEFAULT_LYRIC_VISUALIZER_CONFIG });
+    useLyricVisualizerStore.setState({
+      config: DEFAULT_LYRIC_VISUALIZER_CONFIG,
+      lastAppliedRevisionId: 0,
+      activeTrack: null,
+      activeLyrics: null,
+    });
   });
 
-  test('7. UI components and NowPlayingScreen preserve ArtistCredits, volume wheel invariants, and LyricStageControl integration', () => {
+  test('7. UI components and NowPlayingScreen preserve ArtistCredits, volume wheel invariants, VisualizerContextMenu, quality badges, and portal integration', () => {
     const nowPlayingSrc = fs.readFileSync(path.join(rootDir, 'src/ui/player/NowPlayingScreen.tsx'), 'utf8');
     const stageSrc = fs.readFileSync(path.join(rootDir, 'src/lyricVisualizer/ui/LyricStageControl.tsx'), 'utf8');
     const overlaySrc = fs.readFileSync(path.join(rootDir, 'src/lyricVisualizer/ui/OverlayViewportApp.tsx'), 'utf8');
     const ambientSrc = fs.readFileSync(path.join(rootDir, 'src/lyricVisualizer/ui/AmbientViewportApp.tsx'), 'utf8');
+    const vizMenuSrc = fs.readFileSync(path.join(rootDir, 'src/ui/common/VisualizerContextMenu.tsx'), 'utf8');
+    const appSrc = fs.readFileSync(path.join(rootDir, 'src/App.tsx'), 'utf8');
 
     // NowPlayingScreen regression invariants
     assert.ok(nowPlayingSrc.includes('<ArtistCredits'), 'NowPlayingScreen must render ArtistCredits');
@@ -428,8 +598,38 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     assert.ok(nowPlayingSrc.includes('onWheel='), 'NowPlayingScreen volume container must support wheel adjustments');
     assert.ok(nowPlayingSrc.includes('<LyricStageControl'), 'NowPlayingScreen must integrate LyricStageControl');
     assert.ok(nowPlayingSrc.includes('<SyllableLyricsEngine'), 'NowPlayingScreen must preserve SyllableLyricsEngine');
+    assert.ok(nowPlayingSrc.includes('showControls={false}'), 'NowPlayingScreen must hide VisualizerControlBar clutter');
+    assert.ok(nowPlayingSrc.includes('isBackdrop={true}'), 'NowPlayingScreen must mount LyricStageControl as full-bleed unified backdrop');
+    assert.ok(nowPlayingSrc.includes('contentInsetLeft={splitContentInsetLeft}'), 'NowPlayingScreen must pass splitContentInsetLeft to LyricStageControl');
+    assert.ok(nowPlayingSrc.includes('blendWithParent={false}'), 'NowPlayingScreen unified backdrop LyricStageControl must set blendWithParent={false}');
+    assert.ok(!nowPlayingSrc.includes('liquid-glass-capsule'), 'NowPlayingScreen transport controls must be borderless without liquid-glass-capsule pill');
+    assert.ok(!nowPlayingSrc.includes('bg-white text-black'), 'NowPlayingScreen Play/Pause control must be borderless without bg-white text-black circle');
+    assert.ok(nowPlayingSrc.includes('data-testid="full-bleed-visualizer-toggle"'), 'NowPlayingScreen must expose full-bleed visualizer toggle');
+    assert.ok(nowPlayingSrc.includes('data-testid="lyrics-visualizer-toggle"'), 'NowPlayingScreen must expose lyrics/visualizer toggle');
+    assert.ok(nowPlayingSrc.includes('data-testid="now-playing-queue-toggle"'), 'NowPlayingScreen must expose queue toggle');
+    assert.ok(nowPlayingSrc.includes('<VisualizerContextMenu'), 'NowPlayingScreen must mount VisualizerContextMenu');
+    assert.ok(nowPlayingSrc.includes('activeStreamQuality'), 'NowPlayingScreen quality pill must bind to activeStreamQuality');
+    assert.ok(nowPlayingSrc.includes('activeStreamIsAtmos'), 'NowPlayingScreen Atmos pill must bind strictly to activeStreamIsAtmos');
+    assert.ok(!nowPlayingSrc.includes("dsp.spatialAudioEnabled"), 'NowPlayingScreen must remove fake dsp.spatialAudioEnabled Atmos pill');
+
+    // VisualizerContextMenu invariants
+    assert.ok(vizMenuSrc.includes('liquid-glass-capsule'), 'VisualizerContextMenu must use liquid-glass-capsule');
+    assert.ok(vizMenuSrc.includes("position: 'fixed'") && vizMenuSrc.includes('zIndex: 9999'));
+    assert.ok(vizMenuSrc.includes('flipSubmenuLeft'), 'VisualizerContextMenu must support flipSubmenuLeft');
+    assert.ok(vizMenuSrc.includes('VISUAL_STYLE_DEFINITIONS') && vizMenuSrc.includes('BUNDLED_FONTS'));
+    assert.ok(vizMenuSrc.includes('nudgeSongOffsetMs(-1000)') && vizMenuSrc.includes('nudgeSongOffsetMs(1000)'));
+    assert.ok(vizMenuSrc.includes('nudgeSongOffsetMs(-100)') && vizMenuSrc.includes('nudgeSongOffsetMs(100)'));
+    assert.ok(vizMenuSrc.includes('resetSongOffsetMs'), 'VisualizerContextMenu must support offset reset');
 
     // LyricStageControl invariants
+    assert.ok(
+      stageSrc.includes('showControls = false'),
+      'LyricStageControl must default showControls to false'
+    );
+    assert.ok(
+      stageSrc.includes('isEmbeddedTransparent: blendWithParent'),
+      'LyricStageControl must forward blendWithParent as isEmbeddedTransparent'
+    );
     assert.ok(
       stageSrc.includes('Demo: Starlight Harbor (Original)'),
       'LyricStageControl must display "Demo: Starlight Harbor (Original)" badge in sandbox mode'
@@ -439,10 +639,22 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
       'LyricStageControl must support click-line-to-seek via findLineAtPoint'
     );
 
-    // OverlayViewportApp & AmbientViewportApp invariants
+    // OverlayViewportApp, AmbientViewportApp & App.tsx portal invariants
+    assert.ok(
+      appSrc.includes('<AmbientViewportApp inAppPortal'),
+      'App.tsx must render AmbientViewportApp as an in-app portal when isAmbientOpen is true'
+    );
     assert.ok(
       overlaySrc.includes('onLvStateBroadcast') && overlaySrc.includes('onLvPlatformEvent'),
       'OverlayViewportApp must subscribe to onLvStateBroadcast and onLvPlatformEvent'
+    );
+    assert.ok(
+      overlaySrc.includes('lvRequestSnapshot'),
+      'OverlayViewportApp must request initial broadcast snapshot on mount'
+    );
+    assert.ok(
+      !overlaySrc.includes('?? STARLIGHT_HARBOR_LYRICS'),
+      'OverlayViewportApp must never unconditionally fall back to STARLIGHT_HARBOR_LYRICS'
     );
     assert.ok(
       ambientSrc.includes('power-lock') && ambientSrc.includes('setLocked(locked)'),
@@ -451,6 +663,10 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     assert.ok(
       ambientSrc.includes('Escape') && ambientSrc.includes('lvCloseAmbient'),
       'AmbientViewportApp must close via lvCloseAmbient() on Escape key'
+    );
+    assert.ok(
+      !ambientSrc.includes('?? STARLIGHT_HARBOR_LYRICS') && !ambientSrc.includes('?? STARLIGHT_HARBOR_TRACK'),
+      'AmbientViewportApp must never unconditionally fall back to STARLIGHT_HARBOR when sandboxEnabled is false'
     );
   });
 });

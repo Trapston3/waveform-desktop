@@ -305,6 +305,11 @@ export class LocalMediaScanner {
     const artistId = `local_art_${fnv(meta.artist)}`;
     const albumId = meta.album ? `local_alb_${fnv(meta.album)}` : null;
 
+    const safeArtworkUrl =
+      meta.artworkDataUrl && !meta.artworkDataUrl.startsWith('data:')
+        ? meta.artworkDataUrl
+        : null;
+
     return {
       id: `local_${hash}`,
       videoId: `local_${hash}`,
@@ -312,10 +317,13 @@ export class LocalMediaScanner {
       artist: meta.artist,
       album: meta.album || undefined,
       albumName: meta.album,
+      albumArtist: meta.artist,
+      trackNumber: meta.trackNumber ?? undefined,
       durationSec: meta.durationSec,
       durationText,
-      thumbnailUrl: meta.artworkDataUrl,
-      artworkUrl: meta.artworkDataUrl || undefined,
+      thumbnailUrl: safeArtworkUrl,
+      artworkUrl: safeArtworkUrl || undefined,
+      artworkHash: null,
       albumId,
       artistId,
       artistIds: [artistId],
@@ -326,9 +334,14 @@ export class LocalMediaScanner {
       totalPlayTimeMs: Math.round(meta.durationSec * 1000),
       playCount: 0,
       lastPlayedTimeMs: 0,
+      lastModifiedMs: meta.lastModifiedMs,
       lyrics: null,
+      source: 'local',
       streamUrl: meta.fileUrl,
       bitrate: meta.bitrateKbps,
+      codec: meta.format,
+      bitDepth: meta.bitDepth,
+      sampleRate: meta.sampleRate,
       sourceQuality: `${meta.bitDepth}-bit / ${meta.sampleRate / 1000}kHz ${meta.format}`,
       audioQuality: `${meta.bitDepth}-bit / ${meta.sampleRate / 1000}kHz ${meta.format}`,
       isExplicit: false,

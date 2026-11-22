@@ -1,0 +1,43 @@
+appId: com.waveform.desktop
+productName: WaveForm
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - build/icon.ico
+  - build/icon.png
+  - package.json
+extraResources:
+  - from: src/assets/data
+    to: assets/data
+    filter:
+      - "**/*"
+  - from: build/icon.ico
+    to: build/icon.ico
+  - from: build/icon.png
+    to: build/icon.png
+win:
+  icon: build/icon.ico
+  requestedExecutionLevel: asInvoker
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: WaveForm
+  artifactName: WaveForm-Setup-${version}.exe
+portable:
+  artifactName: WaveForm-Portable-${version}.exe
+publish:
+  - provider: github
+    owner: trapston3
+    repo: waveform-desktop

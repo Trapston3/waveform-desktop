@@ -28,8 +28,20 @@ import {
 } from 'lucide-react';
 import { useLibraryStore } from '../../state/libraryStore';
 import { useNavigationStore, PrimaryTab } from '../../state/navigationStore';
+import { usePlayerStore } from '../../state/playerStore';
 import { MusicService } from '../../services/MusicService';
-import logoSvg from '../../assets/icons/LogoTransparent.svg';
+import { WaveFormLogoIcon } from '../common/WaveFormIcons';
+// Inline vector WaveFormLogoIcon replaces LogoTransparent.svg img to eliminate broken image flash
+
+function isValidImageUrl(url: unknown): url is string {
+  return Boolean(
+    url &&
+      typeof url === 'string' &&
+      url.trim() &&
+      url !== 'undefined' &&
+      url !== 'null'
+  );
+}
 
 export type NavTab = PrimaryTab | 'settings';
 
@@ -54,6 +66,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
   const [isPlaylistsOpen, setIsPlaylistsOpen] = useState(true);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [isSuggestionsOpen, setIsSuggestionsOpen] = useState(false);
+  const [brokenThumbs, setBrokenThumbs] = useState<Record<string, boolean>>({});
 
   const leaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suggestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -61,6 +74,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
 
   const playlists = useLibraryStore((s) => s.playlists);
+  const isNowPlayingModalOpen = usePlayerStore((s) => s.isNowPlayingModalOpen);
   const {
     current,
     navigateToTab,
@@ -107,9 +121,17 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
     }
   }, [searchFocusCounter, isCollapsed]);
 
-  const isExpanded = !isCollapsed || isHoverExpanded || isSearchFocused;
+  useEffect(() => {
+    if (isNowPlayingModalOpen) {
+      setIsHoverExpanded(false);
+      setIsSuggestionsOpen(false);
+    }
+  }, [isNowPlayingModalOpen]);
+
+  const isExpanded = !isCollapsed || (!isNowPlayingModalOpen && (isHoverExpanded || isSearchFocused));
 
   const handleMouseEnter = () => {
+    if (isNowPlayingModalOpen) return;
     if (leaveTimerRef.current) {
       clearTimeout(leaveTimerRef.current);
       leaveTimerRef.current = null;
@@ -345,9 +367,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
         {/* 2. WaveForm Music Section */}
         <div className="px-3 py-1.5 space-y-0.5">
           <div className={`flex items-center ${isExpanded ? 'gap-2 px-2.5' : 'justify-center px-0'} py-1 mb-0.5`}>
-            <img
-              src={logoSvg}
-              alt="WaveForm"
+            <WaveFormLogoIcon
+              size={18}
               className="w-4.5 h-3.5 text-[var(--color-accent)] shrink-0"
             />
             {isExpanded && (
@@ -596,8 +617,15 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
                         )}
                         <div className={`flex items-center gap-2 min-w-0 ${isSelected ? 'ml-1.5' : ''}`}>
                           <div className="relative w-[22px] h-[22px] rounded-[2px] overflow-hidden bg-white/10 shrink-0 flex items-center justify-center">
-                            {pl.thumbnailUrl ? (
-                              <img src={pl.thumbnailUrl} alt={pl.title} className="w-full h-full object-cover" />
+                            {isValidImageUrl(pl.thumbnailUrl) && !brokenThumbs[pl.id] ? (
+                              <img
+                                src={pl.thumbnailUrl}
+                                alt={pl.title}
+                                onError={() =>
+                                  setBrokenThumbs((prev) => ({ ...prev, [pl.id]: true }))
+                                }
+                                className="w-full h-full object-cover"
+                              />
                             ) : (
                               <ListMusic size={12} className="dark:text-white/60 text-black/50" />
                             )}

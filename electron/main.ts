@@ -3,6 +3,7 @@ import * as electronNs from 'electron';
 const protocol = (electronNs as any).protocol as Electron.Protocol | undefined;
 const dialog = (electronNs as any).dialog as Electron.Dialog;
 import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,10 @@ import {
   readMetadataDiskCache,
   writeMetadataDiskCache,
   fetchAndCacheArtwork,
+  loadLocalLibraryCache,
+  saveLocalLibraryCache,
+  incrementalScanLocalFolders,
+  removeLocalLibraryFolder,
 } from './localMetadata.js';
 import {
   applyYouTubeAuthHeaders,
@@ -27,6 +32,7 @@ import {
 import {
   resolveYoutubeStreamForIpc,
   resolveYoutubeStreamProtocolRequest,
+  resolveRemoteAudioProxyRequest,
   destroyAllSabrStreams,
 } from './youtubeSabrStream.js';
 import { createLyricVisualizerPlatformController } from './lyricVisualizerPlatform.js';
@@ -44,7 +50,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let lyricVisualizerPlatform: ReturnType<typeof createLyricVisualizerPlatformController> | null = null;
 
-const isDev = process.env.NODE_ENV === 'development' || (!app.isPackaged && process.env.NODE_ENV !== 'production');
+const isDev = !app.isPackaged && (process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production');
 
 /**
  * Hardened RFC 7233 / RFC 9110 Range Header Rewriter
@@ -181,9 +187,9 @@ function configureMediaAndApiSession(): void {
       callback({ requestHeaders });
     });
 
-    const mediaCorsFilter = {
+    const mediaCorsFilter: Electron.WebRequestFilter = {
       urls: ['http://*/*', 'https://*/*'],
-      types: ['media', 'xhr', 'fetch', 'image'] as any,
+      types: ['media', 'xhr', 'image'],
     };
 
     ses.webRequest.onHeadersReceived(mediaCorsFilter, (details, callback) => {
@@ -255,6 +261,18 @@ function createWindow(): BrowserWindow {
     win.webContents.send('window-maximized-change', false);
   });
 
+  win.on('enter-full-screen', () => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('window-fullscreen-change', true);
+    }
+  });
+
+  win.on('leave-full-screen', () => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('window-fullscreen-change', false);
+    }
+  });
+
   loadWindowContent(win).catch((err) => {
     console.error('[WaveForm Main] Error in loadWindowContent:', err);
   });
@@ -280,6 +298,13 @@ async function loadWindowContent(win: BrowserWindow, hashRoute?: string): Promis
   const distCandidatePaths = [
     path.resolve(__dirname, '../dist/index.html'),
     path.resolve(app.getAppPath(), 'dist/index.html'),
+    ...(process.resourcesPath
+      ? [
+          path.resolve(process.resourcesPath, 'app.asar/dist/index.html'),
+          path.resolve(process.resourcesPath, 'app/dist/index.html'),
+          path.resolve(process.resourcesPath, 'dist/index.html'),
+        ]
+      : []),
   ];
   const distIndexPath = distCandidatePaths.find((p) => {
     try {
@@ -487,6 +512,18 @@ ipcMain.handle('window-is-maximized', () => {
   return false;
 });
 
+ipcMain.handle('window-set-fullscreen', (_event, flag: boolean) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setFullScreen(Boolean(flag));
+    return mainWindow.isFullScreen();
+  }
+  return false;
+});
+
+ipcMain.handle('window-is-fullscreen', () => {
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow.isFullScreen() : false;
+});
+
 // CORS-free main-process network fetch handler for InnerTube, JioSaavn, LRCLIB, etc.
 ipcMain.handle('network-fetch', async (_event, payload: { url: string; options?: Record<string, any> }) => {
   try {
@@ -521,8 +558,44 @@ ipcMain.handle('network-fetch', async (_event, payload: { url: string; options?:
   }
 });
 
-// AutoEQ Database IPC Handlers
+// AutoEQ Database & Packaged Data Asset Resolution (`auto_eq.db`, `.onnx` models)
 let autoEqDatabaseInstance: any = null;
+
+export function resolveDataAssetCandidatePaths(filename: string): string[] {
+  const safeName = path.basename(filename);
+  const unpackedResourceCandidates = process.resourcesPath
+    ? [
+        path.resolve(process.resourcesPath, 'assets/data', safeName),
+        path.resolve(process.resourcesPath, 'src/assets/data', safeName),
+        path.resolve(process.resourcesPath, 'dist/assets/data', safeName),
+      ]
+    : [];
+  const appAndDevCandidates = [
+    path.resolve(__dirname, '../src/assets/data', safeName),
+    path.resolve(__dirname, '../dist/assets/data', safeName),
+    path.resolve(app.getAppPath(), 'src/assets/data', safeName),
+    path.resolve(app.getAppPath(), 'dist/assets/data', safeName),
+    path.resolve(process.cwd(), 'src/assets/data', safeName),
+    path.resolve(process.cwd(), 'dist/assets/data', safeName),
+  ];
+  const ordered = app.isPackaged
+    ? [...unpackedResourceCandidates, ...appAndDevCandidates]
+    : [...appAndDevCandidates, ...unpackedResourceCandidates];
+  return Array.from(new Set(ordered.filter((p): p is string => typeof p === 'string' && p.length > 0)));
+}
+
+export function resolvePackagedDataAssetPath(filename: string): string | null {
+  for (const candidate of resolveDataAssetCandidatePaths(filename)) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore inaccessible candidate path
+    }
+  }
+  return null;
+}
 
 function getAutoEqDatabase(): any {
   if (autoEqDatabaseInstance) return autoEqDatabaseInstance;
@@ -534,20 +607,17 @@ function getAutoEqDatabase(): any {
 
     const candidatePaths = [
       process.env.AUTOEQ_DB_PATH,
-      path.resolve(__dirname, '../src/assets/data/auto_eq.db'),
-      path.resolve(__dirname, '../dist/assets/data/auto_eq.db'),
-      path.resolve(app.getAppPath(), 'src/assets/data/auto_eq.db'),
-      path.resolve(app.getAppPath(), 'dist/assets/data/auto_eq.db'),
-      path.resolve(process.resourcesPath, 'assets/data/auto_eq.db'),
-      path.resolve(process.resourcesPath, 'src/assets/data/auto_eq.db'),
-      path.resolve(process.cwd(), 'src/assets/data/auto_eq.db'),
-      path.resolve(process.cwd(), 'dist/assets/data/auto_eq.db'),
+      ...resolveDataAssetCandidatePaths('auto_eq.db'),
     ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
     for (const candidate of candidatePaths) {
-      if (fs.existsSync(candidate)) {
-        autoEqDatabaseInstance = new DatabaseSync(candidate, { readOnly: true });
-        break;
+      try {
+        if (fs.existsSync(candidate)) {
+          autoEqDatabaseInstance = new DatabaseSync(candidate, { readOnly: true });
+          break;
+        }
+      } catch {
+        // Native SQLite cannot open paths inside virtual app.asar; continue to unpacked extraResources path
       }
     }
   } catch (err) {
@@ -738,8 +808,112 @@ ipcMain.handle('autoeq-find-profile', async (_event, nameOrId: string) => {
 // ---------- Local media: waveform-local:// protocol, folder picker, scanner ----------
 const AUDIO_MIME: Record<string, string> = {
   '.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.wav': 'audio/wav', '.m4a': 'audio/mp4',
-  '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg; codecs=opus',
+  '.mp4': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg; codecs=opus',
+  '.webm': 'audio/webm',
 };
+
+const ARTIST_ART_EXT_MIME: Array<{ ext: string; mime: string }> = [
+  { ext: 'png', mime: 'image/png' },
+  { ext: 'jpg', mime: 'image/jpeg' },
+  { ext: 'webp', mime: 'image/webp' },
+  { ext: 'gif', mime: 'image/gif' },
+  { ext: 'avif', mime: 'image/avif' },
+  { ext: 'svg', mime: 'image/svg+xml' },
+];
+
+function extForArtistArtMime(contentType: string): string {
+  const ct = contentType.toLowerCase();
+  if (ct.includes('png')) return 'png';
+  if (ct.includes('webp')) return 'webp';
+  if (ct.includes('gif')) return 'gif';
+  if (ct.includes('avif')) return 'avif';
+  if (ct.includes('svg')) return 'svg';
+  return 'jpg';
+}
+
+async function resolveArtistArtProtocolRequest(
+  parsedUrl: URL,
+  userDataPath: string,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const rawUrl = (parsedUrl.searchParams.get('url') || '').trim();
+  let targetUrl: URL;
+  try {
+    targetUrl = new URL(rawUrl);
+  } catch {
+    return new Response('Not found', { status: 404, headers: corsHeaders });
+  }
+  if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
+    return new Response('Not found', { status: 404, headers: corsHeaders });
+  }
+
+  const cacheDir = path.join(userDataPath, 'artist-art-cache');
+  const urlHash = createHash('sha1').update(targetUrl.toString()).digest('hex');
+
+  for (const { ext, mime } of ARTIST_ART_EXT_MIME) {
+    const cachedPath = path.join(cacheDir, `${urlHash}.${ext}`);
+    try {
+      const stat = await fs.promises.stat(cachedPath);
+      if (stat.isFile() && stat.size > 0) {
+        const bytes = await fs.promises.readFile(cachedPath);
+        return new Response(bytes, {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': mime,
+            'Content-Length': String(bytes.byteLength),
+            'Cache-Control': 'public, max-age=604800',
+          },
+        });
+      }
+    } catch {
+      // Cache miss for this extension
+    }
+  }
+
+  try {
+    const res = await fetch(targetUrl.toString(), {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        Accept: 'image/*',
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(12000),
+    });
+    const contentType = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!res.ok || !contentType.startsWith('image/')) {
+      return new Response('Not found', { status: 404, headers: corsHeaders });
+    }
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.byteLength === 0) {
+      return new Response('Not found', { status: 404, headers: corsHeaders });
+    }
+
+    const ext = extForArtistArtMime(contentType);
+    try {
+      await fs.promises.mkdir(cacheDir, { recursive: true });
+      const destPath = path.join(cacheDir, `${urlHash}.${ext}`);
+      const tmpPath = `${destPath}.${Date.now()}.tmp`;
+      await fs.promises.writeFile(tmpPath, bytes);
+      await fs.promises.rename(tmpPath, destPath);
+    } catch {
+      // Non-fatal cache write failure
+    }
+
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': contentType,
+        'Content-Length': String(bytes.byteLength),
+        'Cache-Control': 'public, max-age=604800',
+      },
+    });
+  } catch {
+    return new Response('Not found', { status: 404, headers: corsHeaders });
+  }
+}
 
 protocol?.registerSchemesAsPrivileged([
   { scheme: 'waveform-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true, corsEnabled: true } },
@@ -762,6 +936,9 @@ function registerLocalProtocol(): void {
       const parsedUrl = new URL(request.url);
       if (parsedUrl.hostname === 'art') {
         return resolveArtProtocolResponse(parsedUrl, app.getPath('userData'));
+      }
+      if (parsedUrl.hostname === 'artist-art') {
+        return resolveArtistArtProtocolRequest(parsedUrl, app.getPath('userData'), corsHeaders);
       }
       const filePath = parsedUrl.searchParams.get('path') || '';
       const mime = AUDIO_MIME[path.extname(filePath).toLowerCase()];
@@ -793,9 +970,17 @@ function registerLocalProtocol(): void {
   });
 
   const streamCacheDir = path.join(app.getPath('userData'), 'stream-cache');
-  protocol?.handle('waveform-stream', (request) =>
-    resolveYoutubeStreamProtocolRequest(request, streamCacheDir)
-  );
+  protocol?.handle('waveform-stream', (request) => {
+    try {
+      const parsedUrl = new URL(request.url);
+      if (parsedUrl.hostname === 'proxy') {
+        return resolveRemoteAudioProxyRequest(request);
+      }
+    } catch {
+      // Fall through to YouTube SABR stream handler
+    }
+    return resolveYoutubeStreamProtocolRequest(request, streamCacheDir);
+  });
 }
 
 function resolveDiskCacheKeyArg(
@@ -863,6 +1048,68 @@ ipcMain.handle(
     );
   }
 );
+
+ipcMain.handle('local-library-load-cache', () =>
+  loadLocalLibraryCache(app.getPath('userData'))
+);
+
+ipcMain.handle(
+  'local-library-save-cache',
+  (_e, payload: { folders: string[]; tracks: any[] }) => {
+    if (!payload || typeof payload !== 'object') return null;
+    return saveLocalLibraryCache(app.getPath('userData'), payload);
+  }
+);
+
+ipcMain.handle(
+  'local-library-incremental-scan',
+  (_e, extraFolders?: string[]) =>
+    incrementalScanLocalFolders(
+      app.getPath('userData'),
+      Array.isArray(extraFolders) ? extraFolders : undefined
+    )
+);
+
+ipcMain.handle('local-library-remove-folder', (_e, folderPath: string) =>
+  typeof folderPath === 'string' && folderPath
+    ? removeLocalLibraryFolder(app.getPath('userData'), folderPath)
+    : null
+);
+
+function resolveShowInFolderTarget(rawTarget: string): string | null {
+  const trimmed = rawTarget.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('waveform-local://')) {
+    try {
+      const parsed = new URL(trimmed);
+      const filePath = parsed.searchParams.get('path');
+      return filePath ? path.resolve(filePath) : null;
+    } catch {
+      return null;
+    }
+  }
+  if (trimmed.startsWith('file://')) {
+    try {
+      return path.resolve(fileURLToPath(trimmed));
+    } catch {
+      const stripped = decodeURIComponent(trimmed.replace(/^file:\/\/\/?/i, ''));
+      return stripped ? path.resolve(stripped) : null;
+    }
+  }
+  return path.resolve(trimmed);
+}
+
+ipcMain.handle('show-item-in-folder', (_e, filePathOrUrl: string) => {
+  if (typeof filePathOrUrl !== 'string') return false;
+  const resolvedPath = resolveShowInFolderTarget(filePathOrUrl);
+  if (!resolvedPath) return false;
+  try {
+    electronNs.shell?.showItemInFolder(resolvedPath);
+    return true;
+  } catch {
+    return false;
+  }
+});
 
 // ---------- Accounts: YouTube Music + Spotify ----------
 type Provider = 'ytmusic' | 'spotify';
@@ -942,6 +1189,114 @@ ipcMain.handle('spotify-get-playlist-tracks', async (_e, playlistId: string) => 
 ipcMain.handle('resolve-youtube-stream', async (_e, videoId: string) => {
   if (!videoId || typeof videoId !== 'string') return null;
   return resolveYoutubeStreamForIpc(videoId, path.join(app.getPath('userData'), 'stream-cache'));
+});
+
+interface ArtworkPixelsResult {
+  width: number;
+  height: number;
+  rgba: Uint8Array;
+}
+
+const ARTWORK_PIXELS_CACHE_MAX = 120;
+const artworkPixelsCache = new Map<string, ArtworkPixelsResult>();
+const artworkPixelsInFlight = new Map<string, Promise<ArtworkPixelsResult | null>>();
+
+async function decodeArtworkPixelsFromUrl(rawUrl: string): Promise<ArtworkPixelsResult | null> {
+  const url = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!url) return null;
+
+  const cached = artworkPixelsCache.get(url);
+  if (cached) {
+    artworkPixelsCache.delete(url);
+    artworkPixelsCache.set(url, cached);
+    return cached;
+  }
+
+  const pending = artworkPixelsInFlight.get(url);
+  if (pending) return pending;
+
+  const task = (async (): Promise<ArtworkPixelsResult | null> => {
+    try {
+      let buf: Buffer | null = null;
+      const dataMatch = /^data:image\/[^,;]+(?:;[^,;]+)*;base64,(.+)$/is.exec(url);
+      if (dataMatch) {
+        buf = Buffer.from(dataMatch[1], 'base64');
+      } else {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.protocol === 'waveform-local:') {
+          let res: Response | null = null;
+          if (parsedUrl.hostname === 'art') {
+            res = await resolveArtProtocolResponse(parsedUrl, app.getPath('userData'));
+          } else if (parsedUrl.hostname === 'artist-art') {
+            res = await resolveArtistArtProtocolRequest(parsedUrl, app.getPath('userData'), {});
+          }
+          if (res && res.ok) {
+            buf = Buffer.from(await res.arrayBuffer());
+          }
+        } else if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+          const res = await fetch(parsedUrl.toString(), {
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+              Accept: 'image/png, image/jpeg, image/*;q=0.8',
+            },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(10000),
+          });
+          if (res.ok) {
+            const ab = await res.arrayBuffer();
+            if (ab.byteLength > 0 && ab.byteLength <= 25 * 1024 * 1024) {
+              buf = Buffer.from(ab);
+            }
+          }
+        }
+      }
+
+      if (!buf || buf.byteLength === 0) return null;
+
+      const img = nativeImage.createFromBuffer(buf);
+      if (!img || img.isEmpty()) return null;
+
+      const resized = img.resize({ width: 48, height: 48, quality: 'good' });
+      const { width, height } = resized.getSize();
+      if (width <= 0 || height <= 0) return null;
+
+      const bitmap = resized.toBitmap();
+      const expectedBytes = width * height * 4;
+      if (!bitmap || bitmap.byteLength < expectedBytes) return null;
+
+      // nativeImage.toBitmap() returns BGRA bytes; convert to RGBA for OKLCH extractor
+      const rgba = new Uint8Array(expectedBytes);
+      for (let i = 0; i < expectedBytes; i += 4) {
+        rgba[i] = bitmap[i + 2];
+        rgba[i + 1] = bitmap[i + 1];
+        rgba[i + 2] = bitmap[i];
+        rgba[i + 3] = bitmap[i + 3];
+      }
+
+      const result: ArtworkPixelsResult = { width, height, rgba };
+      if (artworkPixelsCache.has(url)) {
+        artworkPixelsCache.delete(url);
+      } else if (artworkPixelsCache.size >= ARTWORK_PIXELS_CACHE_MAX) {
+        const oldestKey = artworkPixelsCache.keys().next().value;
+        if (oldestKey !== undefined) artworkPixelsCache.delete(oldestKey);
+      }
+      artworkPixelsCache.set(url, result);
+      return result;
+    } catch {
+      return null;
+    } finally {
+      artworkPixelsInFlight.delete(url);
+    }
+  })();
+
+  artworkPixelsInFlight.set(url, task);
+  return task;
+}
+
+ipcMain.handle('get-artwork-pixels', async (_e, url: string) => {
+  if (!url || typeof url !== 'string') return null;
+  return decodeArtworkPixelsFromUrl(url);
 });
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {

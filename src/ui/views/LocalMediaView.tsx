@@ -1,7 +1,7 @@
 // src/ui/views/LocalMediaView.tsx
 // Local Media Hub (macOS Apple Music Desktop Experience with Liquid Glass):
-// Indexes local FLAC, WAV, M4A, MP3, and OPUS audio files using LocalMediaScanner.ts
-// Features folder scanner, metadata tag extractor, format badges, and DesktopTrackTable integration.
+// Indexes local FLAC, WAV, M4A, MP3, and OPUS audio files with persistent disk cache,
+// multi-folder management (rescan & remove), metadata extraction, and DesktopTrackTable integration.
 
 import React, { useState, useMemo, memo } from 'react';
 import {
@@ -9,9 +9,10 @@ import {
   FolderOpen,
   Search,
   Music2,
-  Sparkles,
   RefreshCw,
   FolderSync,
+  Trash2,
+  Folder,
 } from 'lucide-react';
 import { useLibraryStore } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
@@ -24,30 +25,36 @@ export interface LocalMediaViewProps {
   onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
 }
 
+function normalizePathPrefix(p: string): string {
+  return String(p || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
 export const LocalMediaView: React.FC<LocalMediaViewProps> = memo(({ onOpenContextMenu }) => {
-  const [folderPath, setFolderPath] = useState(() => (typeof localStorage !== 'undefined' && localStorage.getItem('waveform.localMusicFolder')) || 'C:\\Music');
+  const [folderPath, setFolderPath] = useState(
+    () => (typeof localStorage !== 'undefined' && localStorage.getItem('waveform.localMusicFolder')) || 'C:\\Music'
+  );
   const [searchFilter, setSearchFilter] = useState('');
 
   const {
     localSongs = [],
+    localFolders = [],
     scanState,
     startLocalMediaScan,
+    removeLocalFolder,
+    upsertLocalTrackPatch,
   } = useLibraryStore();
 
   const runScan = async (folder: string) => {
-    if (!folder.trim()) return;
+    const trimmed = folder.trim();
+    if (!trimmed) return;
     try {
       const api = (window as any).electronAPI;
       // Electron: real scan via main process; otherwise store falls back to its web preview scan.
       const scanner = api?.scanLocalFolder ? { scanDirectory: (p: string) => api.scanLocalFolder(p) } : null;
-      const scanned = await startLocalMediaScan(scanner as any, folder.trim());
+      const scanned = await startLocalMediaScan(scanner as any, trimmed);
       if (Array.isArray(scanned) && scanned.length > 0) {
         void enrichLocalTracksInBackground(scanned, (videoId, patch) => {
-          const libState = useLibraryStore.getState();
-          const updatedSongs = libState.localSongs.map((s) =>
-            s.videoId === videoId ? { ...s, ...patch } : s
-          );
-          libState.setLocalSongs(updatedSongs);
+          void upsertLocalTrackPatch(videoId, patch);
 
           const playerState = usePlayerStore.getState();
           if (playerState.currentTrack?.videoId === videoId) {
@@ -70,10 +77,42 @@ export const LocalMediaView: React.FC<LocalMediaViewProps> = memo(({ onOpenConte
     setFolderPath(res.folderPath);
     try {
       localStorage.setItem('waveform.localMusicFolder', res.folderPath);
-      await useSettingsStore.getState().updateSettings({ localMusicFolders: [res.folderPath] } as any);
-    } catch { /* persistence is best-effort */ }
+      const nextFolders = localFolders.includes(res.folderPath)
+        ? localFolders
+        : [...localFolders, res.folderPath];
+      await useSettingsStore.getState().updateSettings({ 'storage.localFolders': nextFolders });
+    } catch {
+      /* persistence is best-effort */
+    }
     void runScan(res.folderPath);
   };
+
+  const handleRemoveFolder = async (targetFolder: string) => {
+    try {
+      await removeLocalFolder(targetFolder);
+    } catch (err) {
+      console.warn('[LocalMediaView] Remove folder failed:', err);
+    }
+  };
+
+  const folderTrackCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const folder of localFolders) {
+      const folderNorm = normalizePathPrefix(folder);
+      const prefix = `${folderNorm}/`;
+      let count = 0;
+      for (const song of localSongs) {
+        const songFolder = normalizePathPrefix(String((song as any).folderPath || ''));
+        const songFile = normalizePathPrefix(String(song.localFilePath || ''));
+        if (songFolder === folderNorm || songFile === folderNorm || songFile.startsWith(prefix)) {
+          count++;
+        }
+      }
+      counts.set(folder, count);
+    }
+    return counts;
+  }, [localFolders, localSongs]);
+
   const filteredTracks = useMemo(() => {
     if (!searchFilter.trim()) return localSongs;
     const q = searchFilter.toLowerCase().trim();
@@ -98,7 +137,7 @@ export const LocalMediaView: React.FC<LocalMediaViewProps> = memo(({ onOpenConte
             Local Media
           </h1>
           <p className="text-xs text-[#A1A1A6] pt-1">
-            Scan and stream your personal FLAC, WAV, ALAC, and MP3 collection with 68-bar waveform analysis.
+            Scan and stream your personal FLAC, WAV, ALAC, and MP3 collection with persistent disk caching and 68-bar waveform analysis.
           </p>
         </div>
       </div>
@@ -112,7 +151,7 @@ export const LocalMediaView: React.FC<LocalMediaViewProps> = memo(({ onOpenConte
           <div>
             <h2 className="text-base font-bold text-white">Directory Scanner</h2>
             <p className="text-xs text-[#A1A1A6]">
-              Point WaveForm to an audio directory on your computer to index metadata and embedded artwork.
+              Add one or more audio directories on your computer. Indexed tracks and artwork persist automatically across restarts.
             </p>
           </div>
         </div>
@@ -150,11 +189,62 @@ export const LocalMediaView: React.FC<LocalMediaViewProps> = memo(({ onOpenConte
         {scanState.isScanning && (
           <div className="space-y-2 pt-2">
             <div className="flex items-center justify-between text-xs text-[#A1A1A6]">
-              <span>Extracting audio tags & waveform samples...</span>
+              <span>Extracting audio tags &amp; embedded artwork...</span>
               <span className="font-mono text-white font-bold">{scanState.scannedFiles} files indexed</span>
             </div>
             <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
               <div className="h-full bg-[#FA2D48] animate-pulse w-3/4 rounded-full" />
+            </div>
+          </div>
+        )}
+
+        {/* Scanned Folders List with Rescan & Remove */}
+        {localFolders.length > 0 && (
+          <div className="pt-3 border-t border-white/10 space-y-2">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-[#8E8E93]">
+              Scanned Folders ({localFolders.length})
+            </div>
+            <div className="space-y-1.5">
+              {localFolders.map((folder) => {
+                const count = folderTrackCounts.get(folder) ?? 0;
+                const isScanningThis = scanState.isScanning && scanState.currentFolder === folder;
+                return (
+                  <div
+                    key={folder}
+                    className="flex items-center justify-between gap-3 px-3.5 py-2 rounded-2xl bg-white/[0.04] border border-white/10"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Folder size={14} className="text-[#FA2D48] shrink-0" />
+                      <span className="text-xs text-white font-medium truncate" title={folder}>
+                        {folder}
+                      </span>
+                      <span className="text-[10px] font-mono text-[#8E8E93] shrink-0">
+                        {count} {count === 1 ? 'track' : 'tracks'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => runScan(folder)}
+                        disabled={scanState.isScanning}
+                        title="Rescan Folder"
+                        className="spring-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/[0.06] hover:bg-white/[0.12] disabled:opacity-40 text-[11px] font-semibold text-white cursor-pointer transition-colors"
+                      >
+                        <RefreshCw size={11} className={isScanningThis ? 'animate-spin' : ''} />
+                        <span>Rescan</span>
+                      </button>
+                      <button
+                        onClick={() => handleRemoveFolder(folder)}
+                        disabled={scanState.isScanning}
+                        title="Remove Folder"
+                        className="spring-press flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/[0.06] hover:bg-red-500/20 disabled:opacity-40 text-[11px] font-semibold text-[#A1A1A6] hover:text-red-400 cursor-pointer transition-colors"
+                      >
+                        <Trash2 size={11} />
+                        <span>Remove</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

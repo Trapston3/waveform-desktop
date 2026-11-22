@@ -1,6 +1,6 @@
 // src/lyricVisualizer/ui/VisualizerControlBar.tsx
 // Hoverable control bar and expandable settings popover for LyricVisualizer:
-// 13 visual styles, 7 bundled OFL fonts, typography scale (0.7x..1.8x),
+// 12 visual styles, 8 bundled fonts, typography scale (0.7x..1.8x),
 // per-song timing nudge (-2000..+2000ms, +/-50ms + Reset), OKLCH color match,
 // audio-reactive toggle, multi-monitor desktop overlay, fullscreen ambient mode,
 // and Starlight Harbor sandbox demo controls.
@@ -30,15 +30,21 @@ import {
   BUNDLED_FONTS,
   type BundledFontId,
   getBundledFontCssFamily,
+  getStyleDefinition,
+  resolveStyleVariationId,
   VISUAL_STYLE_DEFINITIONS,
   type VisualStyleId,
 } from '../core';
 import {
   IDLE_AMBIENT_OPTIONS,
+  MAX_BACKGROUND_OPACITY,
   MAX_FONT_SIZE_SCALE,
   MAX_OVERLAY_OPACITY,
+  MAX_VIGNETTE_STRENGTH,
+  MIN_BACKGROUND_OPACITY,
   MIN_FONT_SIZE_SCALE,
   MIN_OVERLAY_OPACITY,
+  MIN_VIGNETTE_STRENGTH,
   OFFSET_STEP_MS,
   useLyricVisualizerStore,
 } from '../state/lyricVisualizerStore';
@@ -71,12 +77,16 @@ export const VisualizerControlBar: React.FC<VisualizerControlBarProps> = ({
   const availableMonitors = useLyricVisualizerStore((s) => s.availableMonitors);
 
   const setStyleId = useLyricVisualizerStore((s) => s.setStyleId);
+  const setStyleVariation = useLyricVisualizerStore((s) => s.setStyleVariation);
   const cycleStyle = useLyricVisualizerStore((s) => s.cycleStyle);
   const setFontId = useLyricVisualizerStore((s) => s.setFontId);
   const setFontSizeScale = useLyricVisualizerStore((s) => s.setFontSizeScale);
   const setAlbumArtColorMatch = useLyricVisualizerStore((s) => s.setAlbumArtColorMatch);
   const setAudioReactive = useLyricVisualizerStore((s) => s.setAudioReactive);
   const setReduceMotion = useLyricVisualizerStore((s) => s.setReduceMotion);
+  const setBackgroundOpacity = useLyricVisualizerStore((s) => s.setBackgroundOpacity);
+  const setVignetteStrength = useLyricVisualizerStore((s) => s.setVignetteStrength);
+  const setTextAlign = useLyricVisualizerStore((s) => s.setTextAlign);
 
   const nudgeSongOffsetMs = useLyricVisualizerStore((s) => s.nudgeSongOffsetMs);
   const setSongOffsetMs = useLyricVisualizerStore((s) => s.setSongOffsetMs);
@@ -116,6 +126,9 @@ export const VisualizerControlBar: React.FC<VisualizerControlBarProps> = ({
       ? `+${currentSongOffsetMs}ms`
       : `${currentSongOffsetMs}ms`;
 
+  const activeStyleDef = getStyleDefinition(config.styleId);
+  const activeVariationId = resolveStyleVariationId(config.styleId, config.variationByStyle);
+
   const bridge = getSharedWaveFormPlaybackBridge();
 
   return (
@@ -132,10 +145,39 @@ export const VisualizerControlBar: React.FC<VisualizerControlBarProps> = ({
               <div className="flex items-center justify-between border-b border-white/10 pb-2">
                 <span className="font-semibold text-white/90 flex items-center gap-1.5">
                   <Type size={13} />
-                  <span>Typography, Sync & Visuals</span>
+                  <span>Typography, Variations & Sync</span>
                 </span>
-                <span className="text-[10px] text-white/50">7 Bundled OFL Fonts</span>
+                <span className="text-[10px] text-white/50">{BUNDLED_FONTS.length} Bundled Fonts</span>
               </div>
+
+              {/* Active Style Variation Selector */}
+              {activeStyleDef.variations.length > 0 && (
+                <div className="space-y-1">
+                  <span className="text-[11px] text-white/65">
+                    {activeStyleDef.label} Variation
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {activeStyleDef.variations.map((v) => {
+                      const active = v.id === activeVariationId;
+                      return (
+                        <button
+                          key={v.id}
+                          type="button"
+                          onClick={() => setStyleVariation(activeStyleDef.id, v.id)}
+                          className={`px-2.5 py-1 rounded-lg border text-[11px] cursor-pointer transition-colors ${
+                            active
+                              ? 'bg-cyan-500/25 border-cyan-400/60 text-white font-semibold'
+                              : 'bg-white/5 border-white/10 text-white/65 hover:text-white'
+                          }`}
+                          title={v.description}
+                        >
+                          {v.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Font Selector & Size Scale */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -172,6 +214,67 @@ export const VisualizerControlBar: React.FC<VisualizerControlBarProps> = ({
                     className="w-full h-1.5 accent-cyan-400 bg-white/20 rounded-lg cursor-pointer mt-1.5"
                   />
                 </label>
+              </div>
+
+              {/* Background Opacity, Vignette Strength & Text Alignment */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1 border-t border-white/10">
+                <label className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between text-[11px] text-white/65">
+                    <span>Bg Opacity</span>
+                    <span className="font-mono text-white">
+                      {Math.round(config.backgroundOpacity * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    aria-label="Background Opacity"
+                    type="range"
+                    min={MIN_BACKGROUND_OPACITY}
+                    max={MAX_BACKGROUND_OPACITY}
+                    step="0.05"
+                    value={config.backgroundOpacity}
+                    onChange={(e) => setBackgroundOpacity(parseFloat(e.target.value))}
+                    className="w-full h-1.5 accent-cyan-400 bg-white/20 rounded-lg cursor-pointer mt-1"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between text-[11px] text-white/65">
+                    <span>Vignette</span>
+                    <span className="font-mono text-white">
+                      {Math.round(config.vignetteStrength * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    aria-label="Vignette Strength"
+                    type="range"
+                    min={MIN_VIGNETTE_STRENGTH}
+                    max={MAX_VIGNETTE_STRENGTH}
+                    step="0.05"
+                    value={config.vignetteStrength}
+                    onChange={(e) => setVignetteStrength(parseFloat(e.target.value))}
+                    className="w-full h-1.5 accent-cyan-400 bg-white/20 rounded-lg cursor-pointer mt-1"
+                  />
+                </label>
+
+                <div className="flex flex-col gap-1">
+                  <span className="text-[11px] text-white/65">Alignment</span>
+                  <div className="flex items-center gap-1">
+                    {(['center', 'left'] as const).map((align) => (
+                      <button
+                        key={align}
+                        type="button"
+                        onClick={() => setTextAlign(align)}
+                        className={`flex-1 py-1 rounded-lg border text-[11px] capitalize cursor-pointer transition-colors ${
+                          config.textAlign === align
+                            ? 'bg-cyan-500/25 border-cyan-400/60 text-white font-semibold'
+                            : 'bg-white/5 border-white/10 text-white/65 hover:text-white'
+                        }`}
+                      >
+                        {align}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               {/* Per-Song Timing Offset Nudge (-2000..+2000ms) */}
@@ -432,7 +535,7 @@ export const VisualizerControlBar: React.FC<VisualizerControlBarProps> = ({
 
       {/* Primary Compact Control Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-neutral-950/80 border border-white/15 backdrop-blur-xl shadow-lg">
-        {/* Left Cluster: 13 Visual Styles Switcher */}
+        {/* Left Cluster: 12 Visual Styles Switcher */}
         <div className="flex items-center gap-1.5">
           <button
             type="button"
@@ -479,7 +582,7 @@ export const VisualizerControlBar: React.FC<VisualizerControlBarProps> = ({
                 ? 'bg-white/20 border-white/40 text-white'
                 : 'bg-white/5 border-white/10 text-white/75 hover:text-white'
             }`}
-            title="Typography, 7 OFL Fonts & Per-Song Timing Offset"
+            title="Typography, 8 Bundled Fonts & Per-Song Timing Offset"
           >
             <Sliders size={12} />
             {!compact && <span>Style & Sync</span>}

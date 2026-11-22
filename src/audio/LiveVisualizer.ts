@@ -4,11 +4,33 @@
 
 export type LiveEnergySubscriber = (energy32: Float32Array) => void;
 
+let latestVisualizerInstance: LiveVisualizer | null = null;
+
+export function getEstimatedBpm(): number {
+  return latestVisualizerInstance ? latestVisualizerInstance.getEstimatedBpm() : 120;
+}
+
+export function getBeatStrength(): number {
+  return latestVisualizerInstance ? latestVisualizerInstance.getBeatStrength() : 0;
+}
+
 export class LiveVisualizer {
   public static readonly BANDS = 32;
 
   private subscribers = new Set<LiveEnergySubscriber>();
   private readonly sharedEnergy32 = new Float32Array(LiveVisualizer.BANDS);
+
+  // Zero-GC onset BPM estimator ring buffer (inter-onset intervals in 300ms..1100ms)
+  private readonly onsetIntervalRing = new Float32Array(12);
+  private onsetRingWriteIdx = 0;
+  private onsetRingCount = 0;
+  private lastOnsetTimeMs = 0;
+  private lastBeatClockMs = 0;
+  private lastWallClockMs = 0;
+  private rollingBassEnergy = 0;
+
+  public estimatedBpm = 120;
+  public beatStrength = 0;
 
   // State variables for dual 1-pole split filters
   private lp1 = 0;
@@ -21,6 +43,96 @@ export class LiveVisualizer {
 
   private analyser: AnalyserNode | null = null;
   private fftBuffer: Float32Array<ArrayBuffer> | null = null;
+
+  constructor() {
+    latestVisualizerInstance = this;
+  }
+
+  public getEstimatedBpm(): number {
+    return this.estimatedBpm;
+  }
+
+  public getBeatStrength(): number {
+    return this.beatStrength;
+  }
+
+  /**
+   * Zero-GC onset detector and BPM estimator (65..185 BPM, default 120)
+   * with exponentially decaying beatStrength (0..1).
+   */
+  public updateBeatMetrics(bassEnergy: number, explicitNowMs?: number, blockDurationMs = 16.67): boolean {
+    latestVisualizerInstance = this;
+    const wallNow =
+      typeof explicitNowMs === 'number' && Number.isFinite(explicitNowMs)
+        ? explicitNowMs
+        : typeof performance !== 'undefined'
+        ? performance.now()
+        : Date.now();
+
+    let dtMs: number;
+    if (typeof explicitNowMs === 'number' && Number.isFinite(explicitNowMs)) {
+      dtMs = this.lastBeatClockMs > 0 ? Math.max(0, explicitNowMs - this.lastBeatClockMs) : blockDurationMs;
+      this.lastBeatClockMs = explicitNowMs;
+      this.lastWallClockMs = wallNow;
+    } else {
+      const wallDelta = this.lastWallClockMs > 0 ? Math.max(0, wallNow - this.lastWallClockMs) : blockDurationMs;
+      this.lastWallClockMs = wallNow;
+      dtMs = wallDelta < blockDurationMs * 0.5 ? blockDurationMs : wallDelta;
+      this.lastBeatClockMs = (this.lastBeatClockMs > 0 ? this.lastBeatClockMs : wallNow) + dtMs;
+    }
+
+    const nowMs = this.lastBeatClockMs;
+    const clampedDtSec = Math.max(0, Math.min(0.25, dtMs / 1000));
+
+    // Exponentially decay beatStrength (time constant ~160ms)
+    if (clampedDtSec > 0) {
+      this.beatStrength *= Math.exp(-clampedDtSec / 0.16);
+      if (this.beatStrength < 0.001) {
+        this.beatStrength = 0;
+      }
+    }
+
+    const bass = Math.max(0, Math.min(1, Number.isFinite(bassEnergy) ? bassEnergy : 0));
+    const prevAvg = this.rollingBassEnergy;
+    const ioiMs = this.lastOnsetTimeMs > 0 ? nowMs - this.lastOnsetTimeMs : 0;
+    const isOnset =
+      bass > 0.18 &&
+      bass > Math.max(0.22, prevAvg * 1.28) &&
+      (this.lastOnsetTimeMs === 0 || ioiMs > 170);
+
+    if (isOnset) {
+      const impulse = Math.max(0.55, Math.min(1.0, 0.45 + (bass - prevAvg * 0.75) * 1.8));
+      if (impulse > this.beatStrength) {
+        this.beatStrength = impulse;
+      }
+
+      if (this.lastOnsetTimeMs > 0 && ioiMs >= 300 && ioiMs <= 1100) {
+        this.onsetIntervalRing[this.onsetRingWriteIdx] = ioiMs;
+        this.onsetRingWriteIdx = (this.onsetRingWriteIdx + 1) % 12;
+        if (this.onsetRingCount < 12) {
+          this.onsetRingCount++;
+        }
+
+        let sumIoi = 0;
+        for (let i = 0; i < this.onsetRingCount; i++) {
+          sumIoi += this.onsetIntervalRing[i];
+        }
+        const meanIoi = sumIoi / this.onsetRingCount;
+        if (meanIoi > 0) {
+          const candidateBpm = Math.max(65, Math.min(185, 60000 / meanIoi));
+          this.estimatedBpm = Math.max(
+            65,
+            Math.min(185, this.estimatedBpm * 0.65 + candidateBpm * 0.35)
+          );
+        }
+      }
+
+      this.lastOnsetTimeMs = nowMs;
+    }
+
+    this.rollingBassEnergy = prevAvg * 0.82 + bass * 0.18;
+    return isOnset;
+  }
 
   /**
    * Computes 32-band energy directly from a Float32Array PCM block with zero heap allocations.
@@ -68,6 +180,13 @@ export class LiveVisualizer {
    */
   public processPcmBlock(pcmBlock: Float32Array): void {
     LiveVisualizer.compute32BandPcmEnergy(pcmBlock, this.sharedEnergy32);
+    const bassAvg =
+      (this.sharedEnergy32[0] +
+        this.sharedEnergy32[1] +
+        this.sharedEnergy32[2] +
+        this.sharedEnergy32[3]) *
+      0.25;
+    this.updateBeatMetrics(bassAvg, undefined, Math.max(10, (pcmBlock.length / 44100) * 1000));
     this.emit();
   }
 
@@ -106,6 +225,13 @@ export class LiveVisualizer {
       this.sharedEnergy32[b] = count > 0 ? sum / count : 0;
     }
 
+    const bassAvg =
+      (this.sharedEnergy32[0] +
+        this.sharedEnergy32[1] +
+        this.sharedEnergy32[2] +
+        this.sharedEnergy32[3]) *
+      0.25;
+    this.updateBeatMetrics(bassAvg);
     this.emit();
   }
 
@@ -211,6 +337,8 @@ export class LiveVisualizer {
       this.bassLevel += (rawBass > this.bassLevel ? attackCoeff : decayCoeff) * (rawBass - this.bassLevel);
       this.midLevel += (rawMid > this.midLevel ? attackCoeff : decayCoeff) * (rawMid - this.midLevel);
       this.highLevel += (rawHigh > this.highLevel ? attackCoeff : decayCoeff) * (rawHigh - this.highLevel);
+
+      this.updateBeatMetrics(rawBass, undefined, blockDt * 1000);
     }
 
     this.emit();
@@ -228,6 +356,15 @@ export class LiveVisualizer {
 
   public reset(): void {
     this.sharedEnergy32.fill(0);
+    this.onsetIntervalRing.fill(0);
+    this.onsetRingWriteIdx = 0;
+    this.onsetRingCount = 0;
+    this.lastOnsetTimeMs = 0;
+    this.lastBeatClockMs = 0;
+    this.lastWallClockMs = 0;
+    this.rollingBassEnergy = 0;
+    this.estimatedBpm = 120;
+    this.beatStrength = 0;
     this.lp1 = 0;
     this.lp2 = 0;
     this.rmsLevel = 0;

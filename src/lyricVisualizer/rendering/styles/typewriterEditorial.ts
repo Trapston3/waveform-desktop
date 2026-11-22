@@ -1,19 +1,52 @@
-// Style 3: TypewriterEditorial
-// Literary serif spotlight with crisp animated cursor, ink reveal per word, warm paper/editorial margin grid.
+// Style: TypewriterEditorial
+// Variations:
+//  0: 'dark-slate' (default) - nocturnal literary slate surface with silver-ivory serif ink
+//  1: 'warm-ink'             - warm dark-editorial manuscript surface with parchment ink & ledger rules
 
 import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawRoundedRectPath,
   formatTimestamp,
-  getActiveLine,
+  getFocalRect,
+  isTransparentStage,
+  isUnsyncedLyrics,
   type ILyricVisualStyle,
+  type StyleMeasurementSpec,
 } from '../styleInterface';
+
+function resolveSerifFamily(fontFamily: string): string {
+  return fontFamily.includes('serif')
+    ? fontFamily
+    : `"Instrument Serif", Fraunces, ${fontFamily}`;
+}
 
 export class TypewriterEditorialStyle implements ILyricVisualStyle {
   readonly id = 'TypewriterEditorial' as const;
   readonly name = 'Typewriter Editorial';
   readonly webGlEffect = 'none' as const;
+
+  private scrollY = 0;
+  private initialized = false;
+
+  getVariationIndex(variationId?: string): 0 | 1 {
+    return variationId === 'warm-ink' ? 1 : 0;
+  }
+
+  getMeasurementSpec(frame: StyleFrameContext): StyleMeasurementSpec {
+    return {
+      fontWeight: 600,
+      fontSizeMultiplier: 1.06,
+      fontFamilyOverride: resolveSerifFamily(frame.fontFamily),
+      maxLineWidthRatio: 0.76,
+    };
+  }
+
+  reset(): void {
+    this.scrollY = 0;
+    this.initialized = false;
+  }
 
   render(
     ctx: CanvasRenderingContext2D,
@@ -21,114 +54,213 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
     width: number,
     height: number
   ): void {
-    const isOverlay = Boolean(frame.isOverlayMode);
-    const marginX = Math.max(36, Math.round(width * 0.1));
+    const isTransparent = isTransparentStage(frame);
+    const varIdx = this.getVariationIndex(frame.variationId);
+    const focal = getFocalRect(frame, width);
+    const marginX = Math.max(36, Math.round(focal.width * 0.1));
+    const globalLeftMargin = focal.left + marginX;
 
-    // Warm dark-editorial paper surface & subtle margin rules
-    if (!isOverlay) {
+    const bgAlpha =
+      typeof frame.backgroundOpacity === 'number' && Number.isFinite(frame.backgroundOpacity)
+        ? clamp01(frame.backgroundOpacity)
+        : 0.95;
+    const vigStrength =
+      typeof frame.vignetteStrength === 'number' && Number.isFinite(frame.vignetteStrength)
+        ? clamp01(frame.vignetteStrength)
+        : 0.55;
+
+    // Dark-slate or warm-ink editorial paper surface & subtle margin rules
+    if (!isTransparent) {
+      ctx.save();
+      ctx.globalAlpha = bgAlpha;
       const bg = ctx.createLinearGradient(0, 0, 0, height);
-      bg.addColorStop(0, '#161311');
-      bg.addColorStop(1, '#1e1915');
+      if (varIdx === 0) {
+        bg.addColorStop(0, '#0b0e14');
+        bg.addColorStop(1, '#111622');
+      } else {
+        bg.addColorStop(0, '#161311');
+        bg.addColorStop(1, '#1e1915');
+      }
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, width, height);
 
-      ctx.save();
-      ctx.strokeStyle = 'rgba(244, 232, 212, 0.08)';
+      ctx.strokeStyle =
+        varIdx === 0 ? 'rgba(203, 213, 225, 0.065)' : 'rgba(244, 232, 212, 0.08)';
       ctx.lineWidth = 1;
-      // Vertical editorial margin rules
       ctx.beginPath();
-      ctx.moveTo(marginX, 24);
-      ctx.lineTo(marginX, height - 24);
+      ctx.moveTo(globalLeftMargin, 24);
+      ctx.lineTo(globalLeftMargin, height - 24);
       ctx.moveTo(width - marginX, 24);
       ctx.lineTo(width - marginX, height - 24);
-      // Subtle ruled ledger lines
       const ruleStep = 44;
       for (let y = 64; y < height - 40; y += ruleStep) {
-        ctx.moveTo(marginX, y);
+        ctx.moveTo(globalLeftMargin, y);
         ctx.lineTo(width - marginX, y);
       }
       ctx.stroke();
+
+      if (vigStrength > 0.01) {
+        const vig = ctx.createRadialGradient(
+          width * 0.5,
+          height * 0.5,
+          Math.min(width, height) * 0.28,
+          width * 0.5,
+          height * 0.5,
+          Math.max(width, height) * 0.78
+        );
+        vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        vig.addColorStop(1, `rgba(4, 5, 8, ${(0.72 * vigStrength).toFixed(3)})`);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = vig;
+        ctx.fillRect(0, 0, width, height);
+      }
       ctx.restore();
     }
 
-    const { line, measured, index } = getActiveLine(frame);
-    if (!line || !measured || !frame.layout) {
+    const layout = frame.layout;
+    if (!layout || layout.lines.length === 0) {
       drawEmptyState(ctx, frame, width, height, 'Awaiting manuscript...');
       return;
     }
 
-    const serifFamily = frame.fontFamily.includes('serif')
-      ? frame.fontFamily
-      : `"Instrument Serif", Fraunces, ${frame.fontFamily}`;
-    const fontSize = Math.round(frame.layout.fontSizePx * 1.06);
-    const contentX = marginX + 20;
+    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
+    const activeLine = layout.lines[activeIdx];
+    const targetScrollY = activeLine.y + activeLine.height * 0.5;
+
+    if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
+      this.scrollY = targetScrollY;
+      this.initialized = true;
+    } else {
+      const rate = Math.min(1, Math.max(0.016, frame.deltaSeconds) * 8.0);
+      this.scrollY += (targetScrollY - this.scrollY) * rate;
+    }
+
+    const manualScroll =
+      typeof frame.manualScrollY === 'number' && Number.isFinite(frame.manualScrollY)
+        ? frame.manualScrollY
+        : 0;
+    const effectiveScrollY = this.scrollY + manualScroll;
+    const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
+
+    const serifFamily = resolveSerifFamily(frame.fontFamily);
+    const fontSize = layout.fontSizePx;
+    const focalMarginX = focal.left > 0 ? Math.max(20, Math.round(focal.width * 0.08)) : marginX;
+    const leftContentX = focalMarginX + 20;
     const centerY = height * 0.48;
+    const unsyncedOrLineLevel = isUnsyncedLyrics(frame) || frame.activeWordIndex < 0;
+    const isCenterAlign = frame.textAlign === 'center';
+    const hoveredIdx = typeof frame.hoveredLineIndex === 'number' ? frame.hoveredLineIndex : -1;
+
+    const inkBright = varIdx === 0 ? '#f8fafc' : '#fff9ee';
+    const inkPast = varIdx === 0 ? '#e2e8f0' : '#faf3e6';
+    const inkGhost = varIdx === 0 ? '#94a3b8' : '#d7cab8';
 
     ctx.save();
+    if (focal.left > 2) {
+      ctx.beginPath();
+      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
+      ctx.clip();
+    }
+    if (focal.left > 0) {
+      ctx.translate(focal.left, 0);
+    }
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
 
     // Editorial folio header
     ctx.font = `500 12px "JetBrains Mono", monospace`;
     ctx.fillStyle = frame.palette.accentPrimary;
-    ctx.globalAlpha = 0.72;
+    ctx.globalAlpha = 0.76;
+    const folioTag = varIdx === 0 ? 'FOLIO // SLATE' : 'FOLIO // WARM-INK';
     ctx.fillText(
-      `LINE ${String(index + 1).padStart(2, '0')}  /  ${formatTimestamp(line.startSeconds)}`,
-      contentX,
-      Math.max(28, centerY - measured.height * 0.5 - 52)
+      `${folioTag}  ·  LINE ${String(activeIdx + 1).padStart(2, '0')}  /  ${formatTimestamp(activeLine.startSeconds)}`,
+      leftContentX,
+      Math.max(26, height * 0.12)
     );
 
-    // Previous line softly printed above
-    if (index > 0) {
-      const prev = frame.layout.lines[index - 1];
-      ctx.font = `400 ${Math.round(fontSize * 0.66)}px ${serifFamily}`;
-      ctx.fillStyle = '#d7cab8';
-      ctx.globalAlpha = 0.35;
-      ctx.fillText(prev.text, contentX, centerY - measured.height * 0.5 - fontSize * 1.15);
-    }
+    for (let i = 0; i < layout.lines.length; i++) {
+      const line = layout.lines[i];
+      const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
+      const screenY = centerY + lineCenterOffset - line.height * 0.5;
 
-    // Active line with per-word ink reveal & animated cursor
-    ctx.font = `600 ${fontSize}px ${serifFamily}`;
-    const lineStartY = centerY - measured.height * 0.5;
-    let cursorX = contentX;
-    let cursorY = lineStartY;
+      if (screenY + line.height < -60 || screenY > height + 60) continue;
+      if (!isBrowsing && Math.abs(i - activeIdx) > 1) continue;
 
-    for (let w = 0; w < measured.words.length; w++) {
-      const word = measured.words[w];
-      const wx = contentX + word.x;
-      const wy = lineStartY + word.y;
+      const isActive = i === activeIdx;
+      const isHovered = i === hoveredIdx;
+      const lineBaseX = isCenterAlign ? Math.max(leftContentX, line.x) : leftContentX;
 
-      if (w < frame.activeWordIndex) {
-        ctx.globalAlpha = 0.95 * frame.lineFadeAlpha;
-        ctx.fillStyle = '#faf3e6';
-        ctx.fillText(word.text, wx, wy);
-        cursorX = wx + word.width + 6;
-        cursorY = wy;
-      } else if (w === frame.activeWordIndex) {
-        const p = clamp01(frame.wordProgress);
-        const charCount = Math.max(1, Math.ceil(word.text.length * Math.max(0.15, p)));
-        const revealed = word.text.slice(0, charCount);
-        ctx.globalAlpha = frame.lineFadeAlpha;
-        ctx.fillStyle = '#fff9ee';
-        ctx.fillText(revealed, wx, wy);
+      const hitLocalX = Math.max(12, lineBaseX - 16);
+      const hitW = Math.min(focal.width - hitLocalX - 12, Math.max(line.width + 32, 180));
+      frame.recordHitRect?.(i, focal.left + hitLocalX, screenY - 6, hitW, line.height + 12);
 
-        const revealedW = ctx.measureText(revealed).width || word.width * p;
-        cursorX = wx + revealedW + 3;
-        cursorY = wy;
-      } else {
-        // Faint paper ghost of upcoming words
-        ctx.globalAlpha = 0.16 * frame.lineFadeAlpha;
-        ctx.fillStyle = '#d7cab8';
-        ctx.fillText(word.text, wx, wy);
+      if (isHovered) {
+        ctx.save();
+        drawRoundedRectPath(ctx, hitLocalX, screenY - 6, hitW, line.height + 12, 8);
+        ctx.fillStyle =
+          varIdx === 0 ? 'rgba(148, 163, 184, 0.1)' : 'rgba(244, 232, 212, 0.09)';
+        ctx.fill();
+        ctx.strokeStyle = frame.palette.accentPrimary;
+        ctx.globalAlpha = 0.42;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
       }
-    }
 
-    // Crisp animated typewriter cursor
-    const blinkOn = frame.reduceMotion || Math.sin(frame.timeSeconds * 7.5) >= -0.2;
-    if (blinkOn) {
-      ctx.globalAlpha = 0.92;
-      ctx.fillStyle = frame.palette.accentPrimary;
-      ctx.fillRect(cursorX, cursorY + 4, 3, Math.max(18, fontSize * 0.95));
+      if (isActive) {
+        ctx.font = `600 ${fontSize}px ${serifFamily}`;
+        let cursorX = lineBaseX;
+        let cursorY = screenY;
+
+        for (let w = 0; w < line.words.length; w++) {
+          const word = line.words[w];
+          const wx = lineBaseX + word.x;
+          const wy = screenY + word.y;
+
+          if (unsyncedOrLineLevel || w < frame.activeWordIndex) {
+            ctx.globalAlpha = 0.96 * frame.lineFadeAlpha;
+            ctx.fillStyle = inkPast;
+            ctx.fillText(word.text, wx, wy);
+            cursorX = wx + word.width + 6;
+            cursorY = wy;
+          } else if (w === frame.activeWordIndex) {
+            const p = clamp01(frame.wordProgress);
+            const charCount = Math.max(1, Math.ceil(word.text.length * Math.max(0.15, p)));
+            const revealed = word.text.slice(0, charCount);
+            ctx.globalAlpha = frame.lineFadeAlpha;
+            ctx.fillStyle = inkBright;
+            ctx.fillText(revealed, wx, wy);
+
+            const revealedW = ctx.measureText(revealed).width || word.width * p;
+            cursorX = wx + revealedW + 3;
+            cursorY = wy;
+          } else {
+            ctx.globalAlpha = (isHovered ? 0.48 : 0.28) * frame.lineFadeAlpha;
+            ctx.fillStyle = inkGhost;
+            ctx.fillText(word.text, wx, wy);
+          }
+        }
+
+        // Crisp animated typewriter cursor
+        const blinkOn = frame.reduceMotion || Math.sin(frame.timeSeconds * 7.5) >= -0.2;
+        if (blinkOn) {
+          ctx.globalAlpha = 0.92;
+          ctx.fillStyle = frame.palette.accentPrimary;
+          ctx.fillRect(cursorX, cursorY + 4, 3, Math.max(18, fontSize * 0.95));
+        }
+      } else {
+        const subScale = isBrowsing ? 0.85 : 0.66;
+        const subFont = Math.max(14, Math.round(fontSize * subScale));
+        ctx.save();
+        ctx.font = `400 ${subFont}px ${serifFamily}`;
+        ctx.fillStyle = inkGhost;
+        ctx.globalAlpha = isHovered ? 0.78 : 0.36;
+        for (let w = 0; w < line.words.length; w++) {
+          const word = line.words[w];
+          ctx.fillText(word.text, lineBaseX + word.x * subScale, screenY + word.y * subScale);
+        }
+        ctx.restore();
+      }
     }
 
     ctx.restore();

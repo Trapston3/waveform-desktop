@@ -115,22 +115,106 @@ function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
 
-function hexOrRgbToUnit(colorStr?: string, fallback: [number, number, number] = [0.98, 0.18, 0.28]): [number, number, number] {
-  if (!colorStr) return fallback;
-  if (colorStr.startsWith('#')) {
-    const clean = colorStr.replace('#', '');
-    const r = (parseInt(clean.slice(0, 2), 16) || 0) / 255;
-    const g = (parseInt(clean.slice(2, 4), 16) || 0) / 255;
-    const b = (parseInt(clean.slice(4, 6), 16) || 0) / 255;
-    return [r, g, b];
+function clamp01(v: number): number {
+  return v <= 0 ? 0 : v >= 1 ? 1 : v;
+}
+
+function hslToUnitRgb(hDeg: number, s: number, l: number): [number, number, number] {
+  const h = (((hDeg % 360) + 360) % 360) / 360;
+  const sat = clamp01(s);
+  const lig = clamp01(l);
+  if (sat === 0) return [lig, lig, lig];
+  const q = lig < 0.5 ? lig * (1 + sat) : lig + sat - lig * sat;
+  const p = 2 * lig - q;
+  const hue2rgb = (t: number) => {
+    let tt = t;
+    if (tt < 0) tt += 1;
+    if (tt > 1) tt -= 1;
+    if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+    if (tt < 1 / 2) return q;
+    if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+    return p;
+  };
+  return [hue2rgb(h + 1 / 3), hue2rgb(h), hue2rgb(h - 1 / 3)];
+}
+
+function parseColorToUnitRgb(colorStr?: string, fallback: [number, number, number] = [0.16, 0.20, 0.28]): [number, number, number] {
+  if (typeof colorStr !== 'string') return fallback;
+  const trimmed = colorStr.trim();
+  if (!trimmed) return fallback;
+
+  const hexMatch = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(trimmed);
+  if (hexMatch) {
+    const hex = hexMatch[1];
+    if (hex.length <= 4) {
+      return [
+        parseInt(hex[0] + hex[0], 16) / 255,
+        parseInt(hex[1] + hex[1], 16) / 255,
+        parseInt(hex[2] + hex[2], 16) / 255,
+      ];
+    }
+    return [
+      parseInt(hex.slice(0, 2), 16) / 255,
+      parseInt(hex.slice(2, 4), 16) / 255,
+      parseInt(hex.slice(4, 6), 16) / 255,
+    ];
   }
-  if (colorStr.startsWith('rgb')) {
-    const nums = colorStr.match(/\d+(\.\d+)?/g);
-    if (nums && nums.length >= 3) {
-      return [parseFloat(nums[0]) / 255, parseFloat(nums[1]) / 255, parseFloat(nums[2]) / 255];
+
+  const rgbMatch = /^rgba?\(\s*([0-9.]+%?)\s*[,\s]\s*([0-9.]+%?)\s*[,\s]\s*([0-9.]+%?)(?:\s*[,/]\s*([0-9.]+%?))?\s*\)$/i.exec(trimmed);
+  if (rgbMatch) {
+    const parseChannel = (tok: string) =>
+      tok.endsWith('%') ? clamp01(parseFloat(tok) / 100) : clamp01(parseFloat(tok) / 255);
+    const r = parseChannel(rgbMatch[1]);
+    const g = parseChannel(rgbMatch[2]);
+    const b = parseChannel(rgbMatch[3]);
+    if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
+      return [r, g, b];
     }
   }
+
+  const hslMatch = /^hsla?\(\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:deg)?)\s*[,\s]\s*([0-9.]+)%?\s*[,\s]\s*([0-9.]+)%?(?:\s*[,/]\s*([0-9.]+%?))?\s*\)$/i.exec(trimmed);
+  if (hslMatch) {
+    const h = parseFloat(hslMatch[1]);
+    const s = parseFloat(hslMatch[2]) / 100;
+    const l = parseFloat(hslMatch[3]) / 100;
+    if (Number.isFinite(h) && Number.isFinite(s) && Number.isFinite(l)) {
+      return hslToUnitRgb(h, s, l);
+    }
+  }
+
   return fallback;
+}
+
+const NEUTRAL_COLOR_FALLBACKS: readonly [number, number, number][] = [
+  [0.20, 0.24, 0.34],
+  [0.12, 0.15, 0.24],
+  [0.04, 0.05, 0.08],
+  [0.10, 0.12, 0.18],
+];
+
+function buildColorBuffers(colors: string[]): { rgb: Float32Array; okLab: Float32Array } {
+  const rgb = new Float32Array(12);
+  const okLab = new Float32Array(12);
+  for (let i = 0; i < 4; i++) {
+    const unitRgb = parseColorToUnitRgb(colors[i], NEUTRAL_COLOR_FALLBACKS[i]);
+    const lab = srgbToOkLab(unitRgb[0], unitRgb[1], unitRgb[2]);
+    const offset = i * 3;
+    rgb[offset] = unitRgb[0];
+    rgb[offset + 1] = unitRgb[1];
+    rgb[offset + 2] = unitRgb[2];
+    okLab[offset] = lab[0];
+    okLab[offset + 1] = lab[1];
+    okLab[offset + 2] = lab[2];
+  }
+  return { rgb, okLab };
+}
+
+function unitRgbToCss(buf: Float32Array, index: number): string {
+  const offset = index * 3;
+  const r = Math.round(clamp01(buf[offset]) * 255);
+  const g = Math.round(clamp01(buf[offset + 1]) * 255);
+  const b = Math.round(clamp01(buf[offset + 2]) * 255);
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
 function srgbToOkLab(r: number, g: number, b: number): [number, number, number] {
@@ -163,6 +247,27 @@ export const AppleMusicFluidMeshCanvas: React.FC<AppleMusicFluidMeshCanvasProps>
   enableDithering = true,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const initialBuffersRef = useRef<{ rgb: Float32Array; okLab: Float32Array } | null>(null);
+  if (!initialBuffersRef.current) {
+    initialBuffersRef.current = buildColorBuffers(colors);
+  }
+
+  const targetOkLabRef = useRef<Float32Array>(new Float32Array(initialBuffersRef.current.okLab));
+  const currentOkLabRef = useRef<Float32Array>(new Float32Array(initialBuffersRef.current.okLab));
+  const targetRgbRef = useRef<Float32Array>(new Float32Array(initialBuffersRef.current.rgb));
+  const currentRgbRef = useRef<Float32Array>(new Float32Array(initialBuffersRef.current.rgb));
+  const targetSpeedRef = useRef<number>((isPlaying ? 1.0 : 0.25) * speed);
+  const isPlayingRef = useRef<boolean>(isPlaying);
+  const speedRef = useRef<number>(speed);
+
+  useEffect(() => {
+    const next = buildColorBuffers(colors);
+    targetOkLabRef.current.set(next.okLab);
+    targetRgbRef.current.set(next.rgb);
+    targetSpeedRef.current = (isPlaying ? 1.0 : 0.25) * speed;
+    isPlayingRef.current = isPlaying;
+    speedRef.current = speed;
+  }, [colors, isPlaying, speed]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -183,21 +288,6 @@ export const AppleMusicFluidMeshCanvas: React.FC<AppleMusicFluidMeshCanvasProps>
       gl = null;
     }
 
-    // Convert colors to OkLab format
-    const defaultFallbacks: [number, number, number][] = [
-      [0.98, 0.18, 0.28], // vibrant #FA2D48
-      [0.23, 0.06, 0.10], // edgeWash #3A1019
-      [0.03, 0.02, 0.03], // ambient #080507
-      [0.23, 0.06, 0.10], // playerTint
-    ];
-
-    const okLabColors: number[] = [];
-    for (let i = 0; i < 4; i++) {
-      const unitRgb = hexOrRgbToUnit(colors[i], defaultFallbacks[i]);
-      const lab = srgbToOkLab(unitRgb[0], unitRgb[1], unitRgb[2]);
-      okLabColors.push(lab[0], lab[1], lab[2]);
-    }
-
     if (gl) {
       // ---------------- WEBGL 2 IMPLEMENTATION ----------------
       const createShader = (type: number, source: string) => {
@@ -215,15 +305,25 @@ export const AppleMusicFluidMeshCanvas: React.FC<AppleMusicFluidMeshCanvasProps>
 
       const vs = createShader(gl.VERTEX_SHADER, VS_SOURCE);
       const fs = createShader(gl.FRAGMENT_SHADER, FS_SOURCE);
-      if (!vs || !fs) return;
+      if (!vs || !fs) {
+        if (vs) gl.deleteShader(vs);
+        if (fs) gl.deleteShader(fs);
+        return;
+      }
 
       const program = gl.createProgram();
-      if (!program) return;
+      if (!program) {
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        return;
+      }
       gl.attachShader(program, vs);
       gl.attachShader(program, fs);
       gl.linkProgram(program);
       if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
         gl.deleteProgram(program);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
         return;
       }
 
@@ -253,25 +353,33 @@ export const AppleMusicFluidMeshCanvas: React.FC<AppleMusicFluidMeshCanvasProps>
       const uEnableDitheringLoc = gl.getUniformLocation(program, 'u_enableDithering');
 
       gl.uniform2f(uResolutionLoc, width, height);
-      gl.uniform3fv(uColorsLoc, new Float32Array(okLabColors));
+      gl.uniform3fv(uColorsLoc, currentOkLabRef.current);
       gl.uniform1i(uEnableDitheringLoc, enableDithering ? 1 : 0);
 
-      let currentSpeed = isPlaying ? 1.0 : 0.25;
+      let currentSpeed = targetSpeedRef.current;
       let lastTime = performance.now();
       let elapsedTime = 0;
 
       const render = (now: number) => {
         if (!gl) return;
-        const dt = Math.min((now - lastTime) / 1000, 0.1);
+        const dt = Math.min(Math.max((now - lastTime) / 1000, 0), 0.1);
         lastTime = now;
 
-        const targetSpeed = (isPlaying ? 1.0 : 0.25) * speed;
-        currentSpeed += (targetSpeed - currentSpeed) * 0.05;
+        const targetSpeed = targetSpeedRef.current;
+        currentSpeed += (targetSpeed - currentSpeed) * (1 - Math.exp(-dt * 3.0));
         elapsedTime += dt * currentSpeed;
+
+        const lerpAlpha = 1 - Math.exp(-dt * 4.5);
+        const currentOkLab = currentOkLabRef.current;
+        const targetOkLab = targetOkLabRef.current;
+        for (let i = 0; i < 12; i++) {
+          currentOkLab[i] += (targetOkLab[i] - currentOkLab[i]) * lerpAlpha;
+        }
 
         gl.viewport(0, 0, width, height);
         gl.uniform1f(uTimeLoc, elapsedTime);
         gl.uniform1f(uSpeedLoc, currentSpeed);
+        gl.uniform3fv(uColorsLoc, currentOkLab);
 
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         animId = requestAnimationFrame(render);
@@ -294,6 +402,7 @@ export const AppleMusicFluidMeshCanvas: React.FC<AppleMusicFluidMeshCanvasProps>
       if (!ctx) return;
 
       let theta = 0;
+      let lastTime = performance.now();
       const anchors = [
         { x: 0.22, y: 0.24 },
         { x: 0.78, y: 0.22 },
@@ -302,24 +411,35 @@ export const AppleMusicFluidMeshCanvas: React.FC<AppleMusicFluidMeshCanvasProps>
       ];
       const speeds = [1.0, -0.75, 0.85, -1.1];
 
-      const render2D = () => {
+      const render2D = (now: number) => {
+        const dt = Math.min(Math.max((now - lastTime) / 1000, 0), 0.1);
+        lastTime = now;
+
+        const lerpAlpha = 1 - Math.exp(-dt * 4.5);
+        const currentRgb = currentRgbRef.current;
+        const targetRgb = targetRgbRef.current;
+        for (let i = 0; i < 12; i++) {
+          currentRgb[i] += (targetRgb[i] - currentRgb[i]) * lerpAlpha;
+        }
+
         const w = canvas.width;
         const h = canvas.height;
         ctx.clearRect(0, 0, w, h);
 
-        ctx.fillStyle = colors[2] || '#080507';
+        ctx.fillStyle = unitRgbToCss(currentRgb, 2);
         ctx.fillRect(0, 0, w, h);
 
-        theta += isPlaying ? 0.009 * speed : 0.003 * speed;
+        theta += (isPlayingRef.current ? 0.009 : 0.003) * speedRef.current;
 
+        const secondaryCss = unitRgbToCss(currentRgb, 1);
         for (let k = 0; k < 4; k++) {
           const x = (anchors[k].x + 0.17 * Math.cos(theta * speeds[k] + k * 1.7)) * w;
           const y = (anchors[k].y + 0.17 * Math.sin(theta * speeds[k] * 0.9 + k * 2.3)) * h;
           const radius = Math.max(w, h) * 0.65;
 
           const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
-          grad.addColorStop(0, colors[k] || '#FA2D48');
-          grad.addColorStop(0.55, colors[1] || '#3A1019');
+          grad.addColorStop(0, unitRgbToCss(currentRgb, k));
+          grad.addColorStop(0.55, secondaryCss);
           grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
 
           ctx.fillStyle = grad;
@@ -338,7 +458,7 @@ export const AppleMusicFluidMeshCanvas: React.FC<AppleMusicFluidMeshCanvasProps>
       animId = requestAnimationFrame(render2D);
       return () => cancelAnimationFrame(animId);
     }
-  }, [colors, isPlaying, speed, width, height, enableDithering]);
+  }, [width, height, enableDithering]);
 
   return (
     <canvas

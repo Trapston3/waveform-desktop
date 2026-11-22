@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "description": "Apple Music-inspired Liquid Glass desktop music player with 12 60fps WebGL2/Canvas2D lyric visualizers, 10-band AutoEQ DSP, local lossless metadata scanner, and YouTube Music SABR streaming.",
+  "homepage": "https://github.com/trapston3/waveform-desktop",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/trapston3/waveform-desktop/releases/download/v1.0.0/WaveForm-Portable-1.0.0.exe#/WaveForm.exe",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "bin": "WaveForm.exe",
+  "shortcuts": [
+    [
+      "WaveForm.exe",
+      "WaveForm"
+    ]
+  ],
+  "checkver": {
+    "github": "https://github.com/trapston3/waveform-desktop"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/trapston3/waveform-desktop/releases/download/v$version/WaveForm-Portable-$version.exe#/WaveForm.exe",
+        "hash": {
+          "url": "https://github.com/trapston3/waveform-desktop/releases/download/v$version/SHA256SUMS.txt",
+          "regex": "([a-fA-F0-9]{64})\\s+WaveForm-Portable-$version\\.exe"
+        }
+      }
+    }
+  }
+}

@@ -14,6 +14,10 @@ export interface AppSettings {
   'appearance.waveformStyle': 'bars68' | 'thinSlider';
   'appearance.ambientBackdropGlow': boolean;
   'appearance.compactSidebar': boolean;
+  'appearance.nowPlayingLayout': 'split' | 'centered' | 'ambient';
+  'appearance.hideAlbumCover': boolean;
+  nowPlayingLayout: 'split' | 'centered' | 'ambient';
+  hideAlbumCover: boolean;
 
   // Audio Engine & Playback (16 items)
   'playback.crossfadeDurationSec': number;
@@ -54,6 +58,8 @@ export interface AppSettings {
   'lyrics.autoScrollSpeed': 'smooth' | 'instant';
   'lyrics.rtlSupport': boolean;
   'lyrics.providerPriority': string[];
+  'lyrics.alignment': 'left' | 'center';
+  lyricsAlignment: 'left' | 'center';
 
   // Local Music & Storage (8 items)
   'storage.localFolders': string[];
@@ -104,6 +110,10 @@ export const defaultAppSettings: AppSettings = {
   'appearance.waveformStyle': 'bars68',
   'appearance.ambientBackdropGlow': true,
   'appearance.compactSidebar': false,
+  'appearance.nowPlayingLayout': 'split',
+  'appearance.hideAlbumCover': false,
+  nowPlayingLayout: 'split',
+  hideAlbumCover: false,
 
   // Audio Engine & Playback (16 items)
   'playback.crossfadeDurationSec': 4.0,
@@ -144,6 +154,8 @@ export const defaultAppSettings: AppSettings = {
   'lyrics.autoScrollSpeed': 'smooth',
   'lyrics.rtlSupport': true,
   'lyrics.providerPriority': ['AppleMusic', 'LrcLib', 'Musixmatch'],
+  'lyrics.alignment': 'left',
+  lyricsAlignment: 'left',
 
   // Local Music & Storage (8 items)
   'storage.localFolders': ['C:\\Users\\traps\\Music'],
@@ -197,6 +209,21 @@ export function mergeSettings(current: AppSettings, delta: Partial<AppSettings>)
         );
       }
     }
+  }
+  if ('nowPlayingLayout' in delta && !('appearance.nowPlayingLayout' in delta)) {
+    updated['appearance.nowPlayingLayout'] = updated.nowPlayingLayout;
+  } else if ('appearance.nowPlayingLayout' in delta && !('nowPlayingLayout' in delta)) {
+    updated.nowPlayingLayout = updated['appearance.nowPlayingLayout'];
+  }
+  if ('hideAlbumCover' in delta && !('appearance.hideAlbumCover' in delta)) {
+    updated['appearance.hideAlbumCover'] = updated.hideAlbumCover;
+  } else if ('appearance.hideAlbumCover' in delta && !('hideAlbumCover' in delta)) {
+    updated.hideAlbumCover = updated['appearance.hideAlbumCover'];
+  }
+  if ('lyricsAlignment' in delta && !('lyrics.alignment' in delta)) {
+    updated['lyrics.alignment'] = updated.lyricsAlignment;
+  } else if ('lyrics.alignment' in delta && !('lyricsAlignment' in delta)) {
+    updated.lyricsAlignment = updated['lyrics.alignment'];
   }
   return updated;
 }

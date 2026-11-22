@@ -10,9 +10,12 @@ import {
   clampOffsetMs,
   DEFAULT_LYRIC_VISUALIZER_CONFIG,
   DEMO_FALLBACK_PALETTE,
+  getStyleDefinition,
   type LyricPalette,
   type Lyrics,
+  type LyricTextAlign,
   type LyricVisualizerConfig,
+  type NowPlayingLayoutMode,
   STARLIGHT_HARBOR_LYRICS,
   STARLIGHT_HARBOR_TRACK,
   type TrackInfo,
@@ -27,6 +30,10 @@ export const MIN_FONT_SIZE_SCALE = 0.7;
 export const MAX_FONT_SIZE_SCALE = 1.8;
 export const MIN_OVERLAY_OPACITY = 0.2;
 export const MAX_OVERLAY_OPACITY = 1.0;
+export const MIN_BACKGROUND_OPACITY = 0.2;
+export const MAX_BACKGROUND_OPACITY = 1.0;
+export const MIN_VIGNETTE_STRENGTH = 0.0;
+export const MAX_VIGNETTE_STRENGTH = 1.0;
 export const OFFSET_STEP_MS = 50;
 export const IDLE_AMBIENT_OPTIONS = [0, 30, 60, 120, 300] as const;
 
@@ -39,7 +46,11 @@ export interface MonitorDescriptor {
   readonly isPrimary?: boolean;
 }
 
+export type MotionIntensity = 'subtle' | 'normal' | 'vivid';
+
 export interface LyricVisualizerBroadcastPayload {
+  readonly revisionId?: number;
+  readonly trackId?: string | null;
   readonly config: LyricVisualizerConfig;
   readonly track: TrackInfo | null;
   readonly lyrics: Lyrics | null;
@@ -65,16 +76,24 @@ export interface LyricVisualizerState {
   activePalette: LyricPalette;
   activeLyrics: Lyrics | null;
   activeTrack: TrackInfo | null;
+  lastAppliedRevisionId: number;
   lastBroadcastPayload: LyricVisualizerBroadcastPayload | null;
 
   // Actions
   setStyleId: (styleId: VisualStyleId) => void;
+  setStyleVariation: (styleIdOrVariationId: VisualStyleId | string, variationId?: string) => void;
   cycleStyle: (direction?: 1 | -1) => void;
   setFontId: (fontId: BundledFontId) => void;
   setFontSizeScale: (scale: number) => void;
   setAlbumArtColorMatch: (enabled: boolean) => void;
   setAudioReactive: (enabled: boolean) => void;
   setReduceMotion: (enabled: boolean) => void;
+  setMotionIntensity: (intensity: MotionIntensity) => void;
+  setBackgroundOpacity: (opacity: number) => void;
+  setVignetteStrength: (strength: number) => void;
+  setTextAlign: (align: LyricTextAlign) => void;
+  setNowPlayingLayout: (layout: NowPlayingLayoutMode) => void;
+  setHideAlbumCover: (hide: boolean) => void;
 
   setCurrentSongKey: (songKey: string | null) => Promise<void>;
   setSongOffsetMs: (offsetMs: number, songKey?: string | null) => void;
@@ -129,12 +148,73 @@ export function clampOverlayOpacity(opacity: number): number {
   return Number(Math.max(MIN_OVERLAY_OPACITY, Math.min(MAX_OVERLAY_OPACITY, opacity)).toFixed(2));
 }
 
+export function clampBackgroundOpacity(opacity: number): number {
+  if (!Number.isFinite(opacity)) return DEFAULT_LYRIC_VISUALIZER_CONFIG.backgroundOpacity;
+  return Number(Math.max(MIN_BACKGROUND_OPACITY, Math.min(MAX_BACKGROUND_OPACITY, opacity)).toFixed(2));
+}
+
+export function clampVignetteStrength(strength: number): number {
+  if (!Number.isFinite(strength)) return DEFAULT_LYRIC_VISUALIZER_CONFIG.vignetteStrength;
+  return Number(Math.max(MIN_VIGNETTE_STRENGTH, Math.min(MAX_VIGNETTE_STRENGTH, strength)).toFixed(2));
+}
+
 function isValidStyleId(id: unknown): id is VisualStyleId {
   return typeof id === 'string' && VISUAL_STYLE_DEFINITIONS.some((s) => s.id === id);
 }
 
 function isValidFontId(id: unknown): id is BundledFontId {
   return typeof id === 'string' && BUNDLED_FONTS.some((f) => f.id === id);
+}
+
+function isValidMotionIntensity(val: unknown): val is MotionIntensity {
+  return val === 'subtle' || val === 'normal' || val === 'vivid';
+}
+
+function isValidTextAlign(val: unknown): val is LyricTextAlign {
+  return val === 'center' || val === 'left';
+}
+
+function isValidNowPlayingLayout(val: unknown): val is NowPlayingLayoutMode {
+  return val === 'split' || val === 'centered' || val === 'ambient';
+}
+
+function sanitizeVariationMap(
+  raw: unknown
+): Partial<Record<VisualStyleId, string>> {
+  const result: Partial<Record<VisualStyleId, string>> = {};
+  if (!raw || typeof raw !== 'object') return result;
+  for (const def of VISUAL_STYLE_DEFINITIONS) {
+    const val = (raw as Record<string, unknown>)[def.id];
+    if (typeof val === 'string' && def.variations.some((v) => v.id === val)) {
+      result[def.id] = val;
+    }
+  }
+  return result;
+}
+
+export function migrateLegacyStyleSelection(
+  rawStyleId: unknown,
+  existingVariations: Partial<Record<VisualStyleId, string>>
+): {
+  styleId: VisualStyleId;
+  variationByStyle: Partial<Record<VisualStyleId, string>>;
+} {
+  const variationByStyle: Partial<Record<VisualStyleId, string>> = { ...existingVariations };
+  if (rawStyleId === 'NeonKinetic') {
+    return { styleId: 'AppleMusicFlow', variationByStyle };
+  }
+  if (rawStyleId === 'HoloVaporwave') {
+    variationByStyle.LiquidMetal = 'holo-vaporwave';
+    return { styleId: 'LiquidMetal', variationByStyle };
+  }
+  if (rawStyleId === 'SpectrumRibbon') {
+    variationByStyle.GenerativeParticleInk = 'spectrum-ribbon';
+    return { styleId: 'GenerativeParticleInk', variationByStyle };
+  }
+  if (isValidStyleId(rawStyleId)) {
+    return { styleId: rawStyleId, variationByStyle };
+  }
+  return { styleId: DEFAULT_LYRIC_VISUALIZER_CONFIG.styleId, variationByStyle };
 }
 
 interface PersistedStorageData {
@@ -165,8 +245,12 @@ function loadPersistedState(): {
   }
 
   const c = raw?.config ?? {};
+  const initialVariations = sanitizeVariationMap((c as any).variationByStyle);
+  const migrated = migrateLegacyStyleSelection(c.styleId, initialVariations);
+
   const config: LyricVisualizerConfig = {
-    styleId: isValidStyleId(c.styleId) ? c.styleId : DEFAULT_LYRIC_VISUALIZER_CONFIG.styleId,
+    styleId: migrated.styleId,
+    variationByStyle: migrated.variationByStyle,
     fontId: isValidFontId(c.fontId) ? c.fontId : DEFAULT_LYRIC_VISUALIZER_CONFIG.fontId,
     fontSizeScale:
       typeof c.fontSizeScale === 'number'
@@ -184,6 +268,27 @@ function loadPersistedState(): {
       typeof c.reduceMotion === 'boolean'
         ? c.reduceMotion
         : DEFAULT_LYRIC_VISUALIZER_CONFIG.reduceMotion,
+    motionIntensity: isValidMotionIntensity((c as any).motionIntensity)
+      ? (c as any).motionIntensity
+      : ((DEFAULT_LYRIC_VISUALIZER_CONFIG as any).motionIntensity ?? 'normal'),
+    backgroundOpacity:
+      typeof (c as any).backgroundOpacity === 'number'
+        ? clampBackgroundOpacity((c as any).backgroundOpacity)
+        : DEFAULT_LYRIC_VISUALIZER_CONFIG.backgroundOpacity,
+    vignetteStrength:
+      typeof (c as any).vignetteStrength === 'number'
+        ? clampVignetteStrength((c as any).vignetteStrength)
+        : DEFAULT_LYRIC_VISUALIZER_CONFIG.vignetteStrength,
+    textAlign: isValidTextAlign((c as any).textAlign)
+      ? (c as any).textAlign
+      : DEFAULT_LYRIC_VISUALIZER_CONFIG.textAlign,
+    nowPlayingLayout: isValidNowPlayingLayout((c as any).nowPlayingLayout)
+      ? (c as any).nowPlayingLayout
+      : DEFAULT_LYRIC_VISUALIZER_CONFIG.nowPlayingLayout,
+    hideAlbumCover:
+      typeof (c as any).hideAlbumCover === 'boolean'
+        ? (c as any).hideAlbumCover
+        : DEFAULT_LYRIC_VISUALIZER_CONFIG.hideAlbumCover,
     overlayEnabled:
       typeof c.overlayEnabled === 'boolean'
         ? c.overlayEnabled
@@ -230,7 +335,7 @@ function loadPersistedState(): {
   const nowPlayingLyricsMode =
     raw?.nowPlayingLyricsMode === 'classic' || raw?.nowPlayingLyricsMode === 'visualizer'
       ? raw.nowPlayingLyricsMode
-      : 'visualizer';
+      : 'classic';
 
   return { config, perSongOffsetsMs, nowPlayingLyricsMode };
 }
@@ -287,6 +392,7 @@ function syncAmbientSettingsToElectron(config: LyricVisualizerConfig): void {
 
 const initialPersisted = loadPersistedState();
 let lastBroadcastTimeMs = 0;
+let broadcastRevisionCounter = 0;
 
 export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) => ({
   config: initialPersisted.config,
@@ -303,12 +409,56 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   activePalette: DEMO_FALLBACK_PALETTE,
   activeLyrics: initialPersisted.config.sandboxEnabled ? STARLIGHT_HARBOR_LYRICS : null,
   activeTrack: initialPersisted.config.sandboxEnabled ? STARLIGHT_HARBOR_TRACK : null,
+  lastAppliedRevisionId: 0,
   lastBroadcastPayload: null,
 
   setStyleId: (styleId: VisualStyleId) => {
-    if (!isValidStyleId(styleId)) return;
+    const rawId = styleId as unknown as string;
+    const isLegacy =
+      rawId === 'NeonKinetic' || rawId === 'HoloVaporwave' || rawId === 'SpectrumRibbon';
+    if (!isValidStyleId(styleId) && !isLegacy) return;
     set((s) => {
-      const nextConfig: LyricVisualizerConfig = { ...s.config, styleId };
+      const migrated = migrateLegacyStyleSelection(rawId, s.config.variationByStyle ?? {});
+      const nextConfig: LyricVisualizerConfig = {
+        ...s.config,
+        styleId: migrated.styleId,
+        variationByStyle: migrated.variationByStyle,
+      };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setStyleVariation: (styleIdOrVariationId: VisualStyleId | string, variationId?: string) => {
+    set((s) => {
+      let targetStyleId: VisualStyleId = s.config.styleId;
+      let rawVarId = '';
+      if (variationId !== undefined) {
+        const migrated = migrateLegacyStyleSelection(styleIdOrVariationId, s.config.variationByStyle ?? {});
+        targetStyleId = migrated.styleId;
+        rawVarId = variationId;
+      } else {
+        rawVarId = String(styleIdOrVariationId);
+      }
+
+      const def = getStyleDefinition(targetStyleId);
+      const validVar = def.variations.some((v) => v.id === rawVarId)
+        ? rawVarId
+        : def.defaultVariationId;
+
+      const nextVariationByStyle: Partial<Record<VisualStyleId, string>> = {
+        ...(s.config.variationByStyle ?? {}),
+        [def.id]: validVar,
+      };
+      const nextConfig: LyricVisualizerConfig = {
+        ...s.config,
+        variationByStyle: nextVariationByStyle,
+      };
       savePersistedState({
         config: nextConfig,
         perSongOffsetsMs: s.perSongOffsetsMs,
@@ -387,6 +537,90 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     const flag = Boolean(enabled);
     set((s) => {
       const nextConfig: LyricVisualizerConfig = { ...s.config, reduceMotion: flag };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setMotionIntensity: (intensity: MotionIntensity) => {
+    if (!isValidMotionIntensity(intensity)) return;
+    set((s) => {
+      const nextConfig = { ...s.config, motionIntensity: intensity } as LyricVisualizerConfig;
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setBackgroundOpacity: (opacity: number) => {
+    const clamped = clampBackgroundOpacity(opacity);
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, backgroundOpacity: clamped };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setVignetteStrength: (strength: number) => {
+    const clamped = clampVignetteStrength(strength);
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, vignetteStrength: clamped };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setTextAlign: (align: LyricTextAlign) => {
+    if (!isValidTextAlign(align)) return;
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, textAlign: align };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setNowPlayingLayout: (layout: NowPlayingLayoutMode) => {
+    if (!isValidNowPlayingLayout(layout)) return;
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, nowPlayingLayout: layout };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setHideAlbumCover: (hide: boolean) => {
+    const flag = Boolean(hide);
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, hideAlbumCover: flag };
       savePersistedState({
         config: nextConfig,
         perSongOffsetsMs: s.perSongOffsetsMs,
@@ -594,7 +828,16 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     get().broadcastSnapshot(undefined, true);
     const api = getElectronApi();
     try {
-      await api?.lvOpenAmbient?.(config.keepAwakeInAmbient);
+      if (typeof api?.setFullscreen === 'function') {
+        await api.setFullscreen(true);
+        if (typeof api?.lvSetKeepAwake === 'function') {
+          await api.lvSetKeepAwake(Boolean(config.keepAwakeInAmbient));
+        }
+      } else if (typeof api?.lvOpenAmbient === 'function') {
+        await api.lvOpenAmbient(config.keepAwakeInAmbient);
+      } else if (typeof document !== 'undefined' && typeof document.documentElement?.requestFullscreen === 'function') {
+        await document.documentElement.requestFullscreen().catch(() => {});
+      }
     } catch {
       // Ignore in browser/test mode
     }
@@ -604,7 +847,16 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     set({ isAmbientOpen: false });
     const api = getElectronApi();
     try {
-      await api?.lvCloseAmbient?.();
+      if (typeof api?.setFullscreen === 'function') {
+        await api.setFullscreen(false);
+        if (typeof api?.lvSetKeepAwake === 'function') {
+          await api.lvSetKeepAwake(false);
+        }
+      } else if (typeof api?.lvCloseAmbient === 'function') {
+        await api.lvCloseAmbient();
+      } else if (typeof document !== 'undefined' && document.fullscreenElement) {
+        await document.exitFullscreen?.().catch(() => {});
+      }
     } catch {
       // Ignore in browser/test mode
     }
@@ -718,8 +970,32 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   },
 
   setActiveTrack: (track: TrackInfo | null) => {
-    set({ activeTrack: track });
-    get().broadcastSnapshot({ track }, true);
+    const prevTrackId = get().activeTrack?.id ?? null;
+    const nextTrackId = track?.id ?? null;
+    const trackChanged = nextTrackId !== prevTrackId;
+    if (trackChanged) {
+      set((s) => ({
+        activeTrack: track,
+        activeLyrics:
+          s.config.sandboxEnabled && nextTrackId === STARLIGHT_HARBOR_TRACK.id
+            ? STARLIGHT_HARBOR_LYRICS
+            : null,
+      }));
+      get().broadcastSnapshot(
+        {
+          track,
+          trackId: nextTrackId,
+          lyrics:
+            get().config.sandboxEnabled && nextTrackId === STARLIGHT_HARBOR_TRACK.id
+              ? STARLIGHT_HARBOR_LYRICS
+              : null,
+        },
+        true
+      );
+    } else {
+      set({ activeTrack: track });
+      get().broadcastSnapshot({ track, trackId: nextTrackId }, true);
+    }
   },
 
   setNowPlayingLyricsMode: (mode: 'classic' | 'visualizer') => {
@@ -736,19 +1012,72 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
 
   applyBroadcastPayload: (payload: LyricVisualizerBroadcastPayload) => {
     if (!payload || typeof payload !== 'object') return;
-    set((s) => ({
-      config: payload.config ? { ...s.config, ...payload.config } : s.config,
-      activeTrack: payload.track !== undefined ? payload.track : s.activeTrack,
-      activeLyrics: payload.lyrics !== undefined ? payload.lyrics : s.activeLyrics,
-      activePalette: payload.palette || s.activePalette,
-      currentSongOffsetMs:
-        typeof payload.songOffsetMs === 'number'
-          ? clampOffsetMs(payload.songOffsetMs)
-          : s.currentSongOffsetMs,
-      isScreenLocked:
-        typeof payload.isScreenLocked === 'boolean' ? payload.isScreenLocked : s.isScreenLocked,
-      lastBroadcastPayload: payload,
-    }));
+    set((s) => {
+      // Reject stale out-of-order broadcast revisions
+      if (
+        typeof payload.revisionId === 'number' &&
+        s.lastAppliedRevisionId > 0 &&
+        payload.revisionId < s.lastAppliedRevisionId
+      ) {
+        return s;
+      }
+
+      const nextRevisionId =
+        typeof payload.revisionId === 'number'
+          ? Math.max(s.lastAppliedRevisionId, payload.revisionId)
+          : s.lastAppliedRevisionId;
+
+      const prevTrackId = s.activeTrack?.id ?? null;
+      const incomingTrackId =
+        payload.trackId !== undefined
+          ? payload.trackId
+          : payload.track !== undefined
+          ? payload.track?.id ?? null
+          : prevTrackId;
+      const trackChanged = incomingTrackId !== prevTrackId;
+
+      // Immediately clear previous song's lyrics when trackId changes
+      const nextLyrics = trackChanged
+        ? payload.lyrics !== undefined
+          ? payload.lyrics
+          : null
+        : payload.lyrics !== undefined
+        ? payload.lyrics
+        : s.activeLyrics;
+
+      let nextConfig = s.config;
+      if (payload.config) {
+        const mergedVars = {
+          ...(s.config.variationByStyle ?? {}),
+          ...sanitizeVariationMap((payload.config as any).variationByStyle),
+        };
+        const migrated = migrateLegacyStyleSelection(
+          payload.config.styleId ?? s.config.styleId,
+          mergedVars
+        );
+        nextConfig = {
+          ...s.config,
+          ...payload.config,
+          styleId: migrated.styleId,
+          variationByStyle: migrated.variationByStyle,
+        };
+      }
+
+      return {
+        config: nextConfig,
+        activeTrack: payload.track !== undefined ? payload.track : s.activeTrack,
+        activeLyrics: nextLyrics,
+        activePalette: payload.palette || s.activePalette,
+        currentSongOffsetMs:
+          typeof payload.songOffsetMs === 'number'
+            ? clampOffsetMs(payload.songOffsetMs)
+            : s.currentSongOffsetMs,
+        isScreenLocked:
+          typeof payload.isScreenLocked === 'boolean' ? payload.isScreenLocked : s.isScreenLocked,
+        lastAppliedRevisionId: nextRevisionId,
+        lastBroadcastPayload: payload,
+      };
+    });
   },
 
   broadcastSnapshot: (partial, force = false) => {
@@ -757,6 +1086,7 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
       return;
     }
     lastBroadcastTimeMs = now;
+    broadcastRevisionCounter += 1;
 
     const state = get();
     const bridge = getSharedWaveFormPlaybackBridge();
@@ -765,9 +1095,15 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
       ? bridge.sampleAudioMetrics()
       : { rmsLevel: 0, bassEnergy: 0, midEnergy: 0, trebleEnergy: 0, beatDetected: false };
 
+    const resolvedTrack = partial?.track !== undefined ? partial.track : state.activeTrack ?? snap.track;
+    const resolvedTrackId =
+      partial?.trackId !== undefined ? partial.trackId : resolvedTrack?.id ?? null;
+
     const payload: LyricVisualizerBroadcastPayload = {
+      revisionId: partial?.revisionId !== undefined ? partial.revisionId : broadcastRevisionCounter,
+      trackId: resolvedTrackId,
       config: state.config,
-      track: partial?.track !== undefined ? partial.track : state.activeTrack ?? snap.track,
+      track: resolvedTrack,
       lyrics:
         partial?.lyrics !== undefined
           ? partial.lyrics

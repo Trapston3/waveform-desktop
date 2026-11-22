@@ -88,6 +88,89 @@ export function validateSongContract(song: any): { valid: boolean; error?: strin
   return { valid: true };
 }
 
+function isYoutubeSabrStreamUrl(url?: string | null): boolean {
+  if (!url) return false;
+  return (
+    url.includes('waveform-stream://yt') ||
+    url.includes('/api/yt-stream') ||
+    url.includes('127.0.0.1') ||
+    url.includes('sabr')
+  );
+}
+
+export function isDeadOrStaleRestoredStreamUrl(url?: string | null): boolean {
+  if (!url || !url.trim()) return true;
+  if (/^(waveform-local|file):/i.test(url)) return false;
+  return (
+    url.includes('127.0.0.1') ||
+    url.includes('localhost') ||
+    url.includes('/api/yt-stream') ||
+    url.includes('waveform-stream://') ||
+    url.includes('sn-redline') ||
+    url.includes('sn-audio') ||
+    url.includes('sn-offline') ||
+    url.includes('01_Midnight_City.flac')
+  );
+}
+
+function withStartMsParam(rawUrl: string, startMs: number): string {
+  const rounded = Math.max(0, Math.round(startMs));
+  try {
+    const hasScheme = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(rawUrl);
+    const u = hasScheme ? new URL(rawUrl) : new URL(rawUrl, 'http://localhost');
+    if (rounded > 0) {
+      u.searchParams.set('startMs', String(rounded));
+    } else {
+      u.searchParams.delete('startMs');
+    }
+    return hasScheme ? u.toString() : `${u.pathname}${u.search}${u.hash}`;
+  } catch {
+    const cleaned = rawUrl
+      .replace(/([?&])startMs=\d+(&?)/g, (_, sep, trail) => (trail ? sep : ''))
+      .replace(/[?&]$/, '');
+    if (rounded <= 0) return cleaned;
+    return `${cleaned}${cleaned.includes('?') ? '&' : '?'}startMs=${rounded}`;
+  }
+}
+
+function isTargetSafelyBuffered(
+  el: HTMLAudioElement,
+  targetMs: number,
+  playbackOffsetMs: number
+): boolean {
+  if (el.readyState < 1 || !el.buffered || el.buffered.length === 0) {
+    return false;
+  }
+  const targetElSec = (targetMs - playbackOffsetMs) / 1000;
+  if (!Number.isFinite(targetElSec) || targetElSec < 0) {
+    return false;
+  }
+  const elDur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0;
+  for (let i = 0; i < el.buffered.length; i++) {
+    try {
+      const start = el.buffered.start(i);
+      const end = el.buffered.end(i);
+      const upperBound = elDur > 0 && end >= elDur - 0.5 ? end : end - 0.5;
+      if (
+        (targetElSec >= start && targetElSec <= upperBound) ||
+        (targetElSec === 0 && start <= 0.05 && end > 0.1)
+      ) {
+        return true;
+      }
+    } catch {
+      // Ignore invalid TimeRanges index
+    }
+  }
+  return false;
+}
+
+function isAsyncMediaElement(el: HTMLAudioElement): boolean {
+  return (
+    (typeof HTMLAudioElement !== 'undefined' && el instanceof HTMLAudioElement) ||
+    Boolean((el as any).seeking)
+  );
+}
+
 /**
  * Peer Web Audio Deck wrapping an audio element & sub-graph nodes.
  */
@@ -107,15 +190,34 @@ export class WebAudioDeck {
   track: Song | null = null;
   positionMs = 0;
   durationMs = 0;
+  playbackOffsetMs = 0;
+  isSeeking = false;
+  needsStreamReResolution = false;
+  baseStreamUrl: string | null = null;
+  pendingReloadStartMs: number | null = null;
+  private seekGuardTimer: ReturnType<typeof setTimeout> | null = null;
   gain = 1.0;
   isPlaying = false;
   hasRealMedia = false;
+  suppressDirectFallback = false;
+  lastSeekTargetMs: number | null = null;
+  lastSeekAtMs = 0;
   private pendingSeekMs: number | null = null;
   private pendingCanPlayRetry: (() => void) | null = null;
   private pendingCanPlayRetryEl: HTMLAudioElement | null = null;
   onEndedCallback: (() => void) | null = null;
+  onPrematureEndedCallback: ((positionMs: number) => void) | null = null;
   onErrorCallback: (() => void) | null = null;
   onTimeUpdateCallback: (() => void) | null = null;
+  onMediaReadyCallback: (() => void) | null = null;
+
+  get playbackOffsetSeconds(): number {
+    return this.playbackOffsetMs / 1000;
+  }
+
+  set playbackOffsetSeconds(sec: number) {
+    this.playbackOffsetMs = Math.max(0, Math.round((Number.isFinite(sec) ? sec : 0) * 1000));
+  }
 
   constructor(
     id: 'deckA' | 'deckB',
@@ -154,36 +256,151 @@ export class WebAudioDeck {
     }
   }
 
+  private clearSeekGuardTimer(): void {
+    if (this.seekGuardTimer !== null) {
+      clearTimeout(this.seekGuardTimer);
+      this.seekGuardTimer = null;
+    }
+  }
+
+  private armSeekGuardTimer(): void {
+    this.clearSeekGuardTimer();
+    this.seekGuardTimer = setTimeout(() => {
+      this.seekGuardTimer = null;
+      this.isSeeking = false;
+      this.pendingReloadStartMs = null;
+    }, 4000);
+    (this.seekGuardTimer as any)?.unref?.();
+  }
+
+  private calibrateReloadOffset(el: HTMLAudioElement): void {
+    if (this.pendingReloadStartMs === null) return;
+    const reqMs = this.pendingReloadStartMs;
+    const elMs =
+      typeof el.currentTime === 'number' && Number.isFinite(el.currentTime) && el.currentTime >= 0
+        ? Math.round(el.currentTime * 1000)
+        : 0;
+    if (reqMs >= 3000 && elMs >= 2000 && Math.abs(elMs - reqMs) <= 15000) {
+      this.playbackOffsetMs = 0;
+    } else {
+      this.playbackOffsetMs = Math.max(0, reqMs - elMs);
+    }
+    this.pendingReloadStartMs = null;
+    this.positionMs = Math.round(this.playbackOffsetMs + elMs);
+  }
+
+  syncDurationFromElement(el: HTMLAudioElement | null = this.audioElement): number {
+    if (el && Number.isFinite(el.duration) && el.duration > 0) {
+      const elDurMs = Math.round(el.duration * 1000);
+      const adjustedElDurMs = this.playbackOffsetMs > 0 ? elDurMs + this.playbackOffsetMs : elDurMs;
+      const trackExpectedMs =
+        this.track?.totalPlayTimeMs ||
+        (this.track?.durationSec ? this.track.durationSec * 1000 : 0);
+      // Never allow a truncated ~7s segment header to shrink a known full-length track's durationMs
+      if (trackExpectedMs > 30000 && adjustedElDurMs < trackExpectedMs * 0.5) {
+        this.durationMs = trackExpectedMs;
+      } else {
+        this.durationMs = adjustedElDurMs;
+      }
+    }
+    return this.durationMs;
+  }
+
   private wireElementEvents(el: HTMLAudioElement, isDirect: boolean): void {
     const syncDuration = () => {
       if (el !== this.audioElement || this.isTearingDownSrc || !el.getAttribute('src')) {
         return;
       }
       if (Number.isFinite(el.duration) && el.duration > 0) {
-        this.durationMs = Math.floor(el.duration * 1000);
+        this.syncDurationFromElement(el);
         this.hasRealMedia = true;
         if (this.pendingSeekMs !== null && el.readyState >= 1) {
-          const clampedMs = Math.max(0, Math.min(this.durationMs, this.pendingSeekMs));
+          const clampedMs = Math.max(0, Math.min(this.durationMs || this.pendingSeekMs, this.pendingSeekMs));
           this.pendingSeekMs = null;
           this.positionMs = clampedMs;
           try {
-            el.currentTime = clampedMs / 1000;
+            el.currentTime = Math.max(0, (clampedMs - this.playbackOffsetMs) / 1000);
+            if (!isAsyncMediaElement(el) && this.pendingReloadStartMs === null) {
+              this.isSeeking = false;
+              this.clearSeekGuardTimer();
+            }
           } catch {
             // Ignore seek error
           }
         }
         if (this.onTimeUpdateCallback) this.onTimeUpdateCallback();
+        if (this.onMediaReadyCallback) this.onMediaReadyCallback();
       }
     };
 
     el.addEventListener('loadedmetadata', syncDuration);
     el.addEventListener('durationchange', syncDuration);
 
+    el.addEventListener('loadeddata', () => {
+      if (el !== this.audioElement || this.isTearingDownSrc || !el.getAttribute('src')) {
+        return;
+      }
+      if (this.pendingReloadStartMs !== null) {
+        this.calibrateReloadOffset(el);
+        this.hasRealMedia = true;
+        if (this.onTimeUpdateCallback) this.onTimeUpdateCallback();
+      }
+    });
+
+    el.addEventListener('canplay', () => {
+      if (el !== this.audioElement || this.isTearingDownSrc || !el.getAttribute('src')) {
+        return;
+      }
+      if (this.pendingReloadStartMs === null && this.isSeeking) {
+        this.isSeeking = false;
+        this.clearSeekGuardTimer();
+      }
+      if (this.onMediaReadyCallback) this.onMediaReadyCallback();
+    });
+
+    el.addEventListener('playing', () => {
+      if (el !== this.audioElement || this.isTearingDownSrc || !el.getAttribute('src')) {
+        return;
+      }
+      if (this.pendingReloadStartMs !== null) {
+        this.calibrateReloadOffset(el);
+      }
+      if (this.isSeeking) {
+        this.isSeeking = false;
+        this.clearSeekGuardTimer();
+      }
+    });
+
+    el.addEventListener('seeked', () => {
+      if (el !== this.audioElement || this.isTearingDownSrc || !el.getAttribute('src')) {
+        return;
+      }
+      if (this.pendingReloadStartMs === null && this.isSeeking) {
+        this.isSeeking = false;
+        this.clearSeekGuardTimer();
+      }
+    });
+
     el.addEventListener('timeupdate', () => {
       if (el !== this.audioElement || this.isTearingDownSrc || !el.getAttribute('src')) {
         return;
       }
-      this.positionMs = Math.floor(el.currentTime * 1000);
+      if (this.isSeeking) {
+        if (el.currentTime === 0 && this.positionMs > 1500) {
+          return;
+        }
+        if (this.pendingReloadStartMs !== null) {
+          this.calibrateReloadOffset(el);
+        } else {
+          const elTotalMs = Math.round(this.playbackOffsetMs + el.currentTime * 1000);
+          if (this.lastSeekTargetMs !== null && Math.abs(elTotalMs - this.lastSeekTargetMs) > 2000) {
+            return;
+          }
+        }
+      } else if (this.pendingReloadStartMs !== null) {
+        this.calibrateReloadOffset(el);
+      }
+      this.positionMs = Math.round(this.playbackOffsetMs + el.currentTime * 1000);
       this.hasRealMedia = true;
       if (this.onTimeUpdateCallback) this.onTimeUpdateCallback();
     });
@@ -192,6 +409,53 @@ export class WebAudioDeck {
       if (el !== this.audioElement || this.isTearingDownSrc || !this.isPlaying || !el.getAttribute('src')) {
         return;
       }
+
+      const rawElSec =
+        typeof el.currentTime === 'number' && Number.isFinite(el.currentTime) && el.currentTime > 0
+          ? el.currentTime
+          : 0;
+      const currentPosMs =
+        rawElSec > 0 ? Math.round(this.playbackOffsetMs + rawElSec * 1000) : this.positionMs;
+      const elDurSec = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0;
+      const adjustedElDurSec =
+        elDurSec > 0 && this.playbackOffsetMs > 0 ? elDurSec + this.playbackOffsetMs / 1000 : elDurSec;
+      const trackExpectedSec =
+        (this.track?.totalPlayTimeMs ? this.track.totalPlayTimeMs / 1000 : 0) ||
+        this.track?.durationSec ||
+        0;
+      const expectedDurSec = Math.max(trackExpectedSec, this.durationMs / 1000, adjustedElDurSec);
+
+      if (
+        this.pendingReloadStartMs !== null ||
+        (this.isSeeking && expectedDurSec > 0 && currentPosMs < expectedDurSec * 1000 - 2000)
+      ) {
+        return;
+      }
+      this.isSeeking = false;
+      this.clearSeekGuardTimer();
+
+      const currentSec = currentPosMs / 1000;
+      const recentlySoughtNearEnd =
+        this.lastSeekTargetMs !== null &&
+        Date.now() - this.lastSeekAtMs < 3000 &&
+        this.lastSeekTargetMs / 1000 >= expectedDurSec - 5;
+
+      if (expectedDurSec > 10 && currentSec < expectedDurSec - 5 && !recentlySoughtNearEnd) {
+        const preservedPosMs =
+          this.positionMs > 0 && Math.abs(currentSec * 1000 - this.positionMs) < 5000
+            ? Math.max(this.positionMs, Math.floor(currentSec * 1000))
+            : Math.floor(currentSec * 1000);
+        this.positionMs = preservedPosMs;
+        this.isPlaying = false;
+        console.warn(
+          `[WebAudioDeck ${this.id}] Premature 'ended' detected at ${currentSec.toFixed(2)}s / expected ${expectedDurSec.toFixed(2)}s for "${this.track?.title || this.track?.videoId}" (src=${el.getAttribute('src') || el.src}). Preserving positionMs=${preservedPosMs} for stream recovery.`
+        );
+        if (this.onPrematureEndedCallback) {
+          this.onPrematureEndedCallback(preservedPosMs);
+          return;
+        }
+      }
+
       this.isPlaying = false;
       if (this.onEndedCallback) {
         this.onEndedCallback();
@@ -202,7 +466,10 @@ export class WebAudioDeck {
       if (el !== this.audioElement || this.isTearingDownSrc || !el.getAttribute('src')) {
         return;
       }
-      if (!isDirect) {
+      if (this.isSeeking || this.pendingReloadStartMs !== null) {
+        return;
+      }
+      if (!isDirect && !this.suppressDirectFallback) {
         const engaged = this.activateDirectFallback(this.isPlaying);
         if (engaged) {
           return;
@@ -261,12 +528,18 @@ export class WebAudioDeck {
       // Ignore
     }
 
-    if (this.positionMs > 0) {
+    const targetFallbackUrl =
+      this.baseStreamUrl && isYoutubeSabrStreamUrl(this.baseStreamUrl) && this.playbackOffsetMs > 0
+        ? withStartMsParam(this.baseStreamUrl, this.playbackOffsetMs)
+        : this.track.streamUrl;
+
+    const pendingOffsetPos = Math.max(0, this.positionMs - this.playbackOffsetMs);
+    if (pendingOffsetPos > 0) {
       this.pendingSeekMs = this.positionMs;
     }
 
     try {
-      this.directElement.src = this.track.streamUrl;
+      this.directElement.src = targetFallbackUrl;
       this.directElement.load();
     } catch {
       // Ignore load errors in headless tests
@@ -333,10 +606,61 @@ export class WebAudioDeck {
     }
   }
 
+  private attemptPlayWithCanPlayRetry(el: HTMLAudioElement): void {
+    Promise.resolve()
+      .then(() => el.play())
+      .catch((err: any) => {
+        if (
+          err &&
+          err.name === 'NotSupportedError' &&
+          !this.usingDirectFallback &&
+          !this.isSeeking &&
+          this.routedElement === el &&
+          this.isPlaying
+        ) {
+          if (this.activateDirectFallback(true)) {
+            return;
+          }
+        }
+        // A load() issued right after play() (stream re-resolution or seek reload) aborts the first attempt;
+        // retry once as soon as the new source can play instead of silently staying stopped.
+        if (err && (err.name === 'AbortError' || err.name === 'NotSupportedError') && this.isPlaying) {
+          if (el.readyState >= 2) {
+            setTimeout(() => {
+              if (this.isPlaying && this.audioElement === el) {
+                Promise.resolve()
+                  .then(() => el.play())
+                  .catch(() => {});
+              }
+            }, 0);
+            return;
+          }
+          const retry = () => {
+            this.clearPendingCanPlayRetry();
+            if (this.isPlaying && this.audioElement === el) {
+              Promise.resolve()
+                .then(() => el.play())
+                .catch(() => {});
+            }
+          };
+          this.pendingCanPlayRetry = retry;
+          this.pendingCanPlayRetryEl = el;
+          el.addEventListener('canplay', retry);
+        }
+      });
+  }
+
   load(track: Song): void {
     this.clearPendingCanPlayRetry();
+    this.clearSeekGuardTimer();
     this.pendingSeekMs = null;
+    this.pendingReloadStartMs = null;
+    this.playbackOffsetMs = 0;
+    this.isSeeking = false;
+    this.lastSeekTargetMs = null;
+    this.lastSeekAtMs = 0;
     this.track = track;
+    this.baseStreamUrl = track.streamUrl ? withStartMsParam(track.streamUrl, 0) : null;
     this.positionMs = 0;
     this.durationMs = track.totalPlayTimeMs || (track.durationSec ? track.durationSec * 1000 : 0);
     this.isPlaying = false;
@@ -417,10 +741,11 @@ export class WebAudioDeck {
         try {
           el.src = el.getAttribute('src') || el.src;
           el.load();
-          if (resumeMs > 0) {
+          const localResumeMs = Math.max(0, resumeMs - this.playbackOffsetMs);
+          if (localResumeMs > 0) {
             const seek = () => {
               el.removeEventListener('loadedmetadata', seek);
-              try { el.currentTime = resumeMs / 1000; } catch { /* ignore */ }
+              try { el.currentTime = localResumeMs / 1000; } catch { /* ignore */ }
             };
             el.addEventListener('loadedmetadata', seek);
           }
@@ -428,46 +753,7 @@ export class WebAudioDeck {
           // Ignore reload errors in headless tests
         }
       }
-      Promise.resolve()
-        .then(() => el.play())
-        .catch((err: any) => {
-          if (
-            err &&
-            err.name === 'NotSupportedError' &&
-            !this.usingDirectFallback &&
-            this.routedElement === el &&
-            this.isPlaying
-          ) {
-            if (this.activateDirectFallback(true)) {
-              return;
-            }
-          }
-          // A load() issued right after play() (stream re-resolution) aborts the first attempt;
-          // retry once as soon as the new source can play instead of silently staying stopped.
-          if (err && (err.name === 'AbortError' || err.name === 'NotSupportedError') && this.isPlaying) {
-            if (el.readyState >= 2) {
-              setTimeout(() => {
-                if (this.isPlaying && this.audioElement === el) {
-                  Promise.resolve()
-                    .then(() => el.play())
-                    .catch(() => {});
-                }
-              }, 0);
-              return;
-            }
-            const retry = () => {
-              this.clearPendingCanPlayRetry();
-              if (this.isPlaying && this.audioElement === el) {
-                Promise.resolve()
-                  .then(() => el.play())
-                  .catch(() => {});
-              }
-            };
-            this.pendingCanPlayRetry = retry;
-            this.pendingCanPlayRetryEl = el;
-            el.addEventListener('canplay', retry);
-          }
-        });
+      this.attemptPlayWithCanPlayRetry(el);
     }
   }
 
@@ -488,19 +774,89 @@ export class WebAudioDeck {
   }
 
   seek(positionMs: number): void {
-    this.positionMs = positionMs;
-    if (this.audioElement) {
-      if (this.audioElement.readyState >= 1) {
+    const safeMs = Math.max(0, Number.isFinite(positionMs) ? positionMs : 0);
+    const roundedMs = Math.round(safeMs);
+    this.positionMs = safeMs;
+    this.lastSeekTargetMs = safeMs;
+    this.lastSeekAtMs = Date.now();
+
+    const el = this.audioElement;
+    if (!el) {
+      this.isSeeking = false;
+      this.pendingReloadStartMs = null;
+      this.clearSeekGuardTimer();
+      return;
+    }
+
+    const rawBaseUrl =
+      this.baseStreamUrl || this.track?.streamUrl || el.getAttribute('src') || el.src || '';
+    if (isYoutubeSabrStreamUrl(rawBaseUrl)) {
+      const cleanBaseUrl = withStartMsParam(rawBaseUrl, 0);
+      this.baseStreamUrl = cleanBaseUrl;
+
+      if (isTargetSafelyBuffered(el, safeMs, this.playbackOffsetMs)) {
+        this.isSeeking = true;
         this.pendingSeekMs = null;
+        this.pendingReloadStartMs = null;
+        this.armSeekGuardTimer();
         try {
-          this.audioElement.currentTime = positionMs / 1000;
+          el.currentTime = Math.max(0, (safeMs - this.playbackOffsetMs) / 1000);
+          if (!isAsyncMediaElement(el)) {
+            this.isSeeking = false;
+            this.clearSeekGuardTimer();
+          }
         } catch {
-          // Ignore
+          this.isSeeking = false;
+          this.clearSeekGuardTimer();
         }
-      } else {
-        // Defer seeking until loadedmetadata so seeking an unloaded element never fails or ends playback
-        this.pendingSeekMs = positionMs;
+        return;
       }
+
+      const wasPlaying = this.isPlaying || (!el.paused && !el.ended);
+      this.clearPendingCanPlayRetry();
+      this.isSeeking = true;
+      this.pendingSeekMs = null;
+      this.pendingReloadStartMs = roundedMs;
+      this.playbackOffsetMs = roundedMs;
+      this.positionMs = roundedMs;
+      this.armSeekGuardTimer();
+
+      const reloadUrl = withStartMsParam(cleanBaseUrl, roundedMs);
+      try {
+        el.src = reloadUrl;
+        el.load();
+      } catch {
+        // Ignore load errors in headless tests
+      }
+
+      if (wasPlaying) {
+        this.isPlaying = true;
+        this.attemptPlayWithCanPlayRetry(el);
+      }
+      return;
+    }
+
+    if (el.readyState >= 1) {
+      this.isSeeking = true;
+      this.pendingSeekMs = null;
+      this.pendingReloadStartMs = null;
+      this.armSeekGuardTimer();
+      try {
+        el.currentTime = Math.max(0, (safeMs - this.playbackOffsetMs) / 1000);
+        if (!isAsyncMediaElement(el)) {
+          this.isSeeking = false;
+          this.clearSeekGuardTimer();
+        }
+      } catch {
+        this.isSeeking = false;
+        this.clearSeekGuardTimer();
+      }
+    } else {
+      // Defer seeking until loadedmetadata so seeking an unloaded element never fails or ends playback
+      this.isSeeking = true;
+      this.pendingReloadStartMs = null;
+      this.pendingSeekMs = safeMs;
+      this.armSeekGuardTimer();
     }
   }
 }
@@ -535,6 +891,7 @@ export class AudioEngine {
   private livePcmSubscribers = new Set<(energy32: Float32Array) => void>();
   private stateChangeSubscribers = new Set<(state: PlaybackState) => void>();
   private onTrackEndedSubscribers = new Set<() => void>();
+  private onPrematureEndedSubscribers = new Set<(positionMs: number) => void>();
   private onPlaybackErrorSubscribers = new Set<() => void>();
   private cachedWaveforms = new Map<string, Float32Array>();
 
@@ -547,6 +904,12 @@ export class AudioEngine {
   private metricsLastBeatMs = 0;
   private synthPhase = 0;
   private crossfadeSequence = 0;
+  private pendingResumePositionSec: number | null = null;
+  private pendingResumeVerifyTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingResumeVerifyCleanup: (() => void) | null = null;
+  private pendingResumeVerifyEl: HTMLAudioElement | null = null;
+  private isApplyingPendingResumeSeek = false;
+  public onResumeResetToZeroCallback: (() => void) | null = null;
 
   constructor(customCtx?: AudioContext | null) {
     this.dspChain = new DspChain();
@@ -626,10 +989,167 @@ export class AudioEngine {
 
     this.deckA.onEndedCallback = () => this._handleDeckEnded('deckA');
     this.deckB.onEndedCallback = () => this._handleDeckEnded('deckB');
+    this.deckA.onPrematureEndedCallback = (posMs) => this._handleDeckPrematureEnded('deckA', posMs);
+    this.deckB.onPrematureEndedCallback = (posMs) => this._handleDeckPrematureEnded('deckB', posMs);
     this.deckA.onErrorCallback = () => this._handleDeckError('deckA');
     this.deckB.onErrorCallback = () => this._handleDeckError('deckB');
     this.deckA.onTimeUpdateCallback = () => this._emitStateChange('timeupdate');
     this.deckB.onTimeUpdateCallback = () => this._emitStateChange('timeupdate');
+    this.deckA.onMediaReadyCallback = () => {
+      if (this.activeDeckName === 'active') this.applyPendingResumeSeek();
+    };
+    this.deckB.onMediaReadyCallback = () => {
+      if (this.activeDeckName === 'standby') this.applyPendingResumeSeek();
+    };
+  }
+
+  public setPendingResumePosition(seconds: number | null): void {
+    this.clearPendingResumeVerify();
+    this.pendingResumePositionSec =
+      typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  }
+
+  public getPendingResumePosition(): number | null {
+    return this.pendingResumePositionSec;
+  }
+
+  public clearPendingResumePosition(): void {
+    this.clearPendingResumeVerify();
+    this.pendingResumePositionSec = null;
+    this.isApplyingPendingResumeSeek = false;
+  }
+
+  private clearPendingResumeVerifyTimer(): void {
+    if (this.pendingResumeVerifyTimer !== null) {
+      clearTimeout(this.pendingResumeVerifyTimer);
+      this.pendingResumeVerifyTimer = null;
+    }
+  }
+
+  private clearPendingResumeVerify(): void {
+    this.clearPendingResumeVerifyTimer();
+    this.pendingResumeVerifyCleanup?.();
+    this.pendingResumeVerifyCleanup = null;
+    this.pendingResumeVerifyEl = null;
+  }
+
+  /**
+   * Invoked when the active deck fires loadedmetadata / canplay.
+   * Applies pendingResumePositionSec if set, then verifies within 1.5s that the stream
+   * actually sought; if the stream cannot seek or resets to 0, snaps everything to 0 immediately.
+   */
+  public applyPendingResumeSeek(): boolean {
+    const targetSec = this.pendingResumePositionSec;
+    if (targetSec === null || targetSec <= 0 || this.isApplyingPendingResumeSeek) {
+      return false;
+    }
+    const current = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    const el = current.audioElement;
+    if (!el || !(el.getAttribute('src') || el.src)) {
+      return false;
+    }
+    const rawUrl =
+      current.baseStreamUrl || current.track?.streamUrl || el.getAttribute('src') || el.src || '';
+    if (!isYoutubeSabrStreamUrl(rawUrl) && el.readyState < 1) {
+      return false;
+    }
+    if (this.pendingResumeVerifyCleanup !== null) {
+      if (this.pendingResumeVerifyEl === el) {
+        return false;
+      }
+      this.clearPendingResumeVerify();
+    }
+
+    this.isApplyingPendingResumeSeek = true;
+    try {
+      this.seek(targetSec * 1000);
+    } finally {
+      this.isApplyingPendingResumeSeek = false;
+    }
+
+    const cleanup = () => {
+      this.clearPendingResumeVerifyTimer();
+      for (const evt of ['seeked', 'loadeddata', 'canplay'] as const) {
+        try {
+          el.removeEventListener(evt, onMediaEvent);
+        } catch {
+          // Ignore in headless mock
+        }
+      }
+      if (this.pendingResumeVerifyCleanup === cleanup) {
+        this.pendingResumeVerifyCleanup = null;
+        this.pendingResumeVerifyEl = null;
+      }
+    };
+
+    const armFallbackTimer = () => {
+      if (this.pendingResumeVerifyTimer !== null) return;
+      const active = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+      const activeEl = active.audioElement;
+      if (!activeEl || active.pendingReloadStartMs !== null || activeEl.readyState < 1) {
+        return;
+      }
+      this.pendingResumeVerifyTimer = setTimeout(() => {
+        this.pendingResumeVerifyTimer = null;
+        verifyResume(true);
+      }, 1500);
+      (this.pendingResumeVerifyTimer as any)?.unref?.();
+    };
+
+    const verifyResume = (fromTimer = false) => {
+      const active = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+      const activeEl = active.audioElement;
+      if (this.pendingResumePositionSec === null || !activeEl) {
+        cleanup();
+        return;
+      }
+      if (active.pendingReloadStartMs !== null || activeEl.readyState < 1) {
+        return;
+      }
+      if (!fromTimer && (activeEl as any).seeking) {
+        armFallbackTimer();
+        return;
+      }
+
+      const actualSec =
+        active.playbackOffsetSeconds +
+        (typeof activeEl.currentTime === 'number' && Number.isFinite(activeEl.currentTime)
+          ? activeEl.currentTime
+          : 0);
+      if (Math.abs(actualSec - targetSec) < 1.5) {
+        this.pendingResumePositionSec = null;
+        cleanup();
+        return;
+      }
+
+      active.playbackOffsetMs = 0;
+      active.positionMs = 0;
+      active.isSeeking = false;
+      this.pendingResumePositionSec = null;
+      cleanup();
+      this._emitStateChange('seek');
+      this.onResumeResetToZeroCallback?.();
+    };
+
+    const onMediaEvent = () => {
+      verifyResume(false);
+      if (this.pendingResumeVerifyCleanup === cleanup) {
+        armFallbackTimer();
+      }
+    };
+
+    this.pendingResumeVerifyCleanup = cleanup;
+    this.pendingResumeVerifyEl = el;
+    for (const evt of ['seeked', 'loadeddata', 'canplay'] as const) {
+      try {
+        el.addEventListener(evt, onMediaEvent);
+      } catch {
+        // Ignore in headless mock
+      }
+    }
+    armFallbackTimer();
+
+    return true;
   }
 
   /**
@@ -651,6 +1171,7 @@ export class AudioEngine {
         : this.deckA;
 
     if (deck === 'active') {
+      this.clearPendingResumePosition();
       this.crossfadeSequence++;
       const other = target === this.deckA ? this.deckB : this.deckA;
       other.pause();
@@ -659,6 +1180,7 @@ export class AudioEngine {
       target.setFallbackVolume(this.globalVolume);
     }
 
+    target.needsStreamReResolution = false;
     target.load(track);
 
     // Pre-calculate 200-bucket amplitude envelope
@@ -690,12 +1212,23 @@ export class AudioEngine {
       other.setGain(0.0);
       target.setGain(1.0);
       target.setFallbackVolume(this.globalVolume);
+      this.setPendingResumePosition(positionMs > 0 ? positionMs / 1000 : null);
     }
 
-    target.load(track);
-    if (positionMs > 0) {
-      target.seek(positionMs);
+    const needsReResolution = isDeadOrStaleRestoredStreamUrl(track.streamUrl);
+    const loadableTrack = needsReResolution ? { ...track, streamUrl: undefined } : track;
+    target.load(loadableTrack);
+    target.needsStreamReResolution = needsReResolution;
+    target.playbackOffsetMs = 0;
+
+    // Never inflate playbackOffsetSeconds or report savedPositionMs as live playback time before stream seeks.
+    // Preserve positionMs only in headless test environments with no HTMLAudioElement (PERSIST-02).
+    if (!target.audioElement) {
+      target.positionMs = positionMs > 0 ? positionMs : 0;
+    } else {
+      target.positionMs = 0;
     }
+
     this.playbackState = 'PAUSED';
 
     // Pre-calculate 200-bucket amplitude envelope
@@ -761,6 +1294,9 @@ export class AudioEngine {
   seek(positionMs: number): void {
     if (typeof positionMs !== 'number' || isNaN(positionMs) || positionMs < 0) {
       throw new RangeError('Seek position must be a non-negative number');
+    }
+    if (!this.isApplyingPendingResumeSeek) {
+      this.clearPendingResumePosition();
     }
     const current = this.activeDeckName === 'active' ? this.deckA : this.deckB;
     if (current.track) {
@@ -865,6 +1401,167 @@ export class AudioEngine {
     incoming.setGain(1.0);
     this.playbackState = 'PLAYING';
     this._emitStateChange();
+  }
+
+  /**
+   * Stage a Lossless FLAC stream onto the standby deck in the background while Stage 1 continues
+   * playing on the active deck. Waits up to 12s for readyState >= 3 (HAVE_FUTURE_DATA) and duration > 0,
+   * seeks standby deck to the active deck's live positionMs, and performs a 300ms crossfade.
+   * On ANY failure (403, timeout, CORS, bad codec, track change), silently tears down standby deck
+   * and keeps Stage 1 playing uninterrupted, returning false.
+   */
+  async stageAndCrossfadeLosslessSwap(
+    losslessTrack: Song,
+    crossfadeMs = 300,
+    timeoutMs = 12_000
+  ): Promise<boolean> {
+    const initialActiveDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    const standbyDeck = this.activeDeckName === 'active' ? this.deckB : this.deckA;
+
+    if (
+      !losslessTrack ||
+      !losslessTrack.streamUrl ||
+      this.playbackState !== 'PLAYING' ||
+      !initialActiveDeck.track ||
+      initialActiveDeck.track.videoId !== losslessTrack.videoId
+    ) {
+      return false;
+    }
+
+    const teardownStandby = () => {
+      standbyDeck.suppressDirectFallback = false;
+      try {
+        standbyDeck.pause();
+        standbyDeck.setGain(0.0);
+        standbyDeck.track = null;
+        if (standbyDeck.audioElement) {
+          if (standbyDeck.audioElement.getAttribute('src') || standbyDeck.audioElement.src) {
+            standbyDeck.audioElement.removeAttribute('src');
+            standbyDeck.audioElement.load();
+          }
+        }
+      } catch {
+        // Ignore teardown errors
+      }
+    };
+
+    try {
+      standbyDeck.setGain(0.0);
+      standbyDeck.setFallbackVolume(this.globalVolume);
+      standbyDeck.suppressDirectFallback = true;
+      standbyDeck.load(losslessTrack);
+
+      const el = standbyDeck.audioElement;
+      if (!el) {
+        teardownStandby();
+        return false;
+      }
+
+      const isReady = () =>
+        !el.error &&
+        el.readyState >= 3 &&
+        Number.isFinite(el.duration) &&
+        el.duration > 0;
+
+      if (!isReady()) {
+        const readyOk = await new Promise<boolean>((resolve) => {
+          let settled = false;
+          const finish = (result: boolean) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            el.removeEventListener('canplay', onEvent);
+            el.removeEventListener('canplaythrough', onEvent);
+            el.removeEventListener('loadeddata', onEvent);
+            el.removeEventListener('loadedmetadata', onEvent);
+            el.removeEventListener('error', onError);
+            resolve(result);
+          };
+
+          const onEvent = () => {
+            if (el.error) {
+              finish(false);
+              return;
+            }
+            if (isReady()) {
+              finish(true);
+            }
+          };
+
+          const onError = () => {
+            finish(false);
+          };
+
+          const timer = setTimeout(() => {
+            finish(isReady());
+          }, timeoutMs);
+
+          el.addEventListener('canplay', onEvent);
+          el.addEventListener('canplaythrough', onEvent);
+          el.addEventListener('loadeddata', onEvent);
+          el.addEventListener('loadedmetadata', onEvent);
+          el.addEventListener('error', onError);
+
+          if (el.error) {
+            finish(false);
+          } else if (isReady()) {
+            finish(true);
+          }
+        });
+
+        if (!readyOk) {
+          teardownStandby();
+          return false;
+        }
+      }
+
+      standbyDeck.suppressDirectFallback = false;
+
+      // Verify same active track is still actively playing before swapping
+      const currentActiveDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+      if (
+        this.playbackState !== 'PLAYING' ||
+        currentActiveDeck !== initialActiveDeck ||
+        currentActiveDeck.track?.videoId !== losslessTrack.videoId
+      ) {
+        teardownStandby();
+        return false;
+      }
+
+      const livePosMs = this.getCurrentPositionMs();
+      standbyDeck.seek(livePosMs);
+
+      await this.crossfade('standby', crossfadeMs);
+
+      const newActiveDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+      if (
+        newActiveDeck !== standbyDeck ||
+        newActiveDeck.audioElement?.error ||
+        this.playbackState !== 'PLAYING'
+      ) {
+        return false;
+      }
+
+      // Cleanly release outgoing Stage 1 element src
+      try {
+        initialActiveDeck.pause();
+        initialActiveDeck.setGain(0.0);
+        if (
+          initialActiveDeck.audioElement &&
+          (initialActiveDeck.audioElement.getAttribute('src') || initialActiveDeck.audioElement.src)
+        ) {
+          initialActiveDeck.audioElement.removeAttribute('src');
+          initialActiveDeck.audioElement.load();
+        }
+      } catch {
+        // Ignore outgoing cleanup errors
+      }
+
+      return true;
+    } catch {
+      teardownStandby();
+      return false;
+    }
   }
 
   /**
@@ -984,6 +1681,29 @@ export class AudioEngine {
     return () => this.onTrackEndedSubscribers.delete(callback);
   }
 
+  /**
+   * Subscribe to premature 'ended' events (when <audio> stops well before expectedDurSec - 5s)
+   * so playerStore can recover the stream at positionMs without advancing the queue.
+   */
+  onPrematureEnded(callback: (positionMs: number) => void): () => void {
+    this.onPrematureEndedSubscribers.add(callback);
+    return () => this.onPrematureEndedSubscribers.delete(callback);
+  }
+
+  private _handleDeckPrematureEnded(deckId: 'deckA' | 'deckB', positionMs: number): void {
+    const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    const endedDeck = deckId === 'deckA' ? this.deckA : this.deckB;
+    if (activeDeck !== endedDeck) return;
+    activeDeck.positionMs = positionMs;
+    for (const cb of this.onPrematureEndedSubscribers) {
+      try {
+        cb(positionMs);
+      } catch (err) {
+        console.warn('[AudioEngine] onPrematureEnded subscriber error:', err);
+      }
+    }
+  }
+
   private _handleDeckEnded(deckId: 'deckA' | 'deckB'): void {
     const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
     const endedDeck = deckId === 'deckA' ? this.deckA : this.deckB;
@@ -1042,18 +1762,63 @@ export class AudioEngine {
   }
 
   /**
+   * Exact active playback time in seconds from the active deck's HTMLAudioElement.
+   * Returns 0 if no audio element or src is bound.
+   */
+  public getCurrentTime(): number {
+    const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    const el = activeDeck.audioElement;
+    if (!el || !(el.getAttribute('src') || el.src)) {
+      return 0;
+    }
+    if (activeDeck.isSeeking) {
+      return Math.max(0, activeDeck.positionMs / 1000);
+    }
+    const elSec =
+      typeof el.currentTime === 'number' && Number.isFinite(el.currentTime) && el.currentTime >= 0
+        ? el.currentTime
+        : 0;
+    return Math.max(0, activeDeck.playbackOffsetSeconds + elSec);
+  }
+
+  /**
    * Read real-time playback position from the active deck's HTMLAudioElement when metadata is loaded.
    */
   getCurrentPositionMs(): number {
     const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
-    if (
-      activeDeck.audioElement &&
-      activeDeck.audioElement.readyState >= 1 &&
-      (activeDeck.audioElement.getAttribute('src') || activeDeck.audioElement.src)
-    ) {
-      activeDeck.positionMs = Math.round(activeDeck.audioElement.currentTime * 1000);
+    const el = activeDeck.audioElement;
+    if (!el || !(el.getAttribute('src') || el.src)) {
+      return 0;
     }
-    return activeDeck.positionMs;
+    if (activeDeck.isSeeking) {
+      return activeDeck.positionMs;
+    }
+    const ms = Math.round(this.getCurrentTime() * 1000);
+    activeDeck.positionMs = ms;
+    return ms;
+  }
+
+  getCurrentPositionSeconds(): number {
+    return this.getCurrentTime();
+  }
+
+  isSeeking(): boolean {
+    const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    return activeDeck.isSeeking;
+  }
+
+  public isSeekingActive(): boolean {
+    const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    return activeDeck.isSeeking || this.pendingResumeVerifyTimer !== null;
+  }
+
+  getPlaybackOffsetMs(): number {
+    const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
+    return activeDeck.playbackOffsetMs;
+  }
+
+  getPlaybackOffsetSeconds(): number {
+    return this.getPlaybackOffsetMs() / 1000;
   }
 
   /**
@@ -1068,14 +1833,7 @@ export class AudioEngine {
    */
   getCurrentDurationMs(): number {
     const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
-    if (
-      activeDeck.audioElement &&
-      Number.isFinite(activeDeck.audioElement.duration) &&
-      activeDeck.audioElement.duration > 0
-    ) {
-      activeDeck.durationMs = Math.round(activeDeck.audioElement.duration * 1000);
-    }
-    return activeDeck.durationMs;
+    return activeDeck.syncDurationFromElement();
   }
 
   /**
@@ -1121,6 +1879,10 @@ export class AudioEngine {
    */
   seekTo(positionMs: number): void {
     this.seek(positionMs);
+  }
+
+  seekSeconds(sec: number): void {
+    this.seek(sec * 1000);
   }
 
   /**
@@ -1277,7 +2039,7 @@ export class AudioEngine {
       treble = Math.max(0, Math.min(1, this.visualizer.highLevel));
     }
 
-    // 3. Beat onset detection on bass energy
+    // 3. Beat onset detection on bass energy + zero-GC BPM estimator
     const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const prevAvg = this.metricsRollingBass;
     const isBeat =
@@ -1289,12 +2051,15 @@ export class AudioEngine {
       this.metricsLastBeatMs = nowMs;
     }
     this.metricsRollingBass = prevAvg * 0.82 + bass * 0.18;
+    this.visualizer.updateBeatMetrics(bass, nowMs);
 
     target.rmsLevel = rms;
     target.bassEnergy = bass;
     target.midEnergy = mid;
     target.trebleEnergy = treble;
     target.beatDetected = isBeat;
+    (target as any).estimatedBpm = this.visualizer.getEstimatedBpm();
+    (target as any).beatStrength = this.visualizer.getBeatStrength();
 
     return target;
   }

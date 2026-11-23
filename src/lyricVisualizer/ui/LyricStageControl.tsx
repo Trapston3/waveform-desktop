@@ -65,6 +65,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const webGlCanvasRef = useRef<HTMLCanvasElement>(null);
+  const shipCanvasRef = useRef<HTMLCanvasElement>(null);
   const canvas2dRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<LyricStageRenderer | null>(null);
   const syncEngineRef = useRef<SyncEngine>(new SyncEngine());
@@ -78,6 +79,12 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     wordProgress: 0,
     lineFadeAlpha: 1,
     didSeekThisFrame: false,
+    isInstrumentalGap: false,
+    gapProgress: 0,
+    timeUntilNextLine: Number.POSITIVE_INFINITY,
+    hasLyrics: false,
+    lastActiveLineIndex: -1,
+    nextLineIndex: -1,
   });
   const broadcastPayloadRef = useRef<{
     track: TrackInfo | null;
@@ -337,6 +344,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
   useEffect(() => {
     const canvas = canvas2dRef.current;
     const webGlCanvas = webGlCanvasRef.current;
+    const shipCanvas = shipCanvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
 
@@ -347,6 +355,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     const renderer = new LyricStageRenderer({
       canvas,
       webGlCanvas,
+      shipCanvas,
       styleId: state.config.styleId,
       variationId: initialVarId,
       fontFamily: getBundledFontCssFamily(state.config.fontId),
@@ -357,6 +366,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       backgroundOpacity: state.config.backgroundOpacity,
       vignetteStrength: state.config.vignetteStrength,
       textAlign: state.config.textAlign,
+      scriptMode: state.config.scriptMode,
       trackMetadata,
       isAmbientMode,
       isOverlayMode,
@@ -407,6 +417,12 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
         out.wordProgress = syncResult.wordProgress;
         out.lineFadeAlpha = syncResult.lineFadeAlpha;
         out.didSeekThisFrame = syncResult.didSeekThisFrame;
+        out.isInstrumentalGap = syncResult.isInstrumentalGap;
+        out.gapProgress = syncResult.gapProgress;
+        out.timeUntilNextLine = syncResult.timeUntilNextLine;
+        out.hasLyrics = syncResult.hasLyrics;
+        out.lastActiveLineIndex = syncResult.lastActiveLineIndex;
+        out.nextLineIndex = syncResult.nextLineIndex;
         return out;
       },
     });
@@ -467,6 +483,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       vignetteStrength: config.vignetteStrength,
       textAlign: config.textAlign,
     });
+    renderer.setScriptMode(config.scriptMode);
     renderer.setTrackMetadata(trackMetadata);
     renderer.setModes({
       reduceMotion: config.reduceMotion,
@@ -490,6 +507,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     config.backgroundOpacity,
     config.vignetteStrength,
     config.textAlign,
+    config.scriptMode,
     trackMetadata,
     activePalette,
     isAmbientMode,
@@ -622,6 +640,12 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
         className="absolute inset-0 block w-full h-full pointer-events-none z-0 bg-transparent"
       />
 
+      {/* Three.js 3D Starfighter & Asteroid Layer */}
+      <canvas
+        ref={shipCanvasRef}
+        className="absolute inset-0 block w-full h-full pointer-events-none z-[1] bg-transparent"
+      />
+
       {/* Primary 2D Lyric Stage Canvas (Click-line-to-seek, wheel & drag scroll enabled) */}
       <canvas
         ref={canvas2dRef}
@@ -636,7 +660,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
           cursor: isDraggingStage ? 'grabbing' : isHoveringLine ? 'pointer' : 'default',
           touchAction: 'none',
         }}
-        className="absolute inset-0 block w-full h-full z-[1] bg-transparent"
+        className="absolute inset-0 block w-full h-full z-[2] bg-transparent"
       />
 
       {/* Theme-adapted Floating "Sync with Playback" button when manually browsing */}

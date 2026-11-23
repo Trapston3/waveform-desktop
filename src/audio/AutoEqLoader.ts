@@ -2,6 +2,15 @@
 // Headphone AutoEQ calibration database loader & binary PaP preset decoder
 // Conforming to Feature 7 (PROJECT.md) and Survey 2 & 3
 
+import {
+  SqliteAutoEqReader,
+  scoreAutoEqMatch,
+  normalizeAutoEqCompact,
+  extractMeasurementRig,
+} from './sqliteReader';
+
+export { normalizeAutoEqCompact, extractMeasurementRig, scoreAutoEqMatch };
+
 const getNodeBuiltin = (id: string): any => {
   try {
     const proc = (globalThis as any).process;
@@ -16,7 +25,6 @@ const getNodeBuiltin = (id: string): any => {
 
 const path = getNodeBuiltin('node:path');
 const fs = getNodeBuiltin('node:fs');
-const nodeModule = getNodeBuiltin('node:module');
 const nodeUrl = getNodeBuiltin('node:url');
 
 export type BiquadFilterType =
@@ -162,9 +170,25 @@ export function calculatePreampGainDb(filters: AutoEqFilter[]): number {
   return maxBoost > 0 ? -Number(maxBoost.toFixed(1)) : 0.0;
 }
 
+export interface AutoEqStatus {
+  ready: boolean;
+  totalCount: number;
+  parametricCount: number;
+  source: 'ipc' | 'sqliteReader' | 'curated';
+}
+
+function cloneAutoEqProfile(profile: AutoEqProfile): AutoEqProfile {
+  return {
+    ...profile,
+    filters: profile.filters.map((f) => ({ ...f })),
+  };
+}
+
 export class AutoEqLoader {
-  private static cachedDbInstance: any = null;
+  private static cachedDbInstance: SqliteAutoEqReader | null = null;
   private static dbResolved = false;
+  private static profileCache = new Map<string, AutoEqProfile | null>();
+  private static searchCache = new Map<string, AutoEqSearchResult[]>();
 
   /**
    * Closes the active SQLite database connection and resets resolution state.
@@ -180,35 +204,24 @@ export class AutoEqLoader {
     }
     this.cachedDbInstance = null;
     this.dbResolved = false;
+    this.profileCache.clear();
+    this.searchCache.clear();
   }
 
   /**
-   * Resolves the SQLite database connection to auto_eq.db when in Node / Electron environment.
-   * Utilizes createRequire(import.meta.url) to load node:sqlite in standard Node.js ESM.
+   * Resolves the pure-TS SQLite B-tree reader for auto_eq.db when in Node / Electron environment.
    */
-  private static getDatabase(): any {
+  private static getDatabase(): SqliteAutoEqReader | null {
     if (this.dbResolved) return this.cachedDbInstance;
     this.dbResolved = true;
 
     try {
-      if (typeof process !== 'undefined' && process.versions?.node) {
-        // Load node:sqlite via ESM-compatible createRequire
-        const createReq = nodeModule?.createRequire || (nodeModule as any)?.default?.createRequire;
+      if (typeof process !== 'undefined' && process.versions?.node && path && fs) {
         const toPath = nodeUrl?.fileURLToPath || (nodeUrl as any)?.default?.fileURLToPath;
-        if (typeof createReq !== 'function') {
-          this.cachedDbInstance = null;
-          return null;
-        }
-        const require = createReq(import.meta.url);
-        const { DatabaseSync } = require('node:sqlite');
-        if (!DatabaseSync) {
-          this.cachedDbInstance = null;
-          return null;
-        }
-
-        const currentDir = typeof import.meta.url === 'string' && typeof toPath === 'function'
-          ? path.dirname(toPath(import.meta.url))
-          : process.cwd();
+        const currentDir =
+          typeof import.meta.url === 'string' && typeof toPath === 'function'
+            ? path.dirname(toPath(import.meta.url))
+            : process.cwd();
 
         const candidatePaths: string[] = [
           process.env.AUTOEQ_DB_PATH,
@@ -224,13 +237,13 @@ export class AutoEqLoader {
 
         for (const candidate of candidatePaths) {
           if (fs.existsSync(candidate)) {
-            this.cachedDbInstance = new DatabaseSync(candidate, { readOnly: true });
+            this.cachedDbInstance = new SqliteAutoEqReader(candidate);
             break;
           }
         }
       }
     } catch {
-      // In browser or environments without node:sqlite, fallback to curated in-memory profiles
+      // In browser or environments without filesystem access, fallback to IPC or curated profiles
       this.cachedDbInstance = null;
     }
 
@@ -238,12 +251,50 @@ export class AutoEqLoader {
   }
 
   /**
-   * Searches for a headphone profile by name or ID (case-insensitive).
-   * Checks curated benchmark profiles first, then queries auto_eq.db SQLite database.
+   * Returns AutoEQ database readiness and row counts via IPC in renderer or pure-TS SQLite reader in Node.
+   */
+  public static async getStatus(): Promise<AutoEqStatus> {
+    if (typeof window !== 'undefined' && typeof (window as any).electronAPI?.getAutoEqStatus === 'function') {
+      try {
+        const ipcStatus = await (window as any).electronAPI.getAutoEqStatus();
+        if (ipcStatus && typeof ipcStatus.totalCount === 'number') {
+          return {
+            ready: Boolean(ipcStatus.ready),
+            totalCount: ipcStatus.totalCount,
+            parametricCount: ipcStatus.parametricCount ?? 0,
+            source: 'ipc',
+          };
+        }
+      } catch {
+        // Fallback to local reader
+      }
+    }
+
+    const db = this.getDatabase();
+    if (db) {
+      return {
+        ready: !db.isClosed(),
+        totalCount: db.totalCount,
+        parametricCount: db.parametricCount,
+        source: 'sqliteReader',
+      };
+    }
+
+    return {
+      ready: false,
+      totalCount: CURATED_AUTOEQ_PROFILES.length,
+      parametricCount: CURATED_AUTOEQ_PROFILES.length,
+      source: 'curated',
+    };
+  }
+
+  /**
+   * Searches for a headphone profile by name or ID (case-insensitive, punctuation-insensitive).
+   * Checks curated benchmark profiles first, then delegates to IPC in renderer or pure-TS auto_eq.db reader.
    */
   public static async findProfile(nameOrId: string): Promise<AutoEqProfile | null> {
     if (!nameOrId || typeof nameOrId !== 'string') return null;
-    if (nameOrId.length > 256 || nameOrId.includes('\0')) return null;
+    if (nameOrId.length > 256 || /[\x00-\x1f\x7f]/.test(nameOrId)) return null;
     const trimmed = nameOrId.trim();
     if (trimmed.length === 0) return null; // B07-T04
 
@@ -254,14 +305,11 @@ export class AutoEqLoader {
       (p) => p.name.toLowerCase() === lower || p.id.toLowerCase() === lower
     );
     if (curated) {
-      return {
-        ...curated,
-        filters: curated.filters.map((f) => ({ ...f })),
-      };
+      return cloneAutoEqProfile(curated);
     }
 
     // 2. In renderer with Electron IPC, delegate query to main process
-    if (typeof window !== 'undefined' && (window as any).electronAPI?.findAutoEqProfile) {
+    if (typeof window !== 'undefined' && typeof (window as any).electronAPI?.findAutoEqProfile === 'function') {
       try {
         const ipcProfile = await (window as any).electronAPI.findAutoEqProfile(nameOrId);
         if (ipcProfile) return ipcProfile;
@@ -270,153 +318,119 @@ export class AutoEqLoader {
       }
     }
 
-    // 3. Query SQLite auto_eq.db if available
+    // 3. Fast in-memory profile lookup cache
+    if (this.profileCache.has(lower)) {
+      const cached = this.profileCache.get(lower);
+      return cached ? cloneAutoEqProfile(cached) : null;
+    }
+
+    // 4. Query pure-TS SQLite reader if available
     const db = this.getDatabase();
     if (db) {
       try {
-        // Priority 1: Exact name match on parametric presets, prioritizing Oratory1990/Crinacle/Rtings
-        let row = db
-          .prepare(
-            `SELECT name, meta, data_blob 
-             FROM eq_presets 
-             WHERE LOWER(name) = ? AND parametric = 1 
-             ORDER BY 
-               CASE 
-                 WHEN meta LIKE '%Oratory1990%' THEN 1 
-                 WHEN meta LIKE '%Crinacle%' THEN 2 
-                 WHEN meta LIKE '%Rtings%' THEN 3 
-                 ELSE 4 
-               END, _id ASC 
-             LIMIT 1`
-          )
-          .get(lower);
-
-        // Priority 2: Substring / fuzzy LIKE search
-        if (!row || !row.data_blob) {
-          row = db
-            .prepare(
-              `SELECT name, meta, data_blob 
-               FROM eq_presets 
-               WHERE LOWER(name) LIKE ? AND parametric = 1 
-               ORDER BY 
-                 CASE 
-                   WHEN meta LIKE '%Oratory1990%' THEN 1 
-                   WHEN meta LIKE '%Crinacle%' THEN 2 
-                   WHEN meta LIKE '%Rtings%' THEN 3 
-                   ELSE 4 
-                 END, _id ASC 
-               LIMIT 1`
-            )
-            .get(`%${lower}%`);
-        }
-
-        // Priority 3: Slugified search (e.g. 'audeze_lcd_x' -> '%audeze%lcd%x%')
-        if (!row || !row.data_blob) {
-          const cleanTokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
-          const minLen = cleanTokens.join('').length;
-          const isSqlKeywords = cleanTokens.every((t) =>
-            ['or', 'and', 'select', 'union', 'drop', 'table', 'from', 'where', 'insert', 'delete', '1', 'true', 'false'].includes(t)
-          );
-          if (cleanTokens.length > 0 && minLen >= 3 && !isSqlKeywords) {
-            const slugPattern = `%${cleanTokens.join('%')}%`;
-            const candidate = db
-              .prepare(
-                `SELECT name, meta, data_blob 
-                 FROM eq_presets 
-                 WHERE LOWER(name) LIKE ? AND parametric = 1 
-                 ORDER BY 
-                   CASE 
-                     WHEN meta LIKE '%Oratory1990%' THEN 1 
-                     WHEN meta LIKE '%Crinacle%' THEN 2 
-                     WHEN meta LIKE '%Rtings%' THEN 3 
-                     ELSE 4 
-                   END, _id ASC 
-                 LIMIT 1`
-              )
-              .get(slugPattern);
-
-            if (candidate && candidate.data_blob) {
-              const rowSlug = candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-              const searchSlug = cleanTokens.join('_');
-              if (rowSlug.includes(searchSlug) || searchSlug.includes(rowSlug)) {
-                row = candidate;
+        const entry = db.findBestMatch(trimmed, true);
+        if (entry) {
+          const blob = db.readPresetBlob(entry);
+          if (blob) {
+            const filters = decodePapParametricBlob(blob);
+            if (filters.length > 0) {
+              const preampGainDb = calculatePreampGainDb(filters);
+              const profile: AutoEqProfile = {
+                id: entry.name.toLowerCase().replace(/[^a-z0-9]/g, '_'),
+                name: entry.name,
+                source: entry.meta || 'AutoEQ',
+                preampGainDb,
+                filters,
+              };
+              if (this.profileCache.size > 512) {
+                const oldestKey = this.profileCache.keys().next().value;
+                if (oldestKey !== undefined) this.profileCache.delete(oldestKey);
               }
+              this.profileCache.set(lower, profile);
+              return cloneAutoEqProfile(profile);
             }
           }
-        }
-
-        if (row && row.data_blob) {
-          const uint8 = new Uint8Array(row.data_blob);
-          const filters = decodePapParametricBlob(uint8);
-          const preampGainDb = calculatePreampGainDb(filters);
-
-          return {
-            id: row.name.toLowerCase().replace(/[^a-z0-9]/g, '_'),
-            name: row.name,
-            source: row.meta || 'AutoEQ',
-            preampGainDb,
-            filters,
-          };
         }
       } catch {
         // Suppress database lookup errors
       }
     }
 
+    this.profileCache.set(lower, null);
     return null;
   }
 
   /**
-   * Searches headphone profile names for auto-complete and search menus.
+   * Searches headphone profile names for auto-complete and search menus (<5ms repeat searches).
    */
   public static async searchHeadphones(query: string, limit = 20): Promise<AutoEqSearchResult[]> {
     if (!query || typeof query !== 'string' || !query.trim()) return [];
-    if (query.length > 256 || query.includes('\0')) return [];
-    const trimmed = query.trim().toLowerCase();
+    if (query.length > 256 || /[\x00-\x1f\x7f]/.test(query)) return [];
+
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit) || 20));
+    const trimmed = query.trim();
+    const cacheKey = `${trimmed.toLowerCase()}::${safeLimit}`;
 
     // In renderer with Electron IPC, delegate search to main process
-    if (typeof window !== 'undefined' && (window as any).electronAPI?.searchAutoEq) {
+    if (typeof window !== 'undefined' && typeof (window as any).electronAPI?.searchAutoEq === 'function') {
       try {
-        const ipcResults = await (window as any).electronAPI.searchAutoEq(query, limit);
+        const ipcResults = await (window as any).electronAPI.searchAutoEq(query, safeLimit);
         if (Array.isArray(ipcResults) && ipcResults.length > 0) {
-          return ipcResults;
+          return ipcResults.slice(0, safeLimit);
+        }
+        if (Array.isArray(ipcResults) && !this.getDatabase()) {
+          return [];
         }
       } catch {
         // Fallback to local search
       }
     }
 
-    const results: AutoEqSearchResult[] = [];
+    const cached = this.searchCache.get(cacheKey);
+    if (cached) {
+      return cached.map((r) => ({ ...r }));
+    }
 
-    // Check curated profiles
+    const candidates = new Map<string, { result: AutoEqSearchResult; score: number }>();
+
+    // Score curated profiles
+    const lowerQuery = trimmed.toLowerCase();
     for (const p of CURATED_AUTOEQ_PROFILES) {
-      if (p.name.toLowerCase().includes(trimmed) || p.id.includes(trimmed)) {
-        results.push({
-          id: p.id,
-          name: p.name,
-          meta: p.source,
-          parametric: true,
+      let score = scoreAutoEqMatch(trimmed, { name: p.name, meta: p.source, parametric: true });
+      if (score === 0 && p.id.toLowerCase().includes(lowerQuery)) {
+        score = 500_000;
+      }
+      if (score > 0) {
+        candidates.set(p.name.toLowerCase(), {
+          score,
+          result: {
+            id: p.id,
+            name: p.name,
+            meta: p.source,
+            parametric: true,
+          },
         });
       }
     }
 
-    // Query SQLite database
+    // Score cached pure-TS SQLite index
     const db = this.getDatabase();
     if (db) {
       try {
-        const rows = db
-          .prepare(
-            'SELECT _id, name, meta, parametric FROM eq_presets WHERE LOWER(name) LIKE ? ORDER BY parametric DESC LIMIT ?'
-          )
-          .all(`%${trimmed}%`, limit);
-
-        for (const row of rows) {
-          if (!results.some((r) => r.name.toLowerCase() === row.name.toLowerCase())) {
-            results.push({
-              id: row._id,
-              name: row.name,
-              meta: row.meta,
-              parametric: row.parametric === 1,
+        const dbMatches = db.search(trimmed, safeLimit * 3);
+        for (const entry of dbMatches) {
+          const key = entry.name.toLowerCase();
+          const score = scoreAutoEqMatch(trimmed, entry);
+          const existing = candidates.get(key);
+          if (!existing || score > existing.score) {
+            candidates.set(key, {
+              score,
+              result: {
+                id: entry.id,
+                name: entry.name,
+                meta: entry.meta,
+                parametric: entry.parametric,
+              },
             });
           }
         }
@@ -425,6 +439,17 @@ export class AutoEqLoader {
       }
     }
 
-    return results.slice(0, limit);
+    const ordered = Array.from(candidates.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, safeLimit)
+      .map((item) => item.result);
+
+    if (this.searchCache.size > 256) {
+      const oldestKey = this.searchCache.keys().next().value;
+      if (oldestKey !== undefined) this.searchCache.delete(oldestKey);
+    }
+    this.searchCache.set(cacheKey, ordered);
+
+    return ordered.map((r) => ({ ...r }));
   }
 }

@@ -12,14 +12,13 @@ import {
   MoreHorizontal,
 } from 'lucide-react';
 import { MusicService } from '../../services/MusicService';
-import { StorageService } from '../../services/StorageService';
 import { AccountAuthService } from '../../services/AccountAuthService';
 import type { HomeShelf, BrowseItem } from '../../models/Navigation';
 import type { Song } from '../../models/Song';
-import type { ListeningHistoryEntry } from '../../models/Playlist';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
+import { useLibraryStore } from '../../state/libraryStore';
 import { PlayerPlayIcon, LosslessWaveIcon } from '../common/WaveFormIcons';
 
 export interface HomeScreenProps {
@@ -37,7 +36,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
     'Focus',
   ]);
   const [activeChip, setActiveChip] = useState<string>('ALL');
-  const [recentTracks, setRecentTracks] = useState<ListeningHistoryEntry[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [ytAuth, setYtAuth] = useState<{ connected: boolean; displayName?: string }>({
@@ -50,7 +48,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const currentTrackId = usePlayerStore((s) => s.currentTrack?.videoId);
   const { setContextQueue } = useQueueStore();
-  const { navigateToRelease, navigateToArtist } = useNavigationStore();
+  const { navigateToRelease, navigateToArtist, setReplayOpen } = useNavigationStore();
+  const listeningHistory = useLibraryStore((s) => s.listeningHistory);
+  const yearlyReplayStats = useLibraryStore((s) => s.yearlyReplayStats);
+  const monthlyStats = useLibraryStore((s) => s.monthlyStats);
+  const recentTracks = listeningHistory.slice(0, 12);
 
   useEffect(() => {
     let isMounted = true;
@@ -58,12 +60,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
       setIsLoading(true);
       try {
         const musicService = new MusicService();
-        const [homeShelves, exploreData, history, authStatus] = await Promise.all([
+        const [homeShelves, exploreData, authStatus] = await Promise.all([
           musicService.getHomeShelves(),
           musicService.getExploreCategories(),
-          Promise.resolve()
-            .then(() => new StorageService().getListeningHistory())
-            .catch(() => []),
           AccountAuthService.getAccountAuthStatus().catch(() => ({
             ytmusic: { connected: false },
             spotify: { connected: false },
@@ -74,7 +73,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
         if (exploreData.chips && exploreData.chips.length > 0) {
           setChips(['ALL', ...exploreData.chips]);
         }
-        setRecentTracks(history.slice(0, 12));
         if (authStatus?.ytmusic) {
           setYtAuth(authStatus.ytmusic);
         }
@@ -332,6 +330,54 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
         })}
       </div>
 
+      {/* 2b. Prominent 2026 Replay Highlights Banner */}
+      {(() => {
+        const replayPlays = yearlyReplayStats?.totalPlaysCount ?? monthlyStats?.totalPlaysCount ?? 0;
+        const replayMinutes = Math.round(
+          (yearlyReplayStats?.totalListeningTimeSec ?? monthlyStats?.totalListeningTimeSec ?? 0) / 60
+        );
+        const replayTopArtist =
+          yearlyReplayStats?.topArtists?.[0]?.artistName ??
+          monthlyStats?.topArtists?.[0]?.artistName ??
+          null;
+
+        return (
+          <div
+            onClick={() => setReplayOpen(true)}
+            className="acrylic-tile relative overflow-hidden rounded-2xl px-5 py-4 flex items-center justify-between gap-4 cursor-pointer group border border-white/10"
+          >
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-[#FA2D48] to-purple-600 flex items-center justify-center text-white shadow-lg shadow-[#FA2D48]/25 shrink-0">
+                <Sparkles size={20} />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-extrabold text-white tracking-tight">2026 Replay</h2>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-[#FA2D48]/20 text-[#FA2D48]">
+                    Interactive Stories
+                  </span>
+                </div>
+                <p className="text-xs text-[var(--color-text-secondary)] truncate mt-0.5">
+                  {replayPlays > 0
+                    ? `${replayMinutes.toLocaleString()} min listened • ${replayPlays.toLocaleString()} plays${replayTopArtist ? ` • Top Artist: ${replayTopArtist}` : ''}`
+                    : 'Your 2026 Replay is warming up — open your interactive 5-slide year-in-review.'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setReplayOpen(true);
+              }}
+              className="spring-press liquid-glass-pill-active px-4 py-2 rounded-full text-xs font-bold text-white shrink-0 cursor-pointer"
+            >
+              Open 2026 Replay
+            </button>
+          </div>
+        );
+      })()}
+
       {/* 3. Recently Played Carousel Shelf (with < > navigation) */}
       {recentTracks.length > 0 && (
         <section className="space-y-3">
@@ -361,7 +407,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
             }}
             className="flex items-center gap-3.5 overflow-x-auto pb-2 scrollbar-none scroll-smooth"
           >
-            {recentTracks.map((item, idx) => (
+            {recentTracks.map((item, idx) => {
+              const recentArt =
+                (item as any).artworkUrl ||
+                (/^[A-Za-z0-9_-]{11}$/.test(item.videoId || '')
+                  ? `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`
+                  : null);
+              return (
               <div
                 key={idx}
                 onClick={() =>
@@ -369,6 +421,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
                     videoId: item.videoId,
                     title: item.title,
                     artist: item.artist,
+                    albumName: (item as any).albumName || undefined,
+                    thumbnailUrl: recentArt,
+                    artworkUrl: recentArt || undefined,
                     liked: false,
                     totalPlayTimeMs: item.durationSec * 1000,
                     playCount: 1,
@@ -394,14 +449,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
                 className="acrylic-tile group flex-shrink-0 w-36 p-2.5 rounded-lg cursor-pointer"
               >
                 <div className="artwork-lockup relative w-full aspect-square rounded-lg bg-neutral-900 mb-2 overflow-hidden">
-                  <img
-                    src={`https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`}
-                    alt={item.title}
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).style.display = 'none';
-                    }}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                  />
+                  {recentArt && (
+                    <img
+                      src={recentArt}
+                      alt={item.title}
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).style.display = 'none';
+                      }}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                    />
+                  )}
                   <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-neutral-800 to-neutral-900 text-neutral-500">
                     <Music size={22} />
                   </div>
@@ -441,7 +498,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }
                   {item.artist}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}

@@ -4,16 +4,54 @@
 import type {
   Lyrics,
   LyricsLayout,
+  LyricsScriptMode,
+  LyricWord,
   MeasuredLineLayout,
   MeasuredWordLayout,
+  VisualStyleId,
 } from '../core/models';
-import type { StyleMeasurementSpec } from './styleInterface';
+import { resolveDisplayLine, type StyleMeasurementSpec } from './styleInterface';
 
 const DEFAULT_BASE_FONT_PX = 38;
 const DEFAULT_MAX_LINE_WIDTH_RATIO = 0.85;
 const LINE_GAP_MULTIPLIER = 1.48;
 const BLOCK_SPACING_MULTIPLIER = 0.72;
 const MIN_FONT_SIZE_PX = 14;
+const CJK_UNSPACED_REGEX = /[\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF65-\uFF9F]/;
+const KANA_ATTACH_REGEX = /^[ゃゅょっぁぃぅぇぉャュョッァィゥェォー、。，．！？!?,.\s]$/;
+
+function segmentTextForWrapping(text: string): string[] {
+  const spaceTokens = text.trim().split(/\s+/).filter(Boolean);
+  if (spaceTokens.length === 0) return [];
+  const out: string[] = [];
+  for (let i = 0; i < spaceTokens.length; i++) {
+    const tok = spaceTokens[i];
+    if (!CJK_UNSPACED_REGEX.test(tok) || tok.length <= 2) {
+      out.push(tok);
+      continue;
+    }
+    let current = '';
+    for (let c = 0; c < tok.length; c++) {
+      const ch = tok[c];
+      const isCjk = CJK_UNSPACED_REGEX.test(ch);
+      if (KANA_ATTACH_REGEX.test(ch)) {
+        current += ch;
+      } else if (isCjk) {
+        if (current) out.push(current);
+        current = ch;
+      } else {
+        if (current && CJK_UNSPACED_REGEX.test(current[current.length - 1])) {
+          out.push(current);
+          current = ch;
+        } else {
+          current += ch;
+        }
+      }
+    }
+    if (current) out.push(current);
+  }
+  return out;
+}
 
 function applyTextTransform(
   text: string,
@@ -36,6 +74,8 @@ export class LyricsMeasurer {
   private cachedTransform = 'none';
   private cachedLetterSpacing = '0px';
   private cachedMaxWidthRatio = -1;
+  private cachedScriptMode: LyricsScriptMode = 'auto';
+  private cachedStyleId = '';
   private cachedLayout: LyricsLayout | null = null;
   private measureCalls = 0;
 
@@ -56,6 +96,8 @@ export class LyricsMeasurer {
     this.cachedTransform = 'none';
     this.cachedLetterSpacing = '0px';
     this.cachedMaxWidthRatio = -1;
+    this.cachedScriptMode = 'auto';
+    this.cachedStyleId = '';
   }
 
   measure(
@@ -66,7 +108,9 @@ export class LyricsMeasurer {
     fontFamily: string,
     fontSizeScale: number,
     baseFontSizePx = DEFAULT_BASE_FONT_PX,
-    spec?: StyleMeasurementSpec
+    spec?: StyleMeasurementSpec,
+    scriptMode?: LyricsScriptMode,
+    styleId?: VisualStyleId | string
   ): LyricsLayout | null {
     if (!lyrics || lyrics.lines.length === 0) {
       this.cachedLyrics = lyrics;
@@ -87,6 +131,8 @@ export class LyricsMeasurer {
     const textTransform = spec?.textTransform ?? 'none';
     const letterSpacing = spec?.letterSpacing ?? '0px';
     const maxLineWidthRatio = spec?.maxLineWidthRatio ?? DEFAULT_MAX_LINE_WIDTH_RATIO;
+    const resolvedScriptMode: LyricsScriptMode = scriptMode ?? spec?.scriptMode ?? 'auto';
+    const resolvedStyleId = String(styleId ?? spec?.styleId ?? '');
 
     if (
       this.cachedLayout !== null &&
@@ -100,7 +146,9 @@ export class LyricsMeasurer {
       this.cachedMultiplier === multiplier &&
       this.cachedTransform === textTransform &&
       this.cachedLetterSpacing === letterSpacing &&
-      this.cachedMaxWidthRatio === maxLineWidthRatio
+      this.cachedMaxWidthRatio === maxLineWidthRatio &&
+      this.cachedScriptMode === resolvedScriptMode &&
+      this.cachedStyleId === resolvedStyleId
     ) {
       return this.cachedLayout;
     }
@@ -140,23 +188,49 @@ export class LyricsMeasurer {
 
       for (let li = 0; li < lyrics.lines.length; li++) {
         const line = lyrics.lines[li];
-        const sourceWords =
-          line.words && line.words.length > 0
-            ? line.words
-            : line.text
-                .trim()
-                .split(/\s+/)
-                .filter(Boolean)
-                .map((w) => ({
-                  text: w,
-                  startSeconds: line.startSeconds,
-                  endSeconds: line.endSeconds,
-                }));
+        const resolved = resolveDisplayLine(line, resolvedScriptMode, resolvedStyleId);
+        let sourceWords: readonly LyricWord[];
+        if (resolved.primaryWords && resolved.primaryWords.length > 0) {
+          // If a single unspaced CJK token overflows maxLineWidth, segment it cleanly for wrapping
+          const expanded: LyricWord[] = [];
+          let didExpand = false;
+          for (let wi = 0; wi < resolved.primaryWords.length; wi++) {
+            const w = resolved.primaryWords[wi];
+            if (CJK_UNSPACED_REGEX.test(w.text) && w.text.length > 2) {
+              const rawW = ctx.measureText(w.text).width;
+              const estW = Number.isFinite(rawW) && rawW > 0 ? rawW : w.text.length * currentFontPx;
+              if (estW > maxLineWidth * 0.92) {
+                const segs = segmentTextForWrapping(w.text);
+                if (segs.length > 1) {
+                  didExpand = true;
+                  const span = Math.max(0.02, w.endSeconds - w.startSeconds);
+                  let cur = w.startSeconds;
+                  for (let si = 0; si < segs.length; si++) {
+                    const segDur = (span * segs[si].length) / w.text.length;
+                    const segEnd = si === segs.length - 1 ? w.endSeconds : Math.min(w.endSeconds, cur + segDur);
+                    expanded.push({ text: segs[si], startSeconds: cur, endSeconds: Math.max(cur + 0.005, segEnd) });
+                    cur = segEnd;
+                  }
+                  continue;
+                }
+              }
+            }
+            expanded.push(w);
+          }
+          sourceWords = didExpand ? expanded : resolved.primaryWords;
+        } else {
+          sourceWords = segmentTextForWrapping(resolved.primaryText).map((w) => ({
+            text: w,
+            startSeconds: line.startSeconds,
+            endSeconds: line.endSeconds,
+          }));
+        }
 
         const measuredWords: MeasuredWordLayout[] = [];
         let rowX = 0;
         let rowY = 0;
         let widestRow = 0;
+        let lastGap = 0;
 
         for (let wi = 0; wi < sourceWords.length; wi++) {
           const word = sourceWords[wi];
@@ -173,8 +247,9 @@ export class LyricsMeasurer {
           }
 
           if (rowX > 0 && rowX + wordWidth > maxLineWidth) {
-            widestRow = Math.max(widestRow, rowX - spaceWidth);
+            widestRow = Math.max(widestRow, rowX - lastGap);
             rowX = 0;
+            lastGap = 0;
             rowY += lineHeightPx;
           }
 
@@ -190,17 +265,24 @@ export class LyricsMeasurer {
             wordIndex: wi,
           });
 
-          rowX += wordWidth + spaceWidth;
+          const joinGap =
+            wi + 1 < sourceWords.length &&
+            CJK_UNSPACED_REGEX.test(tokenText) &&
+            CJK_UNSPACED_REGEX.test(sourceWords[wi + 1].text)
+              ? 0
+              : spaceWidth;
+          rowX += wordWidth + joinGap;
+          lastGap = joinGap;
         }
 
         if (rowX > 0) {
-          widestRow = Math.max(widestRow, rowX - spaceWidth);
+          widestRow = Math.max(widestRow, rowX - lastGap);
         }
 
         const lineBlockHeight = rowY + lineHeightPx;
         measuredLines.push({
           lineIndex: li,
-          text: applyTextTransform(line.text, textTransform),
+          text: applyTextTransform(resolved.primaryText, textTransform),
           startSeconds: line.startSeconds,
           endSeconds: line.endSeconds,
           x: Math.max(12, (safeW - widestRow) * 0.5),
@@ -208,6 +290,8 @@ export class LyricsMeasurer {
           width: widestRow,
           height: lineBlockHeight,
           words: measuredWords,
+          ...(resolved.secondaryText !== null ? { secondaryText: resolved.secondaryText } : {}),
+          ...(resolved.isRomanized ? { isRomanized: true } : {}),
         });
 
         cursorY += lineBlockHeight + blockGapPx;
@@ -259,6 +343,8 @@ export class LyricsMeasurer {
     this.cachedTransform = textTransform;
     this.cachedLetterSpacing = letterSpacing;
     this.cachedMaxWidthRatio = maxLineWidthRatio;
+    this.cachedScriptMode = resolvedScriptMode;
+    this.cachedStyleId = resolvedStyleId;
     this.cachedLayout = layout;
     return layout;
   }

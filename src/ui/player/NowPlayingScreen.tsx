@@ -84,13 +84,20 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const [isChromeVisible, setIsChromeVisible] = useState(true);
   const [isHeaderHovered, setIsHeaderHovered] = useState(false);
   const [isDockHovered, setIsDockHovered] = useState(false);
+  const [lastSettledHasLyrics, setLastSettledHasLyrics] = useState<boolean>(true);
   const [vizContextMenu, setVizContextMenu] = useState<{ isOpen: boolean; x: number; y: number }>({
     isOpen: false,
     x: 0,
     y: 0,
   });
 
-  const { lyricsData, isLoading, fetchLyricsForTrack } = useLyricsStore();
+  const {
+    lyricsData,
+    isLoading,
+    status: lyricsStatus,
+    currentTrackId: lyricsTrackId,
+    fetchLyricsForTrack,
+  } = useLyricsStore();
   const nowPlayingLyricsMode = useLyricVisualizerStore((s) => s.nowPlayingLyricsMode);
   const setNowPlayingLyricsMode = useLyricVisualizerStore((s) => s.setNowPlayingLyricsMode);
   const nowPlayingLayout = useLyricVisualizerStore((s) => s.config.nowPlayingLayout ?? 'split');
@@ -177,6 +184,27 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
       ? 0
       : Math.round(Math.min(Math.max(stageWidth * 0.44, 380), 540));
 
+  const currentSongId = currentTrack?.videoId || (currentTrack as any)?.id || null;
+  const isLyricsSyncedToTrack = Boolean(currentSongId && lyricsTrackId === currentSongId);
+  const isLyricsSettled =
+    isLyricsSyncedToTrack &&
+    !isLoading &&
+    lyricsStatus !== 'loading' &&
+    lyricsStatus !== 'idle';
+  const currentTrackHasLyrics = Boolean(
+    lyricsStatus !== 'not_found' &&
+      lyricsStatus !== 'empty' &&
+      lyricsData?.lines &&
+      lyricsData.lines.length > 0
+  );
+  const effectiveHasLyrics = isLyricsSettled ? currentTrackHasLyrics : lastSettledHasLyrics;
+  const isNoLyricsSettled = isLyricsSettled && !currentTrackHasLyrics;
+  const isLyricsColumnCollapsed =
+    !isVisualizerMode &&
+    activeSidecar === 'lyrics' &&
+    !isArtworkHidden &&
+    !effectiveHasLyrics;
+
   // 3D Perspective Tilt and Specular Cursor Sheen for Floating Artwork Lockup
   const tilt = useTiltTransform({
     maxTiltDeg: 10,
@@ -239,6 +267,13 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     (currentTrack as any)?.lyrics,
     fetchLyricsForTrack,
   ]);
+
+  // Remember settled lyrics availability across loading transitions to prevent split/center bounce
+  useEffect(() => {
+    if (isLyricsSettled) {
+      setLastSettledHasLyrics(currentTrackHasLyrics);
+    }
+  }, [isLyricsSettled, currentTrackHasLyrics]);
 
   // Track root container width for responsive Visualizer split-view contentInsetLeft
   useEffect(() => {
@@ -483,7 +518,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
             {!isArtworkHidden && (
               <div
                 style={{
-                  background: 'linear-gradient(to right, rgba(0, 0, 0, 0.48) 0%, rgba(0, 0, 0, 0.22) 38%, transparent 56%)',
+                  background: 'linear-gradient(to right, rgba(0,0,0,0.42) 0%, rgba(0,0,0,0.18) 24%, rgba(0,0,0,0.04) 38%, transparent 45%)',
                 }}
                 className="absolute inset-0 pointer-events-none z-[2]"
               />
@@ -571,9 +606,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
       {/* Main Split / Centered Foreground Viewport (hidden only in Full-Bleed Ambient Visualizer) */}
       {!isFullBleedVisualizer && (
         <div
-          className={`relative z-10 flex-1 flex min-h-0 overflow-hidden px-6 md:px-10 lg:px-12 pt-11 ${
+          className={`relative z-10 flex-1 flex min-h-0 overflow-x-hidden px-6 md:px-10 lg:px-12 pt-11 ${
             isArtworkHidden ? 'pb-24' : 'pb-5'
-          } gap-8 lg:gap-14 items-center ${
+          } items-center ${
             isArtworkHidden
               ? 'justify-center'
               : isVisualizerMode && activeSidecar !== 'queue'
@@ -583,7 +618,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
         >
           {/* Left Column: Floating Artwork Lockup & Borderless Transport Deck (collapsed when artwork hidden) */}
           {!isArtworkHidden && (
-            <div className="pointer-events-auto w-full md:w-[340px] lg:w-[410px] max-w-md shrink-0 flex flex-col items-center space-y-3.5 overflow-hidden">
+            <div className="pointer-events-auto w-full md:w-[340px] lg:w-[410px] max-w-md shrink-0 flex flex-col items-center space-y-3.5">
             {/* Central Square Album Artwork with 3D Perspective Tilt & Specular Sheen */}
             <div
               onMouseMove={tilt.handleMouseMove}
@@ -779,8 +814,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                     : activeSidecar === 'lyrics'
                     ? 'bg-white/12 text-white/90 hover:bg-white/18'
                     : 'bg-white/[0.06] text-white/60 hover:text-white hover:bg-white/12'
-                }`}
-                title="Toggle Lyrics / Visualizer (Right-click for Visualizer options)"
+                } ${isNoLyricsSettled ? 'opacity-45' : ''}`}
+                title={
+                  isNoLyricsSettled
+                    ? 'No lyrics available'
+                    : 'Toggle Lyrics / Visualizer (Right-click for Visualizer options)'
+                }
                 aria-label="Toggle Lyrics or Visualizer"
               >
                 {isVisualizerMode ? <Sparkles size={15} /> : <AlignLeft size={15} />}
@@ -841,12 +880,22 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
           {/* Right / Centered Column: BORDERLESS FLOATING LYRICS (Classic) or Queue Sidecar */}
           {activeSidecar !== 'none' && (
             <div
-              className={`flex-1 ${
-                isArtworkHidden ? 'max-w-4xl mx-auto w-full' : 'max-w-2xl'
-              } h-full min-h-0 flex flex-col justify-center overflow-hidden ${
-                isVisualizerMode && activeSidecar === 'lyrics'
+              data-testid="now-playing-sidecar-column"
+              style={{
+                transition:
+                  'flex-grow 450ms cubic-bezier(0.22, 1, 0.36, 1), width 450ms cubic-bezier(0.22, 1, 0.36, 1), max-width 450ms cubic-bezier(0.22, 1, 0.36, 1), margin-left 450ms cubic-bezier(0.22, 1, 0.36, 1), opacity 450ms cubic-bezier(0.22, 1, 0.36, 1)',
+              }}
+              className={`now-playing-sidecar-transition h-full min-h-0 flex flex-col justify-center overflow-hidden ${
+                isLyricsColumnCollapsed
+                  ? 'basis-0 grow-0 shrink w-0 max-w-0 ml-0 opacity-0 overflow-hidden pointer-events-none'
+                  : isArtworkHidden
+                  ? 'flex-1 max-w-4xl mx-auto w-full opacity-100'
+                  : 'flex-1 w-full max-w-2xl ml-8 lg:ml-14 opacity-100'
+              } ${
+                !isLyricsColumnCollapsed &&
+                (isVisualizerMode && activeSidecar === 'lyrics'
                   ? 'pointer-events-none'
-                  : 'pointer-events-auto'
+                  : 'pointer-events-auto')
               }`}
             >
               {activeSidecar === 'lyrics' && (
@@ -1068,8 +1117,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                     : activeSidecar === 'lyrics'
                     ? 'bg-white/12 text-white/90 hover:bg-white/18'
                     : 'bg-white/[0.06] text-white/60 hover:text-white hover:bg-white/12'
-                }`}
-                title="Toggle Lyrics / Visualizer"
+                } ${isNoLyricsSettled ? 'opacity-45' : ''}`}
+                title={isNoLyricsSettled ? 'No lyrics available' : 'Toggle Lyrics / Visualizer'}
                 aria-label="Toggle Lyrics or Visualizer"
               >
                 {isVisualizerMode ? <Sparkles size={14} /> : <AlignLeft size={14} />}

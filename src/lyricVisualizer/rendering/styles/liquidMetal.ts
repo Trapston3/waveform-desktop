@@ -8,10 +8,12 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -24,6 +26,7 @@ export class LiquidMetalStyle implements ILyricVisualStyle {
 
   private scrollY = 0;
   private initialized = false;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'holo-vaporwave') return 1;
@@ -35,17 +38,20 @@ export class LiquidMetalStyle implements ILyricVisualStyle {
     return this.getVariationIndex(frame.variationId) === 1 ? 'holoVaporwave' : 'liquidMetal';
   }
 
-  getMeasurementSpec(): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     return {
       fontWeight: 800,
       fontSizeMultiplier: 1.08,
       maxLineWidthRatio: 0.82,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
   reset(): void {
     this.scrollY = 0;
     this.initialized = false;
+    this.lastKnownActiveIdx = -1;
   }
 
   render(
@@ -217,12 +223,31 @@ export class LiquidMetalStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height);
+      const gapAccent = varIdx === 1 ? '#22d3ee' : frame.palette.accentPrimary;
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, gapAccent);
+      } else {
+        drawEmptyState(ctx, frame, width, height);
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -249,11 +274,6 @@ export class LiquidMetalStyle implements ILyricVisualStyle {
     const hoveredIdx = typeof frame.hoveredLineIndex === 'number' ? frame.hoveredLineIndex : -1;
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -263,13 +283,22 @@ export class LiquidMetalStyle implements ILyricVisualStyle {
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
       const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
-      const screenY = cy + lineCenterOffset - line.height * 0.5;
+      const gapOffset =
+        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+          ? i <= scrollIdx
+            ? -58
+            : 58
+          : 0;
+      const screenY = cy + lineCenterOffset - line.height * 0.5 + gapOffset;
 
       if (screenY + line.height < -60 || screenY > height + 60) continue;
-      if (!isBrowsing && Math.abs(i - activeIdx) > 2) continue;
+      if (!isBrowsing && Math.abs(i - scrollIdx) > 2) continue;
 
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
       const lineBaseX = isLeftAlign ? leftPad : line.x;
 
       // Record hit rect in global canvas coordinates (zero allocations)
@@ -362,8 +391,22 @@ export class LiquidMetalStyle implements ILyricVisualStyle {
             ctx.fillText(word.text, wx, wy);
           }
         }
+        if (secondaryText) {
+          const secFont = Math.max(12, Math.round(fontSize * 0.4));
+          ctx.save();
+          ctx.font = `500 ${secFont}px ${frame.fontFamily}`;
+          ctx.fillStyle = varIdx === 1 ? '#e9d5ff' : frame.palette.textUpcoming;
+          ctx.globalAlpha = 0.74 * frame.lineFadeAlpha;
+          ctx.textAlign = isLeftAlign ? 'left' : 'center';
+          ctx.fillText(
+            secondaryText,
+            isLeftAlign ? leftPad : focal.width * 0.5,
+            screenY + line.height + 4
+          );
+          ctx.restore();
+        }
       } else {
-        const dist = Math.abs(i - activeIdx);
+        const dist = Math.abs(i - scrollIdx);
         const distPixels = Math.abs(lineCenterOffset);
         const alpha = isHovered
           ? 0.82
@@ -384,5 +427,15 @@ export class LiquidMetalStyle implements ILyricVisualStyle {
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(
+        ctx,
+        frame,
+        width,
+        height,
+        varIdx === 1 ? '#22d3ee' : frame.palette.accentPrimary
+      );
+    }
   }
 }

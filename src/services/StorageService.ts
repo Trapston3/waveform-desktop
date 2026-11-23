@@ -178,6 +178,312 @@ export async function readJsonSafe<T>(filePath: string, fallback: T): Promise<T>
   }
 }
 
+export interface RichListeningHistoryEntry extends ListeningHistoryEntry {
+  albumName?: string;
+  artworkUrl?: string;
+  qualityLabel?: string;
+}
+
+export interface YearlyTopTrack {
+  videoId: string;
+  title: string;
+  artist: string;
+  albumName?: string;
+  artworkUrl?: string;
+  playCount: number;
+  totalSec: number;
+}
+
+export interface YearlyTopArtist {
+  artistName: string;
+  playCount: number;
+  totalSec: number;
+  percentage: number;
+  artworkUrl?: string;
+}
+
+export interface YearlyTopAlbum {
+  albumName: string;
+  artist: string;
+  artworkUrl?: string;
+  playCount: number;
+  totalSec: number;
+}
+
+export interface YearlyQualityBreakdown {
+  lossless: number;
+  opus: number;
+  other: number;
+}
+
+export interface YearlyReplayStats {
+  year: number;
+  totalListeningTimeSec: number;
+  totalPlaysCount: number;
+  uniqueTracksCount: number;
+  uniqueArtistsCount: number;
+  peakHour: number | null;
+  longestStreakDays: number;
+  topTracks: YearlyTopTrack[];
+  topArtists: YearlyTopArtist[];
+  topAlbums: YearlyTopAlbum[];
+  qualityBreakdown: YearlyQualityBreakdown;
+}
+
+export function formatLocalYearMonth(date: Date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function formatLocalDayKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+    date.getDate()
+  ).padStart(2, '0')}`;
+}
+
+function extractEntryArtwork(song: Song): string | undefined {
+  const raw =
+    (typeof song.thumbnailUrl === 'string' && song.thumbnailUrl.trim()) ||
+    (typeof song.artworkUrl === 'string' && song.artworkUrl.trim()) ||
+    '';
+  if (!raw || raw === 'null' || raw === 'undefined') return undefined;
+  if (raw.startsWith('data:') && raw.length > 32768) return undefined;
+  return raw;
+}
+
+function extractEntryQuality(song: Song): string | undefined {
+  const raw =
+    (typeof song.sourceQuality === 'string' && song.sourceQuality.trim()) ||
+    (typeof song.audioQuality === 'string' && song.audioQuality.trim()) ||
+    (typeof song.bitrate === 'string' && song.bitrate.trim()) ||
+    (typeof song.codec === 'string' && song.codec.trim()) ||
+    '';
+  return raw || undefined;
+}
+
+function classifyQualityBucket(qualityLabel?: string): keyof YearlyQualityBreakdown {
+  const q = (qualityLabel || '').toLowerCase();
+  if (/(flac|alac|lossless|wav|aiff|pcm|hi-res|24-bit|16-bit)/.test(q)) {
+    return 'lossless';
+  }
+  if (/(opus|webm)/.test(q)) {
+    return 'opus';
+  }
+  return 'other';
+}
+
+function computeLongestStreakDays(dayKeys: Set<string>): number {
+  if (dayKeys.size === 0) return 0;
+  const epochDays = Array.from(dayKeys)
+    .map((key) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+      if (!m) return NaN;
+      return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    })
+    .filter((ms) => Number.isFinite(ms))
+    .sort((a, b) => a - b);
+
+  if (epochDays.length === 0) return 0;
+
+  let maxStreak = 1;
+  let currentStreak = 1;
+  const ONE_DAY_MS = 86_400_000;
+  for (let i = 1; i < epochDays.length; i++) {
+    if (epochDays[i] - epochDays[i - 1] === ONE_DAY_MS) {
+      currentStreak += 1;
+      if (currentStreak > maxStreak) maxStreak = currentStreak;
+    } else if (epochDays[i] > epochDays[i - 1]) {
+      currentStreak = 1;
+    }
+  }
+  return maxStreak;
+}
+
+export function computeYearlyReplayStats(
+  entries: RichListeningHistoryEntry[],
+  year = 2026,
+  monthlyFallback: MonthlyHistory[] = []
+): YearlyReplayStats {
+  const trackMap = new Map<string, YearlyTopTrack>();
+  const artistMap = new Map<string, { artistName: string; playCount: number; totalSec: number; artworkUrl?: string }>();
+  const albumMap = new Map<string, YearlyTopAlbum>();
+  const hourCounts = new Array<number>(24).fill(0);
+  const activeDays = new Set<string>();
+  const seenYearMonths = new Set<string>();
+  const qualityBreakdown: YearlyQualityBreakdown = { lossless: 0, opus: 0, other: 0 };
+
+  let totalListeningTimeSec = 0;
+  let totalPlaysCount = 0;
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry.timestamp !== 'number' || !Number.isFinite(entry.timestamp)) {
+      continue;
+    }
+    const dt = new Date(entry.timestamp);
+    if (dt.getFullYear() !== year) continue;
+
+    seenYearMonths.add(formatLocalYearMonth(dt));
+    activeDays.add(formatLocalDayKey(dt));
+    hourCounts[dt.getHours()] += 1;
+
+    const dur = Math.max(0, Math.round(Number.isFinite(entry.durationSec) ? entry.durationSec : 0));
+    totalListeningTimeSec += dur;
+    totalPlaysCount += 1;
+
+    const title = (entry.title || 'Unknown Track').trim() || 'Unknown Track';
+    const artistName = (entry.artist || 'Unknown Artist').trim() || 'Unknown Artist';
+    const artworkUrl =
+      typeof entry.artworkUrl === 'string' && entry.artworkUrl.trim() ? entry.artworkUrl.trim() : undefined;
+    const albumName =
+      typeof entry.albumName === 'string' && entry.albumName.trim() ? entry.albumName.trim() : undefined;
+
+    const trackKey = entry.videoId || `${title}::${artistName}`;
+    const existingTrack = trackMap.get(trackKey);
+    if (existingTrack) {
+      existingTrack.playCount += 1;
+      existingTrack.totalSec += dur;
+      if (!existingTrack.artworkUrl && artworkUrl) existingTrack.artworkUrl = artworkUrl;
+      if (!existingTrack.albumName && albumName) existingTrack.albumName = albumName;
+    } else {
+      trackMap.set(trackKey, {
+        videoId: entry.videoId || trackKey,
+        title,
+        artist: artistName,
+        albumName,
+        artworkUrl,
+        playCount: 1,
+        totalSec: dur,
+      });
+    }
+
+    const artistKey = artistName.toLowerCase();
+    const existingArtist = artistMap.get(artistKey);
+    if (existingArtist) {
+      existingArtist.playCount += 1;
+      existingArtist.totalSec += dur;
+      if (!existingArtist.artworkUrl && artworkUrl) existingArtist.artworkUrl = artworkUrl;
+    } else {
+      artistMap.set(artistKey, {
+        artistName,
+        playCount: 1,
+        totalSec: dur,
+        artworkUrl,
+      });
+    }
+
+    if (albumName) {
+      const albumKey = `${albumName.toLowerCase()}::${artistKey}`;
+      const existingAlbum = albumMap.get(albumKey);
+      if (existingAlbum) {
+        existingAlbum.playCount += 1;
+        existingAlbum.totalSec += dur;
+        if (!existingAlbum.artworkUrl && artworkUrl) existingAlbum.artworkUrl = artworkUrl;
+      } else {
+        albumMap.set(albumKey, {
+          albumName,
+          artist: artistName,
+          artworkUrl,
+          playCount: 1,
+          totalSec: dur,
+        });
+      }
+    }
+
+    qualityBreakdown[classifyQualityBucket(entry.qualityLabel)] += 1;
+  }
+
+  for (const monthly of Array.isArray(monthlyFallback) ? monthlyFallback : []) {
+    if (!monthly || typeof monthly.yearMonth !== 'string' || !monthly.yearMonth.startsWith(`${year}-`)) {
+      continue;
+    }
+    if (seenYearMonths.has(monthly.yearMonth) || (monthly.totalPlaysCount || 0) <= 0) {
+      continue;
+    }
+    totalListeningTimeSec += Math.max(0, Math.round(monthly.totalListeningTimeSec || 0));
+    totalPlaysCount += Math.max(0, Math.round(monthly.totalPlaysCount || 0));
+    qualityBreakdown.other += Math.max(0, Math.round(monthly.totalPlaysCount || 0));
+
+    for (const [dayKey, count] of Object.entries(monthly.dailyPlays || {})) {
+      if (count > 0 && dayKey.startsWith(`${year}-`)) {
+        activeDays.add(dayKey);
+      }
+    }
+    for (const t of monthly.topTracks || []) {
+      const key = t.videoId || `${t.title}::${t.artist}`;
+      const existing = trackMap.get(key);
+      if (existing) {
+        existing.playCount += t.playCount;
+        existing.totalSec += Math.round(t.durationSec || 0);
+      } else {
+        trackMap.set(key, {
+          videoId: t.videoId,
+          title: t.title,
+          artist: t.artist,
+          playCount: t.playCount,
+          totalSec: Math.round(t.durationSec || 0),
+        });
+      }
+    }
+    for (const a of monthly.topArtists || []) {
+      const artistName = (a.artistName || 'Unknown Artist').trim() || 'Unknown Artist';
+      const key = artistName.toLowerCase();
+      const existing = artistMap.get(key);
+      if (existing) {
+        existing.playCount += a.playCount;
+        existing.totalSec += Math.round(a.durationSec || 0);
+      } else {
+        artistMap.set(key, {
+          artistName,
+          playCount: a.playCount,
+          totalSec: Math.round(a.durationSec || 0),
+        });
+      }
+    }
+  }
+
+  let peakHour: number | null = null;
+  let peakHourCount = 0;
+  for (let h = 0; h < 24; h++) {
+    if (hourCounts[h] > peakHourCount) {
+      peakHourCount = hourCounts[h];
+      peakHour = h;
+    }
+  }
+
+  const safePlayDivisor = Math.max(1, totalPlaysCount);
+  const topTracks = Array.from(trackMap.values())
+    .sort((a, b) => b.playCount - a.playCount || b.totalSec - a.totalSec)
+    .slice(0, 10);
+
+  const topArtists: YearlyTopArtist[] = Array.from(artistMap.values())
+    .sort((a, b) => b.playCount - a.playCount || b.totalSec - a.totalSec)
+    .slice(0, 5)
+    .map((a) => ({
+      artistName: a.artistName,
+      playCount: a.playCount,
+      totalSec: a.totalSec,
+      percentage: Math.min(100, Math.round((a.playCount / safePlayDivisor) * 100)),
+      artworkUrl: a.artworkUrl,
+    }));
+
+  const topAlbums = Array.from(albumMap.values())
+    .sort((a, b) => b.playCount - a.playCount || b.totalSec - a.totalSec)
+    .slice(0, 4);
+
+  return {
+    year,
+    totalListeningTimeSec,
+    totalPlaysCount,
+    uniqueTracksCount: trackMap.size,
+    uniqueArtistsCount: artistMap.size,
+    peakHour,
+    longestStreakDays: computeLongestStreakDays(activeDays),
+    topTracks,
+    topArtists,
+    topAlbums,
+    qualityBreakdown,
+  };
+}
+
 export interface IStorageService {
   getSettings(): Promise<AppSettings>;
   updateSettings(delta: Partial<AppSettings>): Promise<void>;
@@ -190,8 +496,9 @@ export interface IStorageService {
   getFavorites(): Promise<Song[]>;
   toggleFavorite(song: Song): Promise<boolean>;
   recordListeningHistory(song: Song, durationSec: number): Promise<void>;
-  getListeningHistory(): Promise<ListeningHistoryEntry[]>;
+  getListeningHistory(): Promise<RichListeningHistoryEntry[]>;
   getMonthlyListeningHistory(yearMonth: string): Promise<MonthlyHistory>;
+  getYearlyReplayStats(year?: number): Promise<YearlyReplayStats>;
   resetListeningData(): Promise<void>;
 }
 
@@ -200,7 +507,7 @@ export class StorageService implements IStorageService {
   private settingsCache: AppSettings | null = null;
   private playlistsCache: Playlist[] | null = null;
   private favoritesCache: Song[] | null = null;
-  private listeningCache: ListeningHistoryEntry[] = [];
+  private listeningCache: RichListeningHistoryEntry[] | null = null;
   private monthlyCache: Map<string, MonthlyHistory> = new Map();
   private resourceQueues: Map<string, Promise<any>> = new Map();
   private static playlistSeq = 0;
@@ -383,6 +690,24 @@ export class StorageService implements IStorageService {
   }
 
   // --- LISTENING HISTORY (Feature 13.4) ---
+  private getListeningHistoryFilePath(): string {
+    return joinPath(this.baseDir, 'listening', 'history.json');
+  }
+
+  private async loadListeningHistoryInternal(): Promise<RichListeningHistoryEntry[]> {
+    if (this.listeningCache !== null) {
+      return this.listeningCache;
+    }
+    const loaded = await readJsonSafe<RichListeningHistoryEntry[]>(
+      this.getListeningHistoryFilePath(),
+      []
+    );
+    this.listeningCache = Array.isArray(loaded)
+      ? loaded.filter((item) => item && typeof item.videoId === 'string')
+      : [];
+    return this.listeningCache;
+  }
+
   async recordListeningHistory(song: Song, durationSec: number): Promise<void> {
     const validation = validateSongContract(song);
     if (!validation.valid) {
@@ -393,18 +718,35 @@ export class StorageService implements IStorageService {
     }
 
     const now = new Date();
-    const entry: ListeningHistoryEntry = {
+    const albumName =
+      (typeof song.albumName === 'string' && song.albumName.trim()) ||
+      (typeof song.album === 'string' && song.album.trim()) ||
+      undefined;
+    const artworkUrl = extractEntryArtwork(song);
+    const qualityLabel = extractEntryQuality(song);
+
+    const entry: RichListeningHistoryEntry = {
       videoId: song.videoId,
       title: song.title,
       artist: song.artist,
+      ...(albumName ? { albumName } : {}),
+      ...(artworkUrl ? { artworkUrl } : {}),
+      ...(qualityLabel ? { qualityLabel } : {}),
       timestamp: now.getTime(),
       durationSec,
     };
-    const yearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const yearMonth = formatLocalYearMonth(now);
     const dayKey = now.toISOString().slice(0, 10);
 
-    return this.enqueue(`history:${yearMonth}`, async () => {
-      this.listeningCache.push(entry);
+    return this.enqueue('history', async () => {
+      const history = await this.loadListeningHistoryInternal();
+      history.push(entry);
+      if (history.length > 25000) {
+        history.splice(0, history.length - 25000);
+      }
+      this.listeningCache = history;
+      await writeJsonAtomic(this.getListeningHistoryFilePath(), history);
+
       const monthly = await this.getMonthlyListeningHistory(yearMonth);
 
       monthly.totalListeningTimeSec += Math.round(durationSec);
@@ -452,8 +794,11 @@ export class StorageService implements IStorageService {
     });
   }
 
-  async getListeningHistory(): Promise<ListeningHistoryEntry[]> {
-    return [...this.listeningCache];
+  async getListeningHistory(): Promise<RichListeningHistoryEntry[]> {
+    return this.enqueue('history', async () => {
+      const history = await this.loadListeningHistoryInternal();
+      return history.map((entry) => ({ ...entry }));
+    });
   }
 
   async getMonthlyListeningHistory(yearMonth: string): Promise<MonthlyHistory> {
@@ -476,8 +821,53 @@ export class StorageService implements IStorageService {
     return JSON.parse(JSON.stringify(loaded));
   }
 
+  async getYearlyReplayStats(year = 2026): Promise<YearlyReplayStats> {
+    return this.enqueue('history', async () => {
+      const history = await this.loadListeningHistoryInternal();
+      const monthlyFallback: MonthlyHistory[] = [];
+      const prefix = `${year}-`;
+
+      for (const [ym, cached] of this.monthlyCache.entries()) {
+        if (ym.startsWith(prefix)) {
+          monthlyFallback.push(cached);
+        }
+      }
+
+      if (nodeFs && nodePath) {
+        const listeningDir = joinPath(this.baseDir, 'listening');
+        try {
+          if (nodeFs.existsSync(listeningDir)) {
+            const files = await nodeFs.promises.readdir(listeningDir);
+            for (const f of files) {
+              if (!f.startsWith(prefix) || !f.endsWith('.json')) continue;
+              const ym = f.slice(0, -5);
+              if (this.monthlyCache.has(ym)) continue;
+              const loaded = await readJsonSafe<MonthlyHistory | null>(
+                joinPath(listeningDir, f),
+                null
+              );
+              if (loaded) monthlyFallback.push(loaded);
+            }
+          }
+        } catch {
+          // Non-fatal fallback scan
+        }
+      } else {
+        for (let m = 1; m <= 12; m++) {
+          const ym = `${year}-${String(m).padStart(2, '0')}`;
+          if (this.monthlyCache.has(ym)) continue;
+          const filePath = joinPath(this.baseDir, 'listening', `${ym}.json`);
+          const loaded = await readJsonSafe<MonthlyHistory | null>(filePath, null);
+          if (loaded) monthlyFallback.push(loaded);
+        }
+      }
+
+      return computeYearlyReplayStats(history, year, monthlyFallback);
+    });
+  }
+
   async resetListeningData(): Promise<void> {
-    return this.enqueue('history:reset', async () => {
+    return this.enqueue('history', async () => {
       this.listeningCache = [];
       this.monthlyCache.clear();
 

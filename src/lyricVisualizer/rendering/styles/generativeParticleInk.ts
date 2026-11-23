@@ -9,10 +9,12 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -36,6 +38,7 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
   private writeCursor = 0;
   private lastLineIndex = -1;
   private lastWordIndex = -1;
+  private lastKnownActiveIdx = -1;
   private prngState = 0x1337c0de;
   private scrollY = 0;
   private initialized = false;
@@ -46,11 +49,13 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
     return 0;
   }
 
-  getMeasurementSpec(): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     return {
       fontWeight: 700,
       fontSizeMultiplier: 1.06,
       maxLineWidthRatio: 0.82,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
@@ -59,6 +64,7 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
     this.writeCursor = 0;
     this.lastLineIndex = -1;
     this.lastWordIndex = -1;
+    this.lastKnownActiveIdx = -1;
     this.scrollY = 0;
     this.initialized = false;
   }
@@ -241,12 +247,30 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height);
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      } else {
+        drawEmptyState(ctx, frame, width, height);
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -274,8 +298,9 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
     if (showInk) {
       // Emit burst on new word strike or beat spike
       const wordChanged =
-        frame.activeLineIndex !== this.lastLineIndex ||
-        frame.activeWordIndex !== this.lastWordIndex;
+        hasActiveLine &&
+        (frame.activeLineIndex !== this.lastLineIndex ||
+          frame.activeWordIndex !== this.lastWordIndex);
       if (wordChanged) {
         this.lastLineIndex = frame.activeLineIndex;
         this.lastWordIndex = frame.activeWordIndex;
@@ -343,11 +368,6 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
     const hoveredIdx = typeof frame.hoveredLineIndex === 'number' ? frame.hoveredLineIndex : -1;
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -357,13 +377,22 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
       const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
-      const screenY = cy + lineCenterOffset - line.height * 0.5;
+      const gapOffset =
+        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+          ? i <= scrollIdx
+            ? -58
+            : 58
+          : 0;
+      const screenY = cy + lineCenterOffset - line.height * 0.5 + gapOffset;
 
       if (screenY + line.height < -60 || screenY > height + 60) continue;
-      if (!isBrowsing && Math.abs(i - activeIdx) > 1) continue;
+      if (!isBrowsing && Math.abs(i - scrollIdx) > 1) continue;
 
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
       const lineBaseX = isLeftAlign ? leftPad : line.x;
 
       const hitLocalX = Math.max(8, lineBaseX - 16);
@@ -428,6 +457,21 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
           ctx.shadowBlur = isCurrent ? 18 + frame.audio.rmsLevel * 12 : 4;
           ctx.fillText(word.text, wx, wy);
         }
+        if (secondaryText) {
+          const secFont = Math.max(12, Math.round(fontSize * 0.4));
+          ctx.save();
+          ctx.font = `500 ${secFont}px ${frame.fontFamily}`;
+          ctx.fillStyle = frame.palette.textUpcoming;
+          ctx.globalAlpha = 0.72 * frame.lineFadeAlpha;
+          ctx.shadowBlur = 0;
+          ctx.textAlign = isLeftAlign ? 'left' : 'center';
+          ctx.fillText(
+            secondaryText,
+            isLeftAlign ? leftPad : focal.width * 0.5,
+            screenY + line.height + 4
+          );
+          ctx.restore();
+        }
       } else {
         const subScale = isBrowsing ? 0.88 : 0.62;
         const subFontSize = Math.max(14, Math.round(fontSize * subScale));
@@ -445,5 +489,9 @@ export class GenerativeParticleInkStyle implements ILyricVisualStyle {
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+    }
   }
 }

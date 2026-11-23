@@ -638,6 +638,14 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
       stageSrc.includes('findLineAtPoint'),
       'LyricStageControl must support click-line-to-seek via findLineAtPoint'
     );
+    assert.ok(
+      stageSrc.includes('shipCanvasRef') && stageSrc.includes('shipCanvas,'),
+      'LyricStageControl must mount and forward the dedicated Three.js shipCanvas layer'
+    );
+    assert.ok(
+      stageSrc.includes('config.scriptMode') && stageSrc.includes('isInstrumentalGap'),
+      'LyricStageControl must forward scriptMode and SyncEngine instrumental gap telemetry'
+    );
 
     // OverlayViewportApp, AmbientViewportApp & App.tsx portal invariants
     assert.ok(

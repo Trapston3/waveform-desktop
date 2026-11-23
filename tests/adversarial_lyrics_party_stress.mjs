@@ -12,13 +12,20 @@ export async function resolve(specifier, context, nextResolve) {
   try {
     return await nextResolve(specifier, context);
   } catch (err) {
-    if (specifier.startsWith('.') && !specifier.endsWith('.ts') && !specifier.endsWith('.js') && !specifier.endsWith('.mjs')) {
-      try {
-        return await nextResolve(specifier + '.ts', context);
-      } catch {}
-      try {
-        return await nextResolve(specifier + '/index.ts', context);
-      } catch {}
+    if (specifier.startsWith('.')) {
+      if (specifier.endsWith('.js')) {
+        try {
+          return await nextResolve(specifier.slice(0, -3) + '.ts', context);
+        } catch {}
+      }
+      if (!specifier.endsWith('.ts') && !specifier.endsWith('.js') && !specifier.endsWith('.mjs')) {
+        try {
+          return await nextResolve(specifier + '.ts', context);
+        } catch {}
+        try {
+          return await nextResolve(specifier + '/index.ts', context);
+        } catch {}
+      }
     }
     throw err;
   }
@@ -27,7 +34,14 @@ export async function resolve(specifier, context, nextResolve) {
 register(`data:text/javascript,${encodeURIComponent(resolverHook)}`, import.meta.url);
 
 const { LyricsService } = await import('../src/services/LyricsService.ts');
-const { PartySyncClient, MockPartyBroadcastServer } = await import('../src/services/PartySyncClient.ts');
+const {
+  PartySyncClient,
+  MockPartyBroadcastServer,
+  usePartyStore,
+  hashPartyRoomCode,
+  generatePartyCode,
+} = await import('../src/services/PartySyncClient.ts');
+const { PartyLanServer } = await import('../electron/partyLanServer.ts');
 
 // ============================================================================
 // SUITE 1: LYRICS SERVICE ROBUSTNESS & EDGE CASE CHALLENGES
@@ -628,5 +642,102 @@ describe('Adversarial Challenge 4: Party Sync Jitter, Drift & Anti-Oscillation',
     const connected = await client.connect('WAVE-1234', 'token_123', 'ws://127.0.0.1:9999');
     assert.strictEqual(typeof connected, 'boolean');
     client.disconnect();
+  });
+
+  test('ADV-PT08: reconcileState missing-playback null-guard does not throw on malformed state frames', () => {
+    const client = new PartySyncClient();
+    assert.doesNotThrow(() => {
+      client.handleFrame({ type: 'state', seq: 1 });
+      client.handleFrame({ type: 'state', seq: 2, playback: null });
+      client.handleFrame({ type: 'state', seq: 3, playback: 'bad' });
+      client.handleFrame(null);
+      client.handleFrame(undefined);
+    });
+  });
+
+  test('ADV-PT09: handleFrame dispatches queue, members, chat, reaction, and controlMode with deduplication', () => {
+    const client = new PartySyncClient();
+    const events = { queues: 0, members: 0, chats: [], reactions: [], modes: [] };
+    client.setCallbacks({
+      onQueueUpdate: () => events.queues++,
+      onMembersUpdate: (m) => { events.members = m.length; },
+      onChat: (msg) => events.chats.push(msg),
+      onReaction: (rx) => events.reactions.push(rx),
+      onControlModeChange: (mode) => events.modes.push(mode),
+    });
+
+    client.handleFrame({ type: 'queue', seq: 1, queue: { tracks: [], currentIndex: 0 } });
+    client.handleFrame({ type: 'members', members: [{ id: '1', name: 'A', role: 'host', isReady: true, isHost: true }] });
+    client.handleFrame({ type: 'chat', message: { id: 'c1', senderId: '1', senderName: 'A', text: 'hello', timestampMs: 1 } });
+    client.handleFrame({ type: 'chat', message: { id: 'c1', senderId: '1', senderName: 'A', text: 'hello', timestampMs: 1 } });
+    client.handleFrame({ type: 'reaction', reaction: { id: 'r1', senderId: '1', senderName: 'A', emoji: '🔥', timestampMs: 2 } });
+    client.handleFrame({ type: 'reaction', reaction: { id: 'r1', senderId: '1', senderName: 'A', emoji: '🔥', timestampMs: 2 } });
+    client.handleFrame({ type: 'controlMode', controlMode: 'collaborative' });
+
+    assert.strictEqual(events.queues, 1);
+    assert.strictEqual(events.members, 1);
+    assert.strictEqual(events.chats.length, 1);
+    assert.strictEqual(events.reactions.length, 1);
+    assert.deepStrictEqual(events.modes, ['collaborative']);
+  });
+
+  test('ADV-PT10: PartyLanServer RFC 6455 WebSocket roundtrip syncs host/guest playback, NTP, chat, and reactions', async () => {
+    const server = new PartyLanServer();
+    const info = await server.start({ partyCode: 'LAN777', port: 0, controlMode: 'host-only' });
+    assert.strictEqual(info.running, true);
+    assert.ok(info.localWsUrl && info.port > 0);
+
+    const host = new PartySyncClient();
+    const guest = new PartySyncClient();
+
+    const guestTracks = [];
+    const guestChats = [];
+    const guestReactions = [];
+    let guestMembers = 0;
+
+    guest.setCallbacks({
+      onTrackChange: (track) => guestTracks.push(track),
+      onChat: (msg) => guestChats.push(msg),
+      onReaction: (rx) => guestReactions.push(rx),
+      onMembersUpdate: (m) => { guestMembers = m.length; },
+    });
+
+    try {
+      const hostOk = await host.connect('LAN777', info.hostToken, info.localWsUrl, { memberName: 'HostDJ' });
+      const guestOk = await guest.connect('LAN777', 'guest_tok', info.localWsUrl, { memberName: 'GuestOne' });
+      assert.strictEqual(hostOk, true);
+      assert.strictEqual(guestOk, true);
+
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual(guest.getIsClockSynced(), true);
+      assert.ok(Math.abs(guest.getClockOffsetMs()) <= 20, 'LAN NTP offset should be near zero');
+      assert.strictEqual(guestMembers, 2);
+
+      host.publishSetTrack({ videoId: 'abc12345678', title: 'Test Song', artist: 'Test Artist', durationMs: 180000 }, 5000, true);
+      guest.publishChat('Sounds great!', 'GuestOne');
+      guest.publishReaction('🔥', 'GuestOne');
+
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual(guestTracks.length, 1);
+      assert.strictEqual(guestTracks[0].title, 'Test Song');
+      assert.strictEqual(guestChats.length, 1);
+      assert.strictEqual(guestChats[0].text, 'Sounds great!');
+      assert.strictEqual(guestReactions.length, 1);
+      assert.strictEqual(guestReactions[0].emoji, '🔥');
+    } finally {
+      guest.disconnect();
+      host.disconnect();
+      await server.stop();
+    }
+  });
+
+  test('ADV-PT11: usePartyStore rejects invalid codes without fake optimistic connected state and hashes room topics deterministically', async () => {
+    assert.strictEqual(hashPartyRoomCode('abc123'), hashPartyRoomCode('ABC123'));
+    assert.strictEqual(PartySyncClient.isValidPartyCode(generatePartyCode()), true);
+
+    const ok = await usePartyStore.getState().joinRoom('INVALID!!');
+    assert.strictEqual(ok, false);
+    assert.strictEqual(usePartyStore.getState().status, 'disconnected');
+    assert.ok(usePartyStore.getState().error);
   });
 });

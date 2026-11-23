@@ -302,6 +302,14 @@ export class StreamResolver {
     this.parser = parser;
   }
 
+  public invalidateCache(videoId?: string): void {
+    if (videoId) {
+      this.cache.delete(videoId);
+    } else {
+      this.cache.clear();
+    }
+  }
+
   private async ensureVisitorData(): Promise<string | undefined> {
     const existing = this.client.getVisitorData() || this.visitorData;
     if (existing && Date.now() - this.visitorDataFetchedAt < StreamResolver.VISITOR_TTL_MS) {
@@ -514,7 +522,7 @@ export class StreamResolver {
           quality: '256kbps AAC',
           format: 'audio/mp4',
           bitrate: 256000,
-          durationMs: item.trackTimeMillis || 30000,
+          durationMs: 30000,
           expiresAtMs: Date.now() + StreamResolver.TTL_MS,
         };
       }
@@ -798,15 +806,18 @@ export class StreamResolver {
     songId: string,
     title?: string,
     artist?: string,
-    targetDurationSec?: number
+    targetDurationSec?: number,
+    options?: { skipSabr?: boolean }
   ): Promise<ResolvedStream | null> {
     const mappedFixture = FIXTURE_VIDEO_ID_MAP[songId];
     const targetVideoId = mappedFixture ? mappedFixture.videoId : songId;
     const isDirectYtId = /^[A-Za-z0-9_-]{11}$/.test(targetVideoId);
 
     if (isDirectYtId) {
-      const sabr = await this.resolveViaElectronSabr(targetVideoId);
-      if (sabr) return sabr;
+      if (!options?.skipSabr) {
+        const sabr = await this.resolveViaElectronSabr(targetVideoId);
+        if (sabr) return sabr;
+      }
       const direct = await this.resolveViaDirectClients(targetVideoId);
       if (direct) return direct;
     }

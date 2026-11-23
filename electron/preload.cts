@@ -19,6 +19,14 @@ export interface ElectronAPI {
   fetch: (url: string, options?: Record<string, any>) => Promise<ElectronFetchResult>;
   searchAutoEq: (query: string, limit?: number) => Promise<any[]>;
   findAutoEqProfile: (nameOrId: string) => Promise<any | null>;
+  getAutoEqStatus: () => Promise<any>;
+  partyStartLanHost: (options?: Record<string, any>) => Promise<any>;
+  partyStopLanHost: () => Promise<boolean>;
+  partyGetLanInfo: () => Promise<any>;
+  discordRpcUpdate: (payload: Record<string, any>) => Promise<boolean>;
+  discordRpcClear: () => Promise<boolean>;
+  discordRpcGetStatus: () => Promise<any>;
+  discordRpcConfigure: (config: Record<string, any>) => Promise<any>;
   selectLocalFolder: () => Promise<{ canceled: boolean; folderPath: string | null }>;
   scanLocalFolder: (folderPath: string) => Promise<any[]>;
   loadLocalLibraryCache: () => Promise<{ version: number; folders: string[]; tracks: any[]; updatedAt?: number } | null>;
@@ -81,6 +89,22 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.invoke('autoeq-search', query, limit),
   findAutoEqProfile: (nameOrId: string) =>
     ipcRenderer.invoke('autoeq-find-profile', nameOrId),
+  getAutoEqStatus: () =>
+    ipcRenderer.invoke('autoeq:status'),
+  partyStartLanHost: (options?: Record<string, any>) =>
+    ipcRenderer.invoke('party:startLanHost', options),
+  partyStopLanHost: () =>
+    ipcRenderer.invoke('party:stopLanHost'),
+  partyGetLanInfo: () =>
+    ipcRenderer.invoke('party:getLanInfo'),
+  discordRpcUpdate: (payload: Record<string, any>) =>
+    ipcRenderer.invoke('discordRpc:update', payload),
+  discordRpcClear: () =>
+    ipcRenderer.invoke('discordRpc:clear'),
+  discordRpcGetStatus: () =>
+    ipcRenderer.invoke('discordRpc:getStatus'),
+  discordRpcConfigure: (config: Record<string, any>) =>
+    ipcRenderer.invoke('discordRpc:configure', config),
   selectLocalFolder: () => ipcRenderer.invoke('select-local-folder'),
   scanLocalFolder: (folderPath: string) => ipcRenderer.invoke('scan-local-folder', folderPath),
   loadLocalLibraryCache: () => ipcRenderer.invoke('local-library-load-cache'),

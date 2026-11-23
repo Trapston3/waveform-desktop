@@ -9,15 +9,19 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   easeOutBack,
   formatTimestamp,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   setCanvasLetterSpacing,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
+
+const CURSIVE_ARABIC_OR_INDIC_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0900-\u097F]/;
 
 export class BrutalistZineStyle implements ILyricVisualStyle {
   readonly id = 'BrutalistZine' as const;
@@ -30,6 +34,7 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
   private scrollY = 0;
   private initialized = false;
   private beatKick = 0;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'xerox-contrast') return 1;
@@ -37,13 +42,26 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
     return 0;
   }
 
-  getMeasurementSpec(): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
+    let hasCursive = false;
+    const lines = frame?.lyrics?.lines;
+    if (lines) {
+      for (let i = 0; i < lines.length; i++) {
+        const disp = resolveDisplayLine(lines[i], frame?.scriptMode, this.id);
+        if (CURSIVE_ARABIC_OR_INDIC_RE.test(disp.primaryText)) {
+          hasCursive = true;
+          break;
+        }
+      }
+    }
     return {
       fontWeight: 900,
       fontSizeMultiplier: 1.04,
       textTransform: 'uppercase',
-      letterSpacing: '0.02em',
+      letterSpacing: hasCursive ? '0px' : '0.02em',
       maxLineWidthRatio: 0.78,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
@@ -51,6 +69,7 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
     this.scrollY = 0;
     this.initialized = false;
     this.beatKick = 0;
+    this.lastKnownActiveIdx = -1;
   }
 
   private getOrInitHalftonePattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
@@ -136,17 +155,19 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
         ctx.fillRect(0, 0, width, height);
       }
 
-      // Halftone dot matrix in top-left and bottom-right of focal stage
+      // Halftone dot matrix in corners (softly avoid focal.left divider wall in split view)
       ctx.fillStyle = varIdx === 1 ? '#ffffff' : frame.palette.accentSecondary;
       ctx.globalAlpha = bgAlpha * (varIdx === 1 ? 0.16 : 0.24);
       const spacing = 14;
-      const dotLeft = focal.left + 26;
+      const dotLeft = focal.left > 2 ? 26 : focal.left + 26;
       for (let gx = 0; gx < 9; gx++) {
         for (let gy = 0; gy < 6; gy++) {
           const r = Math.max(1.1, 4.0 - (gx + gy) * 0.28);
-          ctx.beginPath();
-          ctx.arc(dotLeft + gx * spacing, 26 + gy * spacing, r, 0, Math.PI * 2);
-          ctx.fill();
+          if (focal.left <= 2) {
+            ctx.beginPath();
+            ctx.arc(dotLeft + gx * spacing, 26 + gy * spacing, r, 0, Math.PI * 2);
+            ctx.fill();
+          }
 
           ctx.beginPath();
           ctx.arc(width - 26 - gx * spacing, height - 26 - gy * spacing, r, 0, Math.PI * 2);
@@ -154,14 +175,15 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
         }
       }
 
-      // Crisp corner crop marks (+)
+      // Crisp corner crop marks (+) anchored to full canvas corners when split-view active
       ctx.strokeStyle = varIdx === 1 ? '#ffffff' : frame.palette.accentPrimary;
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = bgAlpha * 0.62;
       const cropInset = 22;
-      this.drawCropMark(ctx, focal.left + cropInset, cropInset, 8);
+      const leftCropX = focal.left > 2 ? cropInset : focal.left + cropInset;
+      this.drawCropMark(ctx, leftCropX, cropInset, 8);
       this.drawCropMark(ctx, width - cropInset, cropInset, 8);
-      this.drawCropMark(ctx, focal.left + cropInset, height - cropInset, 8);
+      this.drawCropMark(ctx, leftCropX, height - cropInset, 8);
       this.drawCropMark(ctx, width - cropInset, height - cropInset, 8);
 
       if (vigStrength > 0.01) {
@@ -184,12 +206,30 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height, 'ZINE // STANDBY');
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      } else {
+        drawEmptyState(ctx, frame, width, height, 'ZINE // STANDBY');
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -207,6 +247,11 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
     const effectiveScrollY = this.scrollY + manualScroll;
     const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
 
+    if (frame.isInstrumentalGap && !isBrowsing && !hasActiveLine) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      return;
+    }
+
     const cx = focal.width * 0.5;
     const cy = height * 0.5;
     const fontSize = layout.fontSizePx;
@@ -216,11 +261,6 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
     const bpmVal = Math.round(frame.trackMetadata?.bpm || frame.audio.estimatedBpm || 120);
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -231,14 +271,18 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
       const cardCenterY = cy + lineCenterOffset * 1.15;
 
       if (cardCenterY + line.height < -90 || cardCenterY - line.height > height + 90) continue;
-      if (!isBrowsing && i !== activeIdx) continue;
+      if (!isBrowsing && i !== scrollIdx) continue;
 
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
       const cardPadX = 32;
       const cardPadY = 24;
+      const secExtraH = isActive && secondaryText ? 22 : 0;
       const cardW = Math.min(focal.width * 0.88, Math.max(260, line.width + cardPadX * 2));
-      const cardH = line.height + cardPadY * 2;
+      const cardH = line.height + cardPadY * 2 + secExtraH;
       const cardX = isLeftAlign ? Math.max(24, focal.width * 0.06) : cx - cardW * 0.5;
       const cardY = cardCenterY - cardH * 0.5;
 
@@ -326,9 +370,10 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
         ctx.fillText(stampText, cardX + cardW - 20, cardY - 5);
       }
 
-      // Bold uppercase words matching exact LyricsMeasurer spec (fontWeight 900 + uppercase + 0.02em)
+      // Bold uppercase words matching exact LyricsMeasurer spec (avoid 0.02em letter-spacing on cursive Arabic/Devanagari)
+      const isCursiveLine = CURSIVE_ARABIC_OR_INDIC_RE.test(line.text);
       ctx.font = `900 ${fontSize}px ${frame.fontFamily}`;
-      setCanvasLetterSpacing(ctx, '0.02em');
+      setCanvasLetterSpacing(ctx, isCursiveLine ? '0px' : '0.02em');
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       const textStartX = isLeftAlign ? cardX + cardPadX : cardX + (cardW - line.width) * 0.5;
@@ -378,9 +423,25 @@ export class BrutalistZineStyle implements ILyricVisualStyle {
       }
 
       setCanvasLetterSpacing(ctx, '0px');
+      if (isActive && secondaryText) {
+        const isDarkCard = isTransparent || varIdx === 1 || varIdx === 2;
+        const secFont = Math.max(11, Math.round(fontSize * 0.38));
+        ctx.font = `600 ${secFont}px ${frame.fontFamily}`;
+        ctx.fillStyle = isDarkCard ? 'rgba(255, 255, 255, 0.72)' : 'rgba(9, 9, 9, 0.72)';
+        ctx.textAlign = isLeftAlign ? 'left' : 'center';
+        ctx.fillText(
+          secondaryText,
+          isLeftAlign ? textStartX : cardX + cardW * 0.5,
+          textStartY + line.height + 6
+        );
+      }
       ctx.restore();
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+    }
   }
 }

@@ -7,11 +7,13 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   easeOutCubic,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -23,22 +25,26 @@ export class AppleMusicFlowStyle implements ILyricVisualStyle {
 
   private scrollY = 0;
   private initialized = false;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 {
     return variationId === 'editorial-crisp' ? 1 : 0;
   }
 
-  getMeasurementSpec(): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     return {
       fontWeight: 700,
       fontSizeMultiplier: 1.0,
       maxLineWidthRatio: 0.84,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
   reset(): void {
     this.scrollY = 0;
     this.initialized = false;
+    this.lastKnownActiveIdx = -1;
   }
 
   render(
@@ -103,12 +109,30 @@ export class AppleMusicFlowStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height);
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      } else {
+        drawEmptyState(ctx, frame, width, height);
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -135,11 +159,6 @@ export class AppleMusicFlowStyle implements ILyricVisualStyle {
     const hoveredIdx = typeof frame.hoveredLineIndex === 'number' ? frame.hoveredLineIndex : -1;
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -148,14 +167,25 @@ export class AppleMusicFlowStyle implements ILyricVisualStyle {
 
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
-      const screenY = anchorY + (line.y - effectiveScrollY);
+      const gapOffset =
+        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+          ? i <= scrollIdx
+            ? -58
+            : 58
+          : 0;
+      const screenY = anchorY + (line.y - effectiveScrollY) + gapOffset;
       if (screenY + line.height < -80 || screenY > height + 80) continue;
 
-      const dist = Math.abs(i - activeIdx);
-      const isActive = i === activeIdx;
-      const isPast = i < activeIdx;
+      const dist = Math.abs(i - scrollIdx);
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
+      const isPast = hasActiveLine
+        ? i < frame.activeLineIndex
+        : i <= scrollIdx && (frame.lyrics?.lines[i]?.endSeconds ?? 0) <= frame.timeSeconds;
       const isHovered = i === hoveredIdx;
       const lineBaseX = isLeftAlign ? leftPad : line.x;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
 
       // Record hit rect in global canvas coordinates (zero allocations)
       const hitLocalX = Math.max(8, Math.min(lineBaseX - 18, focal.width * 0.1));
@@ -274,9 +304,29 @@ export class AppleMusicFlowStyle implements ILyricVisualStyle {
         }
       }
 
+      if (isActive && secondaryText) {
+        const secFont = Math.max(12, Math.round(fontSize * 0.42));
+        ctx.save();
+        ctx.font = `500 ${secFont}px ${frame.fontFamily}`;
+        ctx.fillStyle = frame.palette.textUpcoming;
+        ctx.globalAlpha = 0.72 * frame.lineFadeAlpha;
+        ctx.shadowBlur = 0;
+        ctx.textAlign = isLeftAlign ? 'left' : 'center';
+        ctx.fillText(
+          secondaryText,
+          isLeftAlign ? leftPad : focal.width * 0.5,
+          screenY + line.height + 4
+        );
+        ctx.restore();
+      }
+
       ctx.restore();
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+    }
   }
 }

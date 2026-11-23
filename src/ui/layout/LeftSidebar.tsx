@@ -531,21 +531,33 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
               </div>
             </>
           ) : (
-            /* Clean collapsed rail: single Library icon */
-            <button
-              onClick={() => {
-                setIsLibraryOpen(true);
-                onSelectTab('library', 'Recently Added');
-              }}
-              title="Library"
-              aria-label="Library"
-              className={navItemClass(isAnyLibraryActive)}
-            >
-              {isAnyLibraryActive && (
-                <span className="absolute left-1.5 w-[2.5px] h-4 rounded-full bg-[#FA2D48]" />
-              )}
-              <Clock size={16} className="shrink-0" />
-            </button>
+            /* Clean collapsed rail: Library + 2026 Replay icons */
+            <div className="space-y-0.5">
+              <button
+                onClick={() => {
+                  setIsLibraryOpen(true);
+                  onSelectTab('library', 'Recently Added');
+                }}
+                title="Library"
+                aria-label="Library"
+                className={navItemClass(isAnyLibraryActive)}
+              >
+                {isAnyLibraryActive && (
+                  <span className="absolute left-1.5 w-[2.5px] h-4 rounded-full bg-[#FA2D48]" />
+                )}
+                <Clock size={16} className="shrink-0" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setReplayOpen(true)}
+                title="2026 Replay"
+                aria-label="2026 Replay"
+                className="relative group w-full flex items-center justify-center px-0 py-1.5 rounded-lg text-xs font-semibold text-[#FA2D48] dark:hover:text-white hover:text-black dark:hover:bg-white/[0.06] hover:bg-black/[0.04] transition-all cursor-pointer"
+              >
+                <Sparkles size={16} className="shrink-0 text-[#FA2D48]" />
+              </button>
+            </div>
           )}
         </div>
 

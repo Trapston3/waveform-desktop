@@ -12,6 +12,7 @@ import {
   Clock,
   Eye,
   EyeOff,
+  Languages,
   Layout,
   Maximize2,
   Monitor,
@@ -26,6 +27,7 @@ import {
   BUNDLED_FONTS,
   type BundledFontId,
   getBundledFontCssFamily,
+  type LyricsScriptMode,
   type LyricTextAlign,
   type NowPlayingLayoutMode,
   resolveStyleVariationId,
@@ -53,7 +55,45 @@ export interface VisualizerContextMenuProps {
   context?: 'now-playing' | 'ambient' | 'overlay';
 }
 
-type SubmenuId = 'none' | 'styles' | 'appearance' | 'sync';
+type SubmenuId = 'none' | 'styles' | 'appearance' | 'script' | 'sync';
+
+const SCRIPT_MODE_OPTIONS: readonly {
+  id: LyricsScriptMode;
+  label: string;
+  shortLabel: string;
+  description: string;
+}[] = [
+  {
+    id: 'auto',
+    label: 'Auto (Romanize for Code)',
+    shortLabel: 'Auto',
+    description: 'Original script in lyric styles; Romanized in Code Editor',
+  },
+  {
+    id: 'original',
+    label: 'Original',
+    shortLabel: 'Original',
+    description: 'Display original lyric script only',
+  },
+  {
+    id: 'romanized',
+    label: 'Romanized',
+    shortLabel: 'Romanized',
+    description: 'Transliterate non-Latin lyrics into Latin script',
+  },
+  {
+    id: 'romanized_translation',
+    label: 'Romanized + Translation',
+    shortLabel: 'Rom + Trans',
+    description: 'Romanized pronunciation with translated subtitle',
+  },
+  {
+    id: 'original_translation',
+    label: 'Original + Translation',
+    shortLabel: 'Orig + Trans',
+    description: 'Original script with translated subtitle',
+  },
+];
 
 const SIZE_PRESETS: readonly { label: string; value: number }[] = [
   { label: '0.8x', value: 0.8 },
@@ -100,6 +140,7 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   const setTextAlign = useLyricVisualizerStore((s) => s.setTextAlign);
   const setNowPlayingLayout = useLyricVisualizerStore((s) => s.setNowPlayingLayout);
   const setHideAlbumCover = useLyricVisualizerStore((s) => s.setHideAlbumCover);
+  const setScriptMode = useLyricVisualizerStore((s) => s.setScriptMode);
   const nudgeSongOffsetMs = useLyricVisualizerStore((s) => s.nudgeSongOffsetMs);
   const resetSongOffsetMs = useLyricVisualizerStore((s) => s.resetSongOffsetMs);
   const setOverlayEnabled = useLyricVisualizerStore((s) => s.setOverlayEnabled);
@@ -143,7 +184,7 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   if (!isOpen) return null;
 
   const menuWidth = 256;
-  const estimatedMenuHeight = 360;
+  const estimatedMenuHeight = 396;
   const submenuWidth = 264;
   const viewportW = typeof window !== 'undefined' ? window.innerWidth : 1280;
   const viewportH = typeof window !== 'undefined' ? window.innerHeight : 720;
@@ -169,6 +210,9 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   const currentLayout: NowPlayingLayoutMode = config.nowPlayingLayout ?? 'split';
   const currentHideCover = Boolean(config.hideAlbumCover);
   const currentTextAlign: LyricTextAlign = config.textAlign ?? 'center';
+  const currentScriptMode: LyricsScriptMode = config.scriptMode ?? 'auto';
+  const activeScriptOption =
+    SCRIPT_MODE_OPTIONS.find((opt) => opt.id === currentScriptMode) ?? SCRIPT_MODE_OPTIONS[0];
   const currentBgOpacity = typeof config.backgroundOpacity === 'number' ? config.backgroundOpacity : 0.95;
   const currentVignette = typeof config.vignetteStrength === 'number' ? config.vignetteStrength : 0.55;
   const formattedOffset =
@@ -725,7 +769,59 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
         )}
       </div>
 
-      {/* Section 4: Lyrics Timing / Sync Submenu */}
+      {/* Section 4: Lyrics Script Submenu */}
+      <div
+        className="relative"
+        onMouseEnter={() => setActiveSubmenu('script')}
+      >
+        <button
+          type="button"
+          onClick={() => setActiveSubmenu((prev) => (prev === 'script' ? 'none' : 'script'))}
+          className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg transition-colors text-left cursor-pointer ${
+            activeSubmenu === 'script' ? 'bg-white/15' : 'hover:bg-white/10'
+          }`}
+        >
+          <span className="flex items-center gap-2.5 min-w-0">
+            <Languages size={14} className="text-white/75 shrink-0" />
+            <span className="truncate">Lyrics Script</span>
+          </span>
+          <span className="flex items-center gap-1 text-[10px] text-white/55 shrink-0">
+            <span className="max-w-[78px] truncate">{activeScriptOption.shortLabel}</span>
+            <ChevronRight size={12} />
+          </span>
+        </button>
+
+        {activeSubmenu === 'script' && (
+          <div
+            data-testid="visualizer-submenu-script"
+            style={submenuPositionStyle}
+            className="liquid-glass-capsule w-64 rounded-2xl text-white p-1.5 shadow-2xl border border-white/15 space-y-0.5"
+          >
+            <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
+              Lyrics Script
+            </div>
+            {SCRIPT_MODE_OPTIONS.map((opt) => {
+              const selected = currentScriptMode === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  title={opt.description}
+                  onClick={() => setScriptMode(opt.id)}
+                  className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg transition-colors text-left cursor-pointer ${
+                    selected ? 'bg-white/15 text-white font-semibold' : 'hover:bg-white/10 text-white/85'
+                  }`}
+                >
+                  <span className="truncate">{opt.label}</span>
+                  {selected && <Check size={13} className="text-[var(--color-accent)] shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Section 5: Lyrics Timing / Sync Submenu */}
       <div
         className="relative"
         onMouseEnter={() => setActiveSubmenu('sync')}

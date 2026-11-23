@@ -5,9 +5,18 @@ import { create } from 'zustand';
 import type { Playlist, MonthlyHistory, ListeningHistoryEntry } from '../models/Playlist';
 import type { Song } from '../models/Song';
 import { normalizeSong } from '../models/Song';
-import { StorageService } from '../services/StorageService';
+import {
+  StorageService,
+  formatLocalYearMonth,
+  computeYearlyReplayStats,
+  type RichListeningHistoryEntry,
+  type YearlyReplayStats,
+} from '../services/StorageService';
 import type { LocalMediaScanner } from '../services/LocalMediaScanner';
 import { useSettingsStore } from './settingsStore';
+
+export type { RichListeningHistoryEntry, YearlyReplayStats };
+export { formatLocalYearMonth };
 
 export const DEFAULT_LOCAL_ALBUM_ART_SVG =
   'data:image/svg+xml;utf8,' +
@@ -63,8 +72,9 @@ export interface LocalScanState {
 export interface LibraryState {
   playlists: Playlist[];
   favorites: Song[];
-  listeningHistory: ListeningHistoryEntry[];
+  listeningHistory: RichListeningHistoryEntry[];
   monthlyStats: MonthlyHistory | null;
+  yearlyReplayStats: YearlyReplayStats | null;
   scanState: LocalScanState;
   isLoaded: boolean;
   storageService: StorageService | null;
@@ -82,6 +92,7 @@ export interface LibraryActions {
   isFavorite: (videoId: string) => boolean;
   recordListeningHistory: (song: Song, durationSec: number) => Promise<void>;
   refreshMonthlyStats: (yearMonth?: string) => Promise<void>;
+  refreshYearlyReplayStats: (year?: number) => Promise<void>;
   resetListeningData: () => Promise<void>;
   startLocalMediaScan: (scanner: typeof LocalMediaScanner | { scanDirectory?: (p: string) => Promise<Song[]> } | null, folderPath: string) => Promise<Song[]>;
   removeLocalFolder: (folderPath: string) => Promise<void>;
@@ -392,6 +403,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
   favorites: [],
   listeningHistory: [],
   monthlyStats: null,
+  yearlyReplayStats: null,
   scanState: {
     isScanning: false,
     scannedFiles: 0,
@@ -425,8 +437,13 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
         storageInstance.getSettings().catch(() => null),
       ]);
 
-      const currentYearMonth = new Date().toISOString().slice(0, 7);
+      const currentYearMonth = formatLocalYearMonth();
+      const currentYear = new Date().getFullYear();
       const monthly = await storageInstance.getMonthlyListeningHistory(currentYearMonth);
+      const yearly =
+        typeof (storageInstance as any).getYearlyReplayStats === 'function'
+          ? await storageInstance.getYearlyReplayStats(currentYear)
+          : computeYearlyReplayStats(history, currentYear, monthly ? [monthly] : []);
 
       const settingsFolders = Array.isArray(settings?.['storage.localFolders'])
         ? (settings['storage.localFolders'] as string[])
@@ -440,8 +457,9 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
       set({
         playlists,
         favorites: favorites.map((s) => normalizeSong(s as any)),
-        listeningHistory: history,
+        listeningHistory: [...history].reverse().slice(0, 200),
         monthlyStats: monthly,
+        yearlyReplayStats: yearly,
         localFolders: hydratedFolders.length > 0 ? hydratedFolders : get().localFolders,
         localSongs: hydratedLocalSongs,
         isLoaded: true,
@@ -566,31 +584,89 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
   recordListeningHistory: async (rawSong: Song, durationSec: number) => {
     const song = normalizeSong(rawSong as any);
     const { storageService, listeningHistory } = get();
-    const storage = storageService || new StorageService();
+    const storage = storageService || globalStorageInstance || new StorageService();
 
     await storage.recordListeningHistory(song as any, durationSec);
 
-    const newEntry: ListeningHistoryEntry = {
+    const albumName =
+      (typeof song.albumName === 'string' && song.albumName.trim()) ||
+      (typeof song.album === 'string' && song.album.trim()) ||
+      undefined;
+    const artworkUrl =
+      (typeof song.thumbnailUrl === 'string' && song.thumbnailUrl.trim()) ||
+      (typeof song.artworkUrl === 'string' && song.artworkUrl.trim()) ||
+      undefined;
+    const qualityLabel =
+      (typeof song.sourceQuality === 'string' && song.sourceQuality.trim()) ||
+      (typeof song.audioQuality === 'string' && song.audioQuality.trim()) ||
+      (typeof song.codec === 'string' && song.codec.trim()) ||
+      undefined;
+
+    const newEntry: RichListeningHistoryEntry = {
       videoId: song.videoId,
       title: song.title,
       artist: song.artist,
+      ...(albumName ? { albumName } : {}),
+      ...(artworkUrl ? { artworkUrl } : {}),
+      ...(qualityLabel ? { qualityLabel } : {}),
       timestamp: Date.now(),
       durationSec,
     };
 
-    set({ listeningHistory: [newEntry, ...listeningHistory].slice(0, 100) });
+    const nextHistory = [newEntry, ...listeningHistory].slice(0, 200);
+    const now = new Date();
+    const targetMonth = formatLocalYearMonth(now);
+    const targetYear = now.getFullYear();
+
+    let nextMonthly = get().monthlyStats;
+    let nextYearly = get().yearlyReplayStats;
+    try {
+      const [m, y] = await Promise.all([
+        typeof (storage as any).getMonthlyListeningHistory === 'function'
+          ? storage.getMonthlyListeningHistory(targetMonth)
+          : Promise.resolve(nextMonthly),
+        typeof (storage as any).getYearlyReplayStats === 'function'
+          ? storage.getYearlyReplayStats(targetYear)
+          : Promise.resolve(computeYearlyReplayStats(nextHistory, targetYear)),
+      ]);
+      nextMonthly = m;
+      nextYearly = y;
+    } catch (err) {
+      console.warn('[libraryStore] Failed to refresh replay stats after recording:', err);
+    }
+
+    set({
+      listeningHistory: nextHistory,
+      monthlyStats: nextMonthly,
+      yearlyReplayStats: nextYearly,
+    });
   },
 
   refreshMonthlyStats: async (yearMonth?: string) => {
-    const targetMonth = yearMonth || new Date().toISOString().slice(0, 7);
+    const targetMonth = yearMonth || formatLocalYearMonth();
     const { storageService } = get();
-    const storage = storageService || new StorageService();
+    const storage = storageService || globalStorageInstance || new StorageService();
 
     try {
       const stats = await storage.getMonthlyListeningHistory(targetMonth);
       set({ monthlyStats: stats });
     } catch (err) {
       console.warn('[libraryStore] refreshMonthlyStats failed:', err);
+    }
+  },
+
+  refreshYearlyReplayStats: async (year = 2026) => {
+    const { storageService, listeningHistory, monthlyStats } = get();
+    const storage = storageService || globalStorageInstance || new StorageService();
+
+    try {
+      const stats =
+        typeof (storage as any).getYearlyReplayStats === 'function'
+          ? await storage.getYearlyReplayStats(year)
+          : computeYearlyReplayStats(listeningHistory, year, monthlyStats ? [monthlyStats] : []);
+      set({ yearlyReplayStats: stats });
+    } catch (err) {
+      console.warn('[libraryStore] refreshYearlyReplayStats failed:', err);
     }
   },
 
@@ -605,6 +681,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
     set({
       listeningHistory: [],
       monthlyStats: null,
+      yearlyReplayStats: null,
     });
   },
 

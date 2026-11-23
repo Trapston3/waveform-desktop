@@ -2,12 +2,19 @@
 
 import type {
   LyricLine,
+  LyricsScriptMode,
   LyricTextAlign,
+  LyricWord,
   MeasuredLineLayout,
   StyleFrameContext,
   VisualStyleId,
 } from '../core/models';
 import type { WebGlEffectMode } from './webGlEffectLayer';
+import {
+  hasNonLatinScript,
+  mapRomanizedWords,
+  transliterateToLatin,
+} from '../../utils/transliterate';
 
 export type WebGlEffectKind = WebGlEffectMode;
 
@@ -18,6 +25,92 @@ export interface StyleMeasurementSpec {
   readonly textTransform?: 'none' | 'uppercase' | 'lowercase';
   readonly letterSpacing?: string;
   readonly maxLineWidthRatio?: number;
+  readonly scriptMode?: LyricsScriptMode;
+  readonly styleId?: VisualStyleId | string;
+}
+
+export interface ResolvedDisplayLine {
+  readonly primaryText: string;
+  readonly primaryWords: readonly LyricWord[];
+  readonly secondaryText: string | null;
+  readonly isRomanized: boolean;
+}
+
+export function resolveDisplayLine(
+  line: LyricLine,
+  scriptMode: LyricsScriptMode = 'auto',
+  styleId?: VisualStyleId | string
+): ResolvedDisplayLine {
+  const mode: LyricsScriptMode = scriptMode ?? 'auto';
+  const trimmedOrig = line.text.trim();
+
+  let rawRom = typeof line.romanizedText === 'string' ? line.romanizedText.trim() : '';
+  if (!rawRom && hasNonLatinScript(line.text)) {
+    rawRom = transliterateToLatin(line.text).trim();
+  }
+  const hasRom = Boolean(rawRom && rawRom !== trimmedOrig);
+  const romWords: readonly LyricWord[] = hasRom
+    ? line.romanizedWords && line.romanizedWords.length > 0
+      ? line.romanizedWords
+      : mapRomanizedWords(line.words, rawRom, line.startSeconds, line.endSeconds)
+    : line.words;
+
+  const rawTrans = typeof line.translatedText === 'string' ? line.translatedText.trim() : '';
+  const hasTrans = Boolean(rawTrans && rawTrans !== trimmedOrig);
+  const transText = hasTrans ? rawTrans : null;
+
+  if (mode === 'original') {
+    return {
+      primaryText: line.text,
+      primaryWords: line.words,
+      secondaryText: null,
+      isRomanized: false,
+    };
+  }
+
+  if (mode === 'romanized') {
+    return {
+      primaryText: hasRom ? rawRom : line.text,
+      primaryWords: hasRom ? romWords : line.words,
+      secondaryText: null,
+      isRomanized: hasRom,
+    };
+  }
+
+  if (mode === 'romanized_translation') {
+    return {
+      primaryText: hasRom ? rawRom : line.text,
+      primaryWords: hasRom ? romWords : line.words,
+      secondaryText: transText ?? (hasRom ? line.text : null),
+      isRomanized: hasRom,
+    };
+  }
+
+  if (mode === 'original_translation') {
+    return {
+      primaryText: line.text,
+      primaryWords: line.words,
+      secondaryText: transText ?? (hasRom ? rawRom : null),
+      isRomanized: false,
+    };
+  }
+
+  // 'auto'
+  if (styleId === 'CodeEditorKinetic') {
+    return {
+      primaryText: hasRom ? rawRom : line.text,
+      primaryWords: hasRom ? romWords : line.words,
+      secondaryText: transText ?? (hasRom ? line.text : null),
+      isRomanized: hasRom,
+    };
+  }
+
+  return {
+    primaryText: line.text,
+    primaryWords: line.words,
+    secondaryText: transText ?? (hasRom ? rawRom : null),
+    isRomanized: false,
+  };
 }
 
 export interface ILyricVisualStyle {
@@ -57,18 +150,12 @@ export function getFocalRect(frame: StyleFrameContext, width: number): FocalRect
 }
 
 export function clipToFocalStage(
-  ctx: CanvasRenderingContext2D,
+  _ctx: CanvasRenderingContext2D,
   frame: StyleFrameContext,
   width: number,
-  height: number
+  _height: number
 ): FocalRect {
-  const focal = getFocalRect(frame, width);
-  if (focal.left > 2 && typeof ctx.rect === 'function' && typeof ctx.clip === 'function') {
-    ctx.beginPath();
-    ctx.rect(focal.left, 0, Math.max(1, width - focal.left), Math.max(1, height));
-    ctx.clip();
-  }
-  return focal;
+  return getFocalRect(frame, width);
 }
 
 export function computeAlignedX(
@@ -201,6 +288,108 @@ export function drawEmptyState(
   const fontSize = Math.round(18 * frame.fontSizeScale);
   ctx.font = `500 ${fontSize}px ${frame.fontFamily}`;
   ctx.fillText(subtitle, cx, cy + 12);
+  ctx.restore();
+}
+
+export function drawInstrumentalIndicator(
+  ctx: CanvasRenderingContext2D,
+  frame: StyleFrameContext,
+  width: number,
+  height: number,
+  accentColor: string,
+  label?: string
+): void {
+  const focal = getFocalRect(frame, width);
+  const cx = focal.centerX;
+  const cy = height * 0.5;
+  const motion = frame.reduceMotion ? 0 : 1;
+  const t = frame.timeSeconds || 0;
+  const bass = frame.audio?.bassEnergy ?? 0;
+  const mid = frame.audio?.midEnergy ?? 0;
+  const treble = frame.audio?.trebleEnergy ?? 0;
+  const rms = frame.audio?.rmsLevel ?? 0;
+  const beatBoost = motion > 0 && frame.audio?.beatDetected ? 0.22 : 0;
+
+  const pillW = Math.min(280, Math.max(176, focal.width * 0.42));
+  const pillH = 74;
+  const pillX = cx - pillW * 0.5;
+  const pillY = cy - pillH * 0.5;
+
+  ctx.save();
+  if (!isTransparentStage(frame)) {
+    drawRoundedRectPath(ctx, pillX, pillY, pillW, pillH, 18);
+    ctx.fillStyle = 'rgba(15, 19, 30, 0.72)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Animated 7-bar audio-reactive spectrum
+  const barCount = 7;
+  const barW = 4;
+  const barGap = 7;
+  const barsTotalW = barCount * barW + (barCount - 1) * barGap;
+  const barsStartX = cx - barsTotalW * 0.5;
+  const barsCenterY = cy - 10;
+
+  for (let i = 0; i < barCount; i++) {
+    const band = i < 2 ? bass : i < 5 ? mid : treble;
+    const wave = motion === 0 ? 0.55 : 0.32 + 0.68 * Math.abs(Math.sin(t * 5.2 + i * 0.85));
+    const amp = clamp01(0.24 + wave * (0.35 + band * 0.75 + rms * 0.35 + beatBoost));
+    const barH = Math.max(5, Math.round(24 * amp));
+    const bx = barsStartX + i * (barW + barGap);
+    const by = barsCenterY - barH * 0.5;
+    ctx.fillStyle = i % 2 === 0 ? accentColor : frame.palette.accentSecondary;
+    ctx.globalAlpha = 0.78 + amp * 0.22;
+    drawRoundedRectPath(ctx, bx, by, barW, barH, 2);
+    ctx.fill();
+  }
+
+  // Musical note + crisp label
+  const resolvedLabel =
+    label ??
+    (frame.hasLyrics === false
+      ? '♪  Instrumental'
+      : typeof frame.timeUntilNextLine === 'number' &&
+        Number.isFinite(frame.timeUntilNextLine) &&
+        frame.timeUntilNextLine > 0 &&
+        frame.timeUntilNextLine <= 3
+      ? `♪  Lyrics in ${Math.ceil(frame.timeUntilNextLine)}s`
+      : '♪  ♫  ♪');
+  const pulse = motion === 0 ? 0.8 : 0.65 + 0.35 * Math.sin(t * 2.8);
+  ctx.globalAlpha = pulse;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `600 ${Math.round(13 * (frame.fontSizeScale || 1))}px ${frame.fontFamily}`;
+  ctx.fillStyle = frame.palette.textUpcoming;
+  ctx.fillText(resolvedLabel, cx, cy + 16);
+
+  // Gap progress hairline if finite gap progress is available
+  const progress =
+    typeof frame.gapProgress === 'number' && Number.isFinite(frame.gapProgress)
+      ? clamp01(frame.gapProgress)
+      : 0;
+  if (
+    progress > 0 &&
+    progress < 1 &&
+    typeof frame.timeUntilNextLine === 'number' &&
+    Number.isFinite(frame.timeUntilNextLine)
+  ) {
+    const trackW = pillW - 36;
+    const trackX = cx - trackW * 0.5;
+    const trackY = pillY + pillH - 9;
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#ffffff';
+    drawRoundedRectPath(ctx, trackX, trackY, trackW, 2.5, 1.25);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = accentColor;
+    drawRoundedRectPath(ctx, trackX, trackY, Math.max(4, trackW * progress), 2.5, 1.25);
+    ctx.fill();
+  }
+
   ctx.restore();
 }
 

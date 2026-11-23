@@ -723,3 +723,402 @@ test('AudioEngine.applyPendingResumeSeek defers on readyState=0 (non-SABR), seek
     else globalThis.AudioContext = prevAudioCtx;
   }
 });
+
+test('Premature ended with expectedDuration > 15 && currentSec < expectedDuration - 4 prefers durationSec over cumulative totalPlayTimeMs, runs 3 retries, and transitions to PAUSED on exhaustion', async () => {
+  const prevWindow = globalThis.window;
+  const prevAudio = globalThis.Audio;
+  const prevAudioCtx = globalThis.AudioContext;
+
+  class MockAudioEl {
+    constructor() {
+      this._src = '';
+      this.paused = true;
+      this.ended = false;
+      this.currentTime = 0;
+      this.duration = 200;
+      this.readyState = 4;
+      this.networkState = 1;
+      this.error = null;
+      this.volume = 1;
+      this._listeners = {};
+    }
+    get src() { return this._src; }
+    set src(v) { this._src = v || ''; }
+    getAttribute(k) { return k === 'src' ? (this._src || null) : null; }
+    removeAttribute(k) { if (k === 'src') this._src = ''; }
+    addEventListener(t, fn) { (this._listeners[t] ||= []).push(fn); }
+    removeEventListener(t, fn) { this._listeners[t] = (this._listeners[t] || []).filter((x) => x !== fn); }
+    emit(t) { (this._listeners[t] || []).slice().forEach((fn) => fn()); }
+    load() { this.paused = true; this.ended = false; this.error = null; }
+    play() { this.paused = false; this.ended = false; return Promise.resolve(); }
+    pause() { this.paused = true; }
+  }
+
+  class MockCtx {
+    constructor() { this.state = 'running'; this.currentTime = 0; this.destination = { connect() {} }; }
+    resume() { return Promise.resolve(); }
+    createGain() {
+      return {
+        gain: { value: 1, setValueAtTime() {}, setTargetAtTime() {}, cancelScheduledValues() {}, setValueCurveAtTime() {} },
+        connect() {},
+      };
+    }
+    createMediaElementSource() { return { connect() {} }; }
+    createBiquadFilter() {
+      return {
+        type: 'peaking', Q: { value: 1, setValueAtTime() {} }, frequency: { value: 1000, setValueAtTime() {} },
+        gain: { value: 0, setValueAtTime() {}, setTargetAtTime() {}, cancelScheduledValues() {} }, connect() {},
+      };
+    }
+    createAnalyser() { return { fftSize: 1024, connect() {}, getFloatTimeDomainData() {} }; }
+  }
+
+  globalThis.window = { AudioContext: MockCtx };
+  globalThis.Audio = MockAudioEl;
+  globalThis.AudioContext = MockCtx;
+
+  try {
+    usePlayerStore.getState().cleanupEngine();
+    const engine = new AudioEngine();
+    usePlayerStore.getState().initEngine(engine);
+
+    let trackEndedCount = 0;
+    engine.onTrackEnded(() => { trackEndedCount++; });
+
+    const attempts = [];
+    setPlayerStreamResolver(async (_id, _t, _a, attempt) => {
+      if (!attempt) return { url: 'https://cdn.example.com/initial.webm', quality: '160kbps Opus', durationMs: 200000 };
+      attempts.push(attempt);
+      return { url: `https://cdn.example.com/retry_${attempt}.webm`, quality: '160kbps Opus', durationMs: 200000 };
+    });
+    setPlayerLosslessStreamResolver(async () => null);
+
+    // Song has cumulative totalPlayTimeMs = 9,500,000 ms (47x listening history), durationSec = 200s
+    await usePlayerStore.getState().loadTrack({
+      videoId: 'cumul_dur_01',
+      title: 'Cumulative Time Test',
+      artist: 'Tester',
+      artistIds: ['t'],
+      artists: [{ id: 't', name: 'Tester' }],
+      liked: false,
+      totalPlayTimeMs: 9_500_000,
+      durationSec: 200,
+      playCount: 47,
+      streamUrl: '',
+    }, 'active', true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const el = engine.deckA.audioElement;
+    el.duration = 200;
+
+    // 1. Premature ended at 194.5s (< 200 - 4 = 196s) triggers 3 retries cleanly
+    for (let expectedAttempt = 1; expectedAttempt <= 3; expectedAttempt++) {
+      el.currentTime = 194.5;
+      el.emit('timeupdate');
+      el.ended = true;
+      el.paused = true;
+      el.emit('ended');
+      assert.equal(trackEndedCount, 0);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(attempts.length, expectedAttempt);
+      assert.equal(usePlayerStore.getState().playbackState, 'PLAYING');
+    }
+    assert.deepEqual(attempts, [1, 2, 3]);
+
+    // 2. 4th premature ended (retries exhausted) must leave playbackState = 'PAUSED' and NEVER advance queue
+    el.currentTime = 194.5;
+    el.emit('timeupdate');
+    el.ended = true;
+    el.paused = true;
+    el.emit('ended');
+    assert.equal(trackEndedCount, 0);
+    assert.equal(usePlayerStore.getState().playbackState, 'PAUSED');
+
+    // 3. Resume and trigger natural end at 197.0s (>= 200 - 4): proves durationSec=200 (NOT 9500s!) governs
+    usePlayerStore.getState().play();
+    el.currentTime = 197.0;
+    el.ended = true;
+    el.paused = true;
+    el.emit('ended');
+    assert.equal(trackEndedCount, 1, 'Natural end at 197s on 200s track (with 9.5M ms totalPlayTimeMs) must fire onTrackEnded');
+  } finally {
+    setPlayerStreamResolver(null);
+    setPlayerLosslessStreamResolver(null);
+    usePlayerStore.getState().cleanupEngine();
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevAudio === undefined) delete globalThis.Audio;
+    else globalThis.Audio = prevAudio;
+    if (prevAudioCtx === undefined) delete globalThis.AudioContext;
+    else globalThis.AudioContext = prevAudioCtx;
+  }
+});
+
+test('Stale playbackToken/loadToken & standby deck events are ignored; Stage 2 rejects truncated FLAC duration and waits for async seeked', async () => {
+  const prevWindow = globalThis.window;
+  const prevAudio = globalThis.Audio;
+  const prevAudioCtx = globalThis.AudioContext;
+
+  class MockAudioEl {
+    constructor() {
+      this._src = '';
+      this.paused = true;
+      this.ended = false;
+      this.seeking = false;
+      this.currentTime = 0;
+      this.duration = 240;
+      this.readyState = 4;
+      this.networkState = 1;
+      this.error = null;
+      this._listeners = {};
+    }
+    get src() { return this._src; }
+    set src(v) { this._src = v || ''; }
+    getAttribute(k) { return k === 'src' ? (this._src || null) : null; }
+    removeAttribute(k) { if (k === 'src') this._src = ''; }
+    addEventListener(t, fn) { (this._listeners[t] ||= []).push(fn); }
+    removeEventListener(t, fn) { this._listeners[t] = (this._listeners[t] || []).filter((x) => x !== fn); }
+    emit(t) { (this._listeners[t] || []).slice().forEach((fn) => fn()); }
+    load() { this.paused = true; this.ended = false; this.error = null; }
+    play() { this.paused = false; this.ended = false; return Promise.resolve(); }
+    pause() { this.paused = true; }
+  }
+
+  class MockCtx {
+    constructor() { this.state = 'running'; this.currentTime = 0; this.destination = { connect() {} }; }
+    resume() { return Promise.resolve(); }
+    createGain() {
+      return {
+        gain: { value: 1, setValueAtTime() {}, setTargetAtTime() {}, cancelScheduledValues() {}, setValueCurveAtTime() {} },
+        connect() {},
+      };
+    }
+    createMediaElementSource() { return { connect() {} }; }
+    createBiquadFilter() {
+      return {
+        type: 'peaking', Q: { value: 1, setValueAtTime() {} }, frequency: { value: 1000, setValueAtTime() {} },
+        gain: { value: 0, setValueAtTime() {}, setTargetAtTime() {}, cancelScheduledValues() {} }, connect() {},
+      };
+    }
+    createAnalyser() { return { fftSize: 1024, connect() {}, getFloatTimeDomainData() {} }; }
+  }
+
+  globalThis.window = { AudioContext: MockCtx };
+  globalThis.Audio = MockAudioEl;
+  globalThis.AudioContext = MockCtx;
+
+  const engine = new AudioEngine();
+  try {
+    let endedCount = 0;
+    let prematureCount = 0;
+    let errCount = 0;
+    engine.onTrackEnded(() => { endedCount++; });
+    engine.onPrematureEnded(() => { prematureCount++; });
+    engine.onPlaybackError(() => { errCount++; });
+
+    const baseTrack = {
+      videoId: 'tok_01',
+      title: 'Token Track',
+      artist: 'Tester',
+      artistIds: ['t'],
+      artists: [{ id: 't', name: 'Tester' }],
+      liked: false,
+      totalPlayTimeMs: 240000,
+      durationSec: 240,
+      playCount: 0,
+      streamUrl: 'https://cdn.example.com/stage1.webm',
+    };
+
+    const initPbToken = engine.playbackToken;
+    const initLoadToken = engine.deckA.loadToken;
+    await engine.loadTrack(baseTrack, 'active');
+    assert.ok(engine.playbackToken > initPbToken);
+    assert.ok(engine.deckA.loadToken > initLoadToken);
+    engine.play();
+
+    // Load standby track and fire standby events -> must NEVER advance queue or fire error/premature
+    await engine.loadTrack({ ...baseTrack, videoId: 'standby_01', streamUrl: 'https://cdn.example.com/sb.webm' }, 'standby');
+    engine.deckB.isPlaying = true;
+    engine.deckB.audioElement.currentTime = 50;
+    engine.deckB.audioElement.emit('ended');
+    engine.deckB.audioElement.error = { code: 4 };
+    engine.deckB.audioElement.emit('error');
+    assert.equal(endedCount, 0);
+    assert.equal(prematureCount, 0);
+    assert.equal(errCount, 0);
+
+    // Stage 2 truncated standby FLAC (30s vs 240s active track) must be rejected
+    const standbyEl = engine.deckB.audioElement;
+    standbyEl.load = function () {
+      this.paused = true;
+      this.ended = false;
+      this.error = null;
+      this.readyState = 4;
+      this.duration = 30;
+    };
+    const rejectedShort = await engine.stageAndCrossfadeLosslessSwap(
+      { ...baseTrack, streamUrl: 'https://cdn.example.com/truncated_30s.flac' },
+      20
+    );
+    assert.equal(rejectedShort, false, 'Truncated 30s standby FLAC must be rejected on 240s track');
+    assert.equal(engine.activeDeckName, 'active');
+
+    // Stage 2 aborted if playbackToken changes during readiness wait
+    standbyEl.load = function () {
+      this.paused = true;
+      this.ended = false;
+      this.error = null;
+      this.readyState = 0;
+      this.duration = NaN;
+      setTimeout(() => {
+        this.readyState = 4;
+        this.duration = 240;
+        this.emit('canplaythrough');
+      }, 20);
+    };
+    const swapPromise = engine.stageAndCrossfadeLosslessSwap(
+      { ...baseTrack, streamUrl: 'https://cdn.example.com/slow.flac' },
+      20
+    );
+    // User seeks mid-swap -> bumps playbackToken -> swap must abort!
+    engine.seek(10000);
+    const abortedSwap = await swapPromise;
+    assert.equal(abortedSwap, false, 'Stale playbackToken must abort Stage 2 swap cleanly');
+    assert.equal(engine.activeDeckName, 'active');
+
+    // Active-deck stall timer triggers onPrematureEnded when frozen while playing
+    engine.deckA.stallTimeoutMs = 35;
+    engine.deckA.audioElement.currentTime = 25;
+    engine.deckA.audioElement.emit('timeupdate');
+    engine.deckA.audioElement.emit('waiting');
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(prematureCount, 1, 'Frozen waiting/stalled timer must trigger onPrematureEnded');
+  } finally {
+    engine.dispose();
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevAudio === undefined) delete globalThis.Audio;
+    else globalThis.Audio = prevAudio;
+    if (prevAudioCtx === undefined) delete globalThis.AudioContext;
+    else globalThis.AudioContext = prevAudioCtx;
+  }
+});
+
+test('WebM cluster PTS calibration waits for currentTime > 0.05 or playing event and AudioEngine wires Web Audio AutoEQ chain', async () => {
+  const prevWindow = globalThis.window;
+  const prevAudio = globalThis.Audio;
+  const prevAudioCtx = globalThis.AudioContext;
+
+  class MockEl {
+    constructor() {
+      this._src = '';
+      this.paused = true;
+      this.ended = false;
+      this.seeking = false;
+      this.currentTime = 0;
+      this.duration = 210;
+      this.readyState = 4;
+      this.networkState = 1;
+      this.error = null;
+      this._listeners = {};
+    }
+    get src() { return this._src; }
+    set src(v) { this._src = v || ''; }
+    getAttribute(k) { return k === 'src' ? (this._src || null) : null; }
+    removeAttribute(k) { if (k === 'src') this._src = ''; }
+    addEventListener(t, fn) { (this._listeners[t] ||= []).push(fn); }
+    removeEventListener(t, fn) { this._listeners[t] = (this._listeners[t] || []).filter((x) => x !== fn); }
+    emit(t) { (this._listeners[t] || []).slice().forEach((fn) => fn()); }
+    load() { this.paused = true; this.ended = false; this.error = null; }
+    play() { this.paused = false; return Promise.resolve(); }
+    pause() { this.paused = true; }
+  }
+
+  class MockCtx {
+    constructor() { this.state = 'running'; this.currentTime = 0; this.sampleRate = 48000; this.destination = { connect() {} }; }
+    resume() { return Promise.resolve(); }
+    createGain() {
+      const node = {
+        connections: [],
+        gain: { value: 1, setValueAtTime(v) { this.value = v; }, setTargetAtTime(v) { this.value = v; }, cancelScheduledValues() {}, setValueCurveAtTime() {} },
+        connect(t) { this.connections.push(t); },
+        disconnect() { this.connections.length = 0; },
+      };
+      return node;
+    }
+    createMediaElementSource() { return { connect() {} }; }
+    createBiquadFilter() {
+      return {
+        type: 'peaking',
+        connections: [],
+        Q: { value: 1, setValueAtTime(v) { this.value = v; } },
+        frequency: { value: 1000, setValueAtTime(v) { this.value = v; } },
+        gain: { value: 0, setValueAtTime(v) { this.value = v; }, setTargetAtTime(v) { this.value = v; }, cancelScheduledValues() {} },
+        connect(t) { this.connections.push(t); },
+        disconnect() { this.connections.length = 0; },
+      };
+    }
+    createAnalyser() { return { fftSize: 1024, connect() {}, getFloatTimeDomainData() {} }; }
+  }
+
+  globalThis.window = { AudioContext: MockCtx };
+  globalThis.Audio = MockEl;
+  globalThis.AudioContext = MockCtx;
+
+  try {
+    usePlayerStore.getState().cleanupEngine();
+    const engine = new AudioEngine();
+    usePlayerStore.getState().initEngine(engine);
+
+    // 1. WebM PTS calibration must NOT clear pendingReloadStartMs when loadeddata fires with currentTime=0
+    await engine.loadTrack({
+      videoId: 'BjC0KUxiMhc',
+      title: 'Subways',
+      artist: 'FEX',
+      artistIds: ['f'],
+      artists: [{ id: 'f', name: 'FEX' }],
+      liked: false,
+      totalPlayTimeMs: 210000,
+      durationSec: 210,
+      playCount: 0,
+      streamUrl: 'waveform-stream://yt?v=BjC0KUxiMhc',
+    }, 'active');
+    const el = engine.deckA.audioElement;
+    engine.seek(65000);
+    el.currentTime = 0;
+    el.emit('loadeddata');
+    assert.equal(engine.deckA.pendingReloadStartMs, 65000, 'Must keep pendingReloadStartMs when loadeddata fires at 0');
+
+    // Now Chromium decodes WebM Cluster with preserved PTS 64.5s -> must NOT double-count!
+    el.currentTime = 64.5;
+    el.emit('playing');
+    assert.equal(engine.deckA.pendingReloadStartMs, null);
+    assert.equal(engine.getPlaybackOffsetMs(), 0);
+    assert.equal(engine.getCurrentPositionMs(), 64500);
+
+    // 2. Web Audio AutoEQ chain wiring & playerStore.activeAutoEqProfile
+    assert.ok(engine.autoEqPreampNode);
+    assert.equal(engine.autoEqFilterNodes.length, 0);
+
+    const loaded = await usePlayerStore.getState().loadAutoEqProfile('Sony WH-1000XM4');
+    assert.equal(loaded, true);
+    assert.equal(usePlayerStore.getState().activeAutoEqProfile?.name, 'Sony WH-1000XM4');
+    assert.equal(engine.autoEqFilterNodes.length, 6);
+    assert.ok(engine.autoEqPreampNode.gain.value < 1.0);
+
+    // Clean bypass on ''
+    const cleared = await usePlayerStore.getState().loadAutoEqProfile('');
+    assert.equal(cleared, false);
+    assert.equal(usePlayerStore.getState().activeAutoEqProfile, null);
+    assert.equal(engine.autoEqFilterNodes.length, 0);
+    assert.equal(engine.autoEqPreampNode.gain.value, 1.0);
+  } finally {
+    usePlayerStore.getState().cleanupEngine();
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevAudio === undefined) delete globalThis.Audio;
+    else globalThis.Audio = prevAudio;
+    if (prevAudioCtx === undefined) delete globalThis.AudioContext;
+    else globalThis.AudioContext = prevAudioCtx;
+  }
+});

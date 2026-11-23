@@ -35,7 +35,7 @@ export interface IMusicService {
   getSearchSuggestions(query: string): Promise<string[]>;
   getReleaseDetails(id: string, type?: 'album' | 'playlist'): Promise<DetailPage | null>;
   getArtistDetails(id: string): Promise<ArtistPage | null>;
-  resolveStream(songId: string, title?: string, artist?: string): Promise<ResolvedStream>;
+  resolveStream(songId: string, title?: string, artist?: string, durationSec?: number): Promise<ResolvedStream>;
   getLyrics?(songId: string, title?: string, artist?: string): Promise<any | null>;
 }
 
@@ -803,7 +803,16 @@ export class MusicService implements IMusicService {
     }
   }
 
-  public async resolveStream(songId: string, title?: string, artist?: string): Promise<ResolvedStream> {
+  public invalidateStreamCache(songId?: string): void {
+    this.resolver.invalidateCache(songId);
+  }
+
+  public async resolveStream(
+    songId: string,
+    title?: string,
+    artist?: string,
+    durationSec?: number
+  ): Promise<ResolvedStream> {
     if (!this.isOnline) {
       if (songId === 'yt_track_001') {
         return {
@@ -821,7 +830,7 @@ export class MusicService implements IMusicService {
       };
     }
 
-    return this.resolver.resolve(songId, title, artist);
+    return this.resolver.resolve(songId, title, artist, durationSec);
   }
 
   public async getLyrics(songId: string, title?: string, artist?: string): Promise<any | null> {

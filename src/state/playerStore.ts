@@ -5,7 +5,8 @@ import { create } from 'zustand';
 import type { Song } from '../models/Song';
 import { normalizeSong } from '../models/Song';
 import type { DeckName, PlaybackStatus, PlaybackState as EnginePlaybackState } from '../audio/AudioEngine';
-import { AudioEngine } from '../audio/AudioEngine';
+import { AudioEngine, getTrackExpectedDurationSec } from '../audio/AudioEngine';
+import { AutoEqLoader, type AutoEqProfile } from '../audio/AutoEqLoader';
 import { MusicService } from '../services/MusicService';
 import { StreamResolver, type ResolvedStream } from '../services/StreamResolver';
 import { useSettingsStore } from './settingsStore';
@@ -74,6 +75,9 @@ export interface PlayerState {
   // Active playing stream quality badge metadata
   activeStreamQuality: string | null;
   activeStreamIsAtmos: boolean;
+
+  // Active AutoEQ headphone calibration profile
+  activeAutoEqProfile: AutoEqProfile | null;
 
   // Waveform & Visualizer Buffers
   waveformBuckets: Float32Array | null; // 200 amplitude values
@@ -147,10 +151,22 @@ function getEffectiveDurationMs(
     audioEngine && typeof audioEngine.getCurrentDurationMs === 'function'
       ? audioEngine.getCurrentDurationMs() || 0
       : 0;
-  const trackDur =
-    currentTrack?.totalPlayTimeMs ||
-    (currentTrack?.durationSec ? currentTrack.durationSec * 1000 : 0);
+  const trackDur = getTrackExpectedDurationSec(currentTrack) * 1000;
   return Math.max(durationMs || 0, engineDur, trackDur);
+}
+
+function appendSabrStartMs(rawUrl: string, startMs: number): string {
+  const rounded = Math.max(0, Math.floor(startMs));
+  if (rounded <= 0 || !rawUrl.includes('waveform-stream://yt')) {
+    return rawUrl;
+  }
+  try {
+    const u = new URL(rawUrl);
+    u.searchParams.set('startMs', String(rounded));
+    return u.toString();
+  } catch {
+    return `${rawUrl}${rawUrl.includes('?') ? '&' : '?'}startMs=${rounded}`;
+  }
 }
 
 /** Re-resolve a fresh stream URL for the current track and resume from positionMs. Returns false for local tracks. */
@@ -167,24 +183,30 @@ function recoverStream(
   const url = currentTrack?.streamUrl || '';
   if (!audioEngine || !currentTrack || /^(waveform-local|file):/i.test(url)) return false;
   const token = activeLoadToken;
+  const shouldResumePlaying = get().playbackState === 'PLAYING';
+  sharedStreamResolver.invalidateCache(currentTrack.videoId);
+  sharedMusicService.invalidateStreamCache(currentTrack.videoId);
   const resolveFn =
     customStreamResolver ||
     ((id: string, title?: string, artist?: string) =>
-      sharedMusicService.resolveStream(id, title, artist));
+      sharedMusicService.resolveStream(id, title, artist, currentTrack.durationSec));
   resolveFn(currentTrack.videoId, currentTrack.title, currentTrack.artist)
     .then(async (resolved) => {
       if (
         !resolved?.url ||
         token !== activeLoadToken ||
         get().currentTrack?.videoId !== currentTrack.videoId
-      )
+      ) {
         return;
-      const freshQuality = resolved.quality || currentTrack.sourceQuality || get().activeStreamQuality || '160kbps Opus';
+      }
+      const freshQuality =
+        resolved.quality || currentTrack.sourceQuality || get().activeStreamQuality || '160kbps Opus';
       const fresh = normalizeSong({
         ...currentTrack,
-        streamUrl: resolved.url,
+        streamUrl: appendSabrStartMs(resolved.url, resumeMs),
         sourceQuality: freshQuality,
       } as any);
+      const wantPlay = shouldResumePlaying || get().playbackState === 'PLAYING';
       set({
         currentTrack: fresh,
         positionMs: resumeMs,
@@ -192,27 +214,44 @@ function recoverStream(
         activeStreamIsAtmos: Boolean(resolved.isDolbyAtmos),
       });
       await audioEngine.loadTrack(fresh as any, 'active');
-      if (resumeMs > 0) audioEngine.seek(resumeMs);
-      if (get().playbackState === 'PLAYING') audioEngine.play();
+      if (token !== activeLoadToken || get().currentTrack?.videoId !== currentTrack.videoId) {
+        return;
+      }
+      if (resumeMs > 0) audioEngine.seek(Math.floor(resumeMs));
+      if (wantPlay) {
+        audioEngine.play();
+        set({ playbackState: 'PLAYING' });
+      }
     })
-    .catch((err) => console.warn('[playerStore] Stream recovery failed:', err));
+    .catch((err) => {
+      console.warn('[playerStore] Stream recovery failed:', err);
+      if (token === activeLoadToken && get().currentTrack?.videoId === currentTrack.videoId) {
+        set({ playbackState: 'PAUSED' });
+      }
+    });
   return true;
 }
 
 /**
- * Recover from a premature 'ended' cutoff at resumeMs (up to 2 retries per track),
- * stepping down the quality ladder: Lossless -> YouTube Opus/AAC -> JioSaavn.
+ * Recover from a premature 'ended' or stall cutoff at resumeMs (up to 3 retries per track),
+ * invalidating caches, retrying fresh SABR at startMs, and stepping down the quality ladder:
+ * Lossless -> fresh SABR YouTube -> JioSaavn 320kbps AAC -> Direct InnerTube.
  */
 async function recoverStreamFromPrematureEnd(
   get: () => PlayerStore,
   set: (p: Partial<PlayerState>) => void,
   resumeMs: number,
-  attemptNum: number
+  attemptNum: number,
+  token: number = activeLoadToken
 ): Promise<boolean> {
   const { audioEngine, currentTrack, activeStreamQuality } = get();
   const url = currentTrack?.streamUrl || '';
   if (!audioEngine || !currentTrack || /^(waveform-local|file):/i.test(url)) return false;
-  const token = activeLoadToken;
+  if (token !== activeLoadToken) return false;
+
+  const targetResumeMs = Math.max(0, Math.floor(resumeMs));
+  sharedStreamResolver.invalidateCache(currentTrack.videoId);
+  sharedMusicService.invalidateStreamCache(currentTrack.videoId);
 
   try {
     let resolved: {
@@ -234,9 +273,18 @@ async function recoverStreamFromPrematureEnd(
       const wasLossless =
         /flac|alac|lossless/i.test(activeStreamQuality || currentTrack.sourceQuality || '') ||
         url.includes('waveform-stream://proxy');
+      const query = `${currentTrack.title || ''} ${currentTrack.artist || ''}`.trim();
+      const target =
+        currentTrack.title && currentTrack.artist
+          ? {
+              title: currentTrack.title,
+              artist: currentTrack.artist,
+              durationSec: currentTrack.durationSec,
+            }
+          : undefined;
 
-      if (wasLossless && attemptNum === 1) {
-        // Step 1 down ladder: Lossless FLAC -> YouTube Opus/AAC
+      if (attemptNum === 1) {
+        // Attempt 1: If Lossless, step down to YouTube SABR/Opus; otherwise retry fresh SABR
         resolved =
           (await sharedStreamResolver.resolveYouTubeOnly(
             currentTrack.videoId,
@@ -247,19 +295,11 @@ async function recoverStreamFromPrematureEnd(
           (await sharedMusicService.resolveStream(
             currentTrack.videoId,
             currentTrack.title,
-            currentTrack.artist
+            currentTrack.artist,
+            currentTrack.durationSec
           ));
-      } else {
-        // Step 2 down ladder: YouTube Opus/AAC -> JioSaavn 320kbps AAC (or alternate YouTube stream)
-        const query = `${currentTrack.title || ''} ${currentTrack.artist || ''}`.trim();
-        const target =
-          currentTrack.title && currentTrack.artist
-            ? {
-                title: currentTrack.title,
-                artist: currentTrack.artist,
-                durationSec: currentTrack.durationSec,
-              }
-            : undefined;
+      } else if (attemptNum === 2) {
+        // Attempt 2: Step down to JioSaavn 320kbps AAC (or fresh YouTube if unavailable)
         resolved =
           (query ? await sharedStreamResolver.resolveJioSaavnTrack(query, target) : null) ||
           (await sharedStreamResolver.resolveYouTubeOnly(
@@ -271,7 +311,25 @@ async function recoverStreamFromPrematureEnd(
           (await sharedMusicService.resolveStream(
             currentTrack.videoId,
             currentTrack.title,
-            currentTrack.artist
+            currentTrack.artist,
+            currentTrack.durationSec
+          ));
+      } else {
+        // Attempt 3: Direct InnerTube clients (bypassing SABR) -> JioSaavn -> full resolve
+        resolved =
+          (await sharedStreamResolver.resolveYouTubeOnly(
+            currentTrack.videoId,
+            currentTrack.title,
+            currentTrack.artist,
+            currentTrack.durationSec,
+            { skipSabr: !wasLossless }
+          )) ||
+          (query ? await sharedStreamResolver.resolveJioSaavnTrack(query, target) : null) ||
+          (await sharedMusicService.resolveStream(
+            currentTrack.videoId,
+            currentTrack.title,
+            currentTrack.artist,
+            currentTrack.durationSec
           ));
       }
     }
@@ -285,20 +343,28 @@ async function recoverStreamFromPrematureEnd(
     }
 
     const freshQuality = resolved.quality || '160kbps Opus';
+    const nextUrl = appendSabrStartMs(resolved.url, targetResumeMs);
     const fresh = normalizeSong({
       ...currentTrack,
-      streamUrl: resolved.url,
+      streamUrl: nextUrl,
       sourceQuality: freshQuality,
     } as any);
+    const wantPlay = get().playbackState === 'PLAYING';
     set({
       currentTrack: fresh,
-      positionMs: resumeMs,
+      positionMs: targetResumeMs,
       activeStreamQuality: freshQuality,
       activeStreamIsAtmos: Boolean(resolved.isDolbyAtmos),
     });
     await audioEngine.loadTrack(fresh as any, 'active');
-    if (resumeMs > 0) audioEngine.seek(resumeMs);
-    if (get().playbackState === 'PLAYING') audioEngine.play();
+    if (token !== activeLoadToken || get().currentTrack?.videoId !== currentTrack.videoId) {
+      return false;
+    }
+    if (targetResumeMs > 0) audioEngine.seek(targetResumeMs);
+    if (wantPlay) {
+      audioEngine.play();
+      set({ playbackState: 'PLAYING' });
+    }
     return true;
   } catch (err) {
     console.warn('[playerStore] Premature ended recovery failed:', err);
@@ -312,8 +378,7 @@ const initialSanitizedPosMs = initialPlayer
   ? sanitizeResumePositionMs(
       initialPlayer.positionMs || 0,
       initialPlayer.durationMs ||
-        initialPlayer.currentTrack?.totalPlayTimeMs ||
-        (initialPlayer.currentTrack?.durationSec ? initialPlayer.currentTrack.durationSec * 1000 : 0)
+        getTrackExpectedDurationSec(initialPlayer.currentTrack) * 1000
     )
   : 0;
 
@@ -335,6 +400,8 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
 
   activeStreamQuality: initialPlayer?.currentTrack?.sourceQuality || null,
   activeStreamIsAtmos: false,
+
+  activeAutoEqProfile: null,
 
   waveformBuckets: null,
   livePcmEnergy: null,
@@ -389,9 +456,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       }
 
       const engineDur = engine ? engine.getCurrentDurationMs() : 0;
-      const trackDur = currentTrack
-        ? (currentTrack.totalPlayTimeMs || (currentTrack.durationSec ? currentTrack.durationSec * 1000 : 0))
-        : 0;
+      const trackDur = currentTrack ? getTrackExpectedDurationSec(currentTrack) * 1000 : 0;
       const prevDur = get().currentTrack?.videoId === currentTrack?.videoId ? get().durationMs : 0;
       const durationMs = engineDur > 0 ? engineDur : trackDur > 0 ? trackDur : prevDur;
 
@@ -459,7 +524,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
         })
       : null;
 
-    // Premature 'ended' cutoff guard: recover stream from resumeMs (up to 2 retries stepping down quality ladder)
+    // Premature 'ended' or stall cutoff guard: recover stream from resumeMs (up to 3 retries stepping down quality ladder)
     unsubscribeEnginePrematureEnded?.();
     unsubscribeEnginePrematureEnded = typeof (engine as any).onPrematureEnded === 'function'
       ? (engine as any).onPrematureEnded((resumeMs: number) => {
@@ -471,18 +536,41 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
           if (prematureRetryState.videoId !== current.videoId) {
             prematureRetryState = { videoId: current.videoId, attempts: 0, inFlight: false };
           }
-          if (prematureRetryState.inFlight || prematureRetryState.attempts >= 2) {
+          if (prematureRetryState.inFlight) {
+            return;
+          }
+          if (prematureRetryState.attempts >= 3) {
+            set({ positionMs: safeResumeMs, playbackState: 'PAUSED' });
             return;
           }
           prematureRetryState.attempts += 1;
           prematureRetryState.inFlight = true;
           const attemptNum = prematureRetryState.attempts;
+          const retryToken = activeLoadToken;
           set({ positionMs: safeResumeMs, playbackState: 'PLAYING' });
-          recoverStreamFromPrematureEnd(get, set, safeResumeMs, attemptNum).finally(() => {
-            if (prematureRetryState.videoId === current.videoId) {
-              prematureRetryState.inFlight = false;
-            }
-          });
+          recoverStreamFromPrematureEnd(get, set, safeResumeMs, attemptNum, retryToken)
+            .then((recovered) => {
+              if (
+                !recovered &&
+                retryToken === activeLoadToken &&
+                get().currentTrack?.videoId === current.videoId
+              ) {
+                set({ positionMs: safeResumeMs, playbackState: 'PAUSED' });
+              }
+            })
+            .catch(() => {
+              if (
+                retryToken === activeLoadToken &&
+                get().currentTrack?.videoId === current.videoId
+              ) {
+                set({ positionMs: safeResumeMs, playbackState: 'PAUSED' });
+              }
+            })
+            .finally(() => {
+              if (prematureRetryState.videoId === current.videoId) {
+                prematureRetryState.inFlight = false;
+              }
+            });
         })
       : null;
 
@@ -661,7 +749,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
   loadTrack: async (track: Song, deck: DeckName = 'active', autoPlay = true) => {
     const normalized = normalizeSong(track as any);
     const { audioEngine } = get();
-    const duration = normalized.totalPlayTimeMs || (normalized.durationSec ? normalized.durationSec * 1000 : 0);
+    const duration = getTrackExpectedDurationSec(normalized) * 1000;
     const loadToken = deck === 'active' ? ++activeLoadToken : 0;
     if (deck === 'active') {
       autoRetriedTrackId = null;
@@ -739,7 +827,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
           const resolveFn =
             customStreamResolver ||
             ((id: string, title?: string, artist?: string) =>
-              sharedMusicService.resolveStream(id, title, artist));
+              sharedMusicService.resolveStream(id, title, artist, normalized.durationSec));
           resolveFn(normalized.videoId, normalized.title, normalized.artist)
             .then(async (resolved) => {
               if (!resolved || !resolved.url) {
@@ -758,7 +846,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
               const resolvedDurationMs =
                 resolved.durationMs && resolved.durationMs > 0
                   ? resolved.durationMs
-                  : normalized.totalPlayTimeMs || (normalized.durationSec ? normalized.durationSec * 1000 : 0);
+                  : getTrackExpectedDurationSec(normalized) * 1000;
               const stage1Quality = resolved.quality || normalized.sourceQuality || '160kbps Opus';
               const stage1IsAtmos = Boolean(resolved.isDolbyAtmos);
               const enriched = normalizeSong({
@@ -767,8 +855,8 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
                 sourceQuality: stage1Quality,
                 ...(resolvedDurationMs > 0
                   ? {
-                      totalPlayTimeMs: resolvedDurationMs,
                       durationSec: Math.round(resolvedDurationMs / 1000),
+                      ...(normalized.totalPlayTimeMs <= 0 ? { totalPlayTimeMs: resolvedDurationMs } : {}),
                     }
                   : {}),
               } as any);
@@ -872,7 +960,8 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
   prepareRestoredTrack: async (track: Song, positionMs = 0) => {
     const normalized = normalizeSong(track as any);
     const { audioEngine } = get();
-    const duration = normalized.totalPlayTimeMs || (normalized.durationSec ? normalized.durationSec * 1000 : 0);
+    const restoreToken = ++activeLoadToken;
+    const duration = getTrackExpectedDurationSec(normalized) * 1000;
     const safePos = sanitizeResumePositionMs(positionMs, duration);
     const hasAudioEl = Boolean(audioEngine && audioEngine.getActiveAudioElement?.());
 
@@ -892,24 +981,31 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
         normalized.title || normalized.videoId
       )
         .then((palette) => {
-          useThemeStore.getState().setArtworkPalette(palette);
+          if (restoreToken === activeLoadToken) {
+            useThemeStore.getState().setArtworkPalette(palette);
+          }
         })
         .catch(() => {});
     }
 
     if (audioEngine) {
       await audioEngine.prepareRestoredTrack(normalized as any, safePos, 'active');
+      if (restoreToken !== activeLoadToken) return;
       audioEngine
         .getWaveformData(normalized.videoId)
         .then((waveform) => {
-          set({ waveformBuckets: waveform });
+          if (restoreToken === activeLoadToken) {
+            set({ waveformBuckets: waveform });
+          }
         })
         .catch(() => {
           const fallback = new Float32Array(200);
           for (let i = 0; i < 200; i++) {
             fallback[i] = 0.2 + 0.6 * Math.abs(Math.sin((i / 200) * Math.PI * 4));
           }
-          set({ waveformBuckets: fallback });
+          if (restoreToken === activeLoadToken) {
+            set({ waveformBuckets: fallback });
+          }
         });
     }
   },
@@ -941,10 +1037,21 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
 
   loadAutoEqProfile: async (profileName: string): Promise<boolean> => {
     const { audioEngine } = get();
-    if (audioEngine) {
-      return await audioEngine.loadAutoEqProfile(profileName);
+    if (!profileName || typeof profileName !== 'string' || !profileName.trim()) {
+      if (audioEngine) {
+        await audioEngine.loadAutoEqProfile('');
+      }
+      set({ activeAutoEqProfile: null });
+      return false;
     }
-    return false;
+    if (audioEngine) {
+      const ok = await audioEngine.loadAutoEqProfile(profileName);
+      set({ activeAutoEqProfile: ok ? audioEngine.autoEqProfile : null });
+      return ok;
+    }
+    const profile = await AutoEqLoader.findProfile(profileName);
+    set({ activeAutoEqProfile: profile ?? null });
+    return Boolean(profile);
   },
 
   setSpatialAudio: (enabled: boolean, width = 2.5) => {

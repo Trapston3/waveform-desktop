@@ -8,11 +8,13 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   formatTimestamp,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -24,6 +26,7 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
 
   private scrollY = 0;
   private initialized = false;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 {
     return variationId === 'editorial-bold' ? 1 : 0;
@@ -35,12 +38,15 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
       fontWeight: varIdx === 1 ? 800 : 700,
       fontSizeMultiplier: varIdx === 1 ? 1.02 : 0.96,
       maxLineWidthRatio: 0.72,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
   reset(): void {
     this.scrollY = 0;
     this.initialized = false;
+    this.lastKnownActiveIdx = -1;
   }
 
   render(
@@ -71,15 +77,17 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
       ctx.fillStyle = varIdx === 1 ? '#07080c' : frame.palette.bgDeep;
       ctx.fillRect(0, 0, width, height);
 
-      // Swiss 12-column hairline grid (kept strictly inside focal stage)
+      // Swiss 12-column hairline grid (soften/remove left vertical divider when focal.left > 0 so split-view flows seamlessly)
       ctx.strokeStyle = varIdx === 1 ? 'rgba(255, 255, 255, 0.085)' : 'rgba(255, 255, 255, 0.05)';
       ctx.lineWidth = varIdx === 1 ? 1.2 : 1;
       ctx.beginPath();
-      ctx.moveTo(globalGutterX - 18, 0);
-      ctx.lineTo(globalGutterX - 18, height);
+      if (focal.left <= 2) {
+        ctx.moveTo(globalGutterX - 18, 0);
+        ctx.lineTo(globalGutterX - 18, height);
+      }
       ctx.moveTo(focal.left + focal.width * 0.88, 0);
       ctx.lineTo(focal.left + focal.width * 0.88, height);
-      ctx.moveTo(focal.left, height * 0.14);
+      ctx.moveTo(0, height * 0.14);
       ctx.lineTo(width, height * 0.14);
       ctx.stroke();
 
@@ -103,12 +111,30 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height, 'NO LYRIC TRACK');
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      } else {
+        drawEmptyState(ctx, frame, width, height, 'NO LYRIC TRACK');
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -124,6 +150,7 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
         ? frame.manualScrollY
         : 0;
     const effectiveScrollY = this.scrollY + manualScroll;
+    const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
 
     const anchorY = height * 0.44;
     const fontSize = layout.fontSizePx;
@@ -131,11 +158,6 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
     const hoveredIdx = typeof frame.hoveredLineIndex === 'number' ? frame.hoveredLineIndex : -1;
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -147,10 +169,11 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
       ctx.font = `${varIdx === 1 ? 700 : 600} 11px "JetBrains Mono", monospace`;
       ctx.fillStyle = frame.palette.accentPrimary;
       ctx.globalAlpha = 0.88;
+      const idxLabel = hasActiveLine ? String(scrollIdx + 1).padStart(2, '0') : '--';
       const headerLabel =
         varIdx === 1
-          ? `HELVETICA // EDITION ${String(activeIdx + 1).padStart(2, '0')} OF ${String(layout.lines.length).padStart(2, '0')}`
-          : `INDEX ${String(activeIdx + 1).padStart(2, '0')}/${String(layout.lines.length).padStart(2, '0')}`;
+          ? `SWISS // EDITION ${idxLabel} OF ${String(layout.lines.length).padStart(2, '0')}`
+          : `INDEX ${idxLabel}/${String(layout.lines.length).padStart(2, '0')}`;
       ctx.fillText(headerLabel, fgGutterX, Math.max(18, height * 0.08));
     }
 
@@ -159,12 +182,23 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
 
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
-      const y = anchorY + (line.y - effectiveScrollY);
+      const gapOffset =
+        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+          ? i <= scrollIdx
+            ? -58
+            : 58
+          : 0;
+      const y = anchorY + (line.y - effectiveScrollY) + gapOffset;
       if (y + line.height < -60 || y > height + 60) continue;
 
-      const isActive = i === activeIdx;
-      const isPast = i < activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
+      const isPast = hasActiveLine
+        ? i < frame.activeLineIndex
+        : i <= scrollIdx && (frame.lyrics?.lines[i]?.endSeconds ?? 0) <= frame.timeSeconds;
       const isHovered = i === hoveredIdx;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
 
       // Record hit rect in global canvas coordinates (zero allocations)
       const hitLocalX = timestampLocalX;
@@ -258,12 +292,26 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
             : frame.palette.textUpcoming;
           ctx.globalAlpha = isHovered
             ? 0.85
-            : Math.max(0.18, 0.48 - Math.abs(i - activeIdx) * 0.1);
+            : Math.max(0.18, 0.48 - Math.abs(i - scrollIdx) * 0.1);
         }
         ctx.fillText(word.text, wx, wy);
+      }
+
+      if (isActive && secondaryText) {
+        const secFont = Math.max(12, Math.round(fontSize * 0.42));
+        ctx.save();
+        ctx.font = `500 ${secFont}px ${frame.fontFamily}`;
+        ctx.fillStyle = frame.palette.textUpcoming;
+        ctx.globalAlpha = 0.72 * frame.lineFadeAlpha;
+        ctx.fillText(secondaryText, fgGutterX, y + line.height + 4);
+        ctx.restore();
       }
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+    }
   }
 }

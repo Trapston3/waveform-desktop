@@ -94,6 +94,9 @@ function createMockCanvas2DContext() {
     moveTo() { ops.push('moveTo'); },
     lineTo() { ops.push('lineTo'); },
     quadraticCurveTo() { ops.push('quadraticCurveTo'); },
+    bezierCurveTo() { ops.push('bezierCurveTo'); },
+    setLineDash() { ops.push('setLineDash'); },
+    drawImage(...args) { ops.push(['drawImage', ...args.slice(1)]); },
     arc() { ops.push('arc'); },
     ellipse() { ops.push('ellipse'); },
     fill() { ops.push('fill'); },
@@ -786,13 +789,19 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     }
     renderer.dispose();
 
-    // Contextual emoji Tapback mode: pops matching contextual emoji in Tapback pill once matching word hits
+    // Contextual emoji Tapback mode: renders Apple glossy emoji via iosEmojiRenderer (never flat Segoe UI fillText)
     const tapbackCanvas = createMockCanvas();
     const tapbackDraws = [];
+    let tapbackVectorGrads = 0;
     const origFillText = tapbackCanvas.ctx2d.fillText.bind(tapbackCanvas.ctx2d);
     tapbackCanvas.ctx2d.fillText = (text, x, y) => {
       tapbackDraws.push({ text, font: tapbackCanvas.ctx2d.font, align: tapbackCanvas.ctx2d.textAlign });
       origFillText(text, x, y);
+    };
+    const origCreateLinearGrad = tapbackCanvas.ctx2d.createLinearGradient.bind(tapbackCanvas.ctx2d);
+    tapbackCanvas.ctx2d.createLinearGradient = (...args) => {
+      tapbackVectorGrads++;
+      return origCreateLinearGrad(...args);
     };
     const tapRenderer = new LyricStageRenderer({
       canvas: tapbackCanvas,
@@ -818,13 +827,26 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
       })),
     };
     tapRenderer.setLyrics(planeLyrics);
-    // Once all 3 lines are reached, at least 2 lines use tapback mode with '✈️'
+    // Once all 3 lines are reached, Tapback bubbles render glossy Apple emoji vector/image art (never Segoe UI fillText)
     tapRenderer.setSyncState({ timeSeconds: 8.2, activeLineIndex: 2, activeWordIndex: 3, wordProgress: 0.5 });
     tapRenderer.renderFrame(1000);
-    const tapbackPlanePills = tapbackDraws.filter(
-      (d) => d.text === '✈️' && d.font.startsWith('700 12px') && d.align === 'center'
+    assert.equal(
+      tapbackDraws.some((d) => d.text === '✈️'),
+      false,
+      'Apple emoji Tapback must not render via flat fillText("✈️")'
     );
-    assert.ok(tapbackPlanePills.length >= 2, 'Contextual emoji Tapback mode must render ✈️ inside Tapback pills');
+    assert.equal(
+      tapbackDraws.some((d) => /Segoe UI/i.test(d.font)),
+      false,
+      'IosTextingMotion must never use Segoe UI font'
+    );
+    const hasAppleVectorOrImage =
+      tapbackVectorGrads >= 2 ||
+      tapbackCanvas.ctx2d.ops.some((op) => Array.isArray(op) && op[0] === 'drawImage');
+    assert.ok(
+      hasAppleVectorOrImage,
+      'Contextual emoji Tapback mode must render glossy Apple emoji vector gradients or drawImage inside Tapback pills'
+    );
     tapRenderer.dispose();
   });
 
@@ -971,5 +993,272 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
       assert.ok(theme.style.background.length > 0);
       assert.ok(theme.style.color.length > 0);
     }
+  });
+
+  test('StarfieldShip3D enforces >=36px HUD top clearance across wrapped lines & browse mode and renders SIGNAL // INSTRUMENTAL on gaps', () => {
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'StarfieldShip3D',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: true,
+    });
+    renderer.resize(960, 540, 1);
+
+    const wrappedLyrics = {
+      providerName: 'HUD Clearance Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 1.0,
+          endSeconds: 5.0,
+          text: 'Constellations chart the open endless midnight ocean horizon',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Constellations', startSeconds: 1.0, endSeconds: 1.6 },
+            { text: 'chart', startSeconds: 1.6, endSeconds: 2.1 },
+            { text: 'the', startSeconds: 2.1, endSeconds: 2.4 },
+            { text: 'open', startSeconds: 2.4, endSeconds: 2.9 },
+            { text: 'endless', startSeconds: 2.9, endSeconds: 3.5 },
+            { text: 'midnight', startSeconds: 3.5, endSeconds: 4.1 },
+            { text: 'ocean', startSeconds: 4.1, endSeconds: 4.6 },
+            { text: 'horizon', startSeconds: 4.6, endSeconds: 5.0 },
+          ],
+        },
+        {
+          startSeconds: 15.0,
+          endSeconds: 19.0,
+          text: 'Lanterns drift across the quiet tide tonight',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Lanterns', startSeconds: 15.0, endSeconds: 15.6 },
+            { text: 'drift', startSeconds: 15.6, endSeconds: 16.2 },
+            { text: 'across', startSeconds: 16.2, endSeconds: 16.8 },
+            { text: 'the', startSeconds: 16.8, endSeconds: 17.2 },
+            { text: 'quiet', startSeconds: 17.2, endSeconds: 17.8 },
+            { text: 'tide', startSeconds: 17.8, endSeconds: 18.4 },
+            { text: 'tonight', startSeconds: 18.4, endSeconds: 19.0 },
+          ],
+        },
+      ],
+    };
+    renderer.setLyrics(wrappedLyrics);
+
+    const checkClearance = (label) => {
+      const textOps = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText');
+      const hudHeaders = textOps.filter((op) => String(op[1]).startsWith('HUD ['));
+      assert.equal(hudHeaders.length, 1, `${label}: expected HUD header`);
+      const headerY = hudHeaders[0][3];
+      const headerBottom = headerY + 14;
+      const lyricDraws = textOps.filter(
+        (op) => !String(op[1]).startsWith('HUD [') && !String(op[1]).startsWith('NAV:')
+      );
+      assert.ok(lyricDraws.length > 0, `${label}: expected lyric or signal fillText calls`);
+      for (const op of lyricDraws) {
+        assert.ok(
+          op[3] - headerBottom >= 36,
+          `${label}: "${op[1]}" at y=${op[3]} collided with HUD header bottom ${headerBottom} (clearance=${op[3] - headerBottom})`
+        );
+      }
+    };
+
+    // Normal active wrapped line
+    canvas.ctx2d.ops.length = 0;
+    renderer.setSyncState({ timeSeconds: 2.5, activeLineIndex: 0, activeWordIndex: 3, wordProgress: 0.5 });
+    renderer.renderFrame(1000);
+    checkClearance('normal-wrapped');
+
+    // Manual browse mode scrolled aggressively upward
+    renderer.scrollBy(-90);
+    canvas.ctx2d.ops.length = 0;
+    renderer.renderFrame(1016);
+    checkClearance('browse-mode');
+
+    // Instrumental gap inside StarfieldShip3D renders SIGNAL // INSTRUMENTAL cleanly below HUD header
+    renderer.resumeFollowPlayback();
+    canvas.ctx2d.ops.length = 0;
+    renderer.setSyncState({
+      timeSeconds: 10.0,
+      activeLineIndex: -1,
+      activeWordIndex: -1,
+      wordProgress: 0,
+      isInstrumentalGap: true,
+      gapProgress: 0.5,
+      timeUntilNextLine: 5.0,
+      hasLyrics: true,
+      lastActiveLineIndex: 0,
+      nextLineIndex: 1,
+    });
+    renderer.renderFrame(1032);
+    checkClearance('instrumental-gap');
+    const gapTexts = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+      .map((op) => String(op[1]));
+    assert.ok(
+      gapTexts.some((t) => t.includes('SIGNAL // INSTRUMENTAL')),
+      'StarfieldShip3D must render SIGNAL // INSTRUMENTAL during instrumental gap'
+    );
+    renderer.dispose();
+  });
+
+  test('All 9 remaining styles handle mid-song instrumental gaps without -1->0 highlight or opaque overlay fills, and respect WS4 script rules', () => {
+    const gapLyrics = {
+      providerName: 'Gap Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 1.0,
+          endSeconds: 4.0,
+          text: 'LineZeroMarker opening phrase',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'LineZeroMarker', startSeconds: 1.0, endSeconds: 2.5 },
+            { text: 'opening', startSeconds: 2.5, endSeconds: 3.2 },
+            { text: 'phrase', startSeconds: 3.2, endSeconds: 4.0 },
+          ],
+        },
+        {
+          startSeconds: 4.5,
+          endSeconds: 7.5,
+          text: 'LineOneAnchor middle phrase',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'LineOneAnchor', startSeconds: 4.5, endSeconds: 5.5 },
+            { text: 'middle', startSeconds: 5.5, endSeconds: 6.5 },
+            { text: 'phrase', startSeconds: 6.5, endSeconds: 7.5 },
+          ],
+        },
+        {
+          startSeconds: 18.0,
+          endSeconds: 21.0,
+          text: 'LineTwoTarget closing phrase',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'LineTwoTarget', startSeconds: 18.0, endSeconds: 19.0 },
+            { text: 'closing', startSeconds: 19.0, endSeconds: 20.0 },
+            { text: 'phrase', startSeconds: 20.0, endSeconds: 21.0 },
+          ],
+        },
+      ],
+    };
+
+    const remaining9 = [
+      'AppleMusicFlow',
+      'TypewriterEditorial',
+      'MinimalSwiss',
+      'LiquidMetal',
+      'KaraokeStage',
+      'BrutalistZine',
+      'GenerativeParticleInk',
+      'Spatial3DDepth',
+      'CRTScanline',
+    ];
+
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      palette: SAMPLE_PALETTE,
+      reduceMotion: true,
+    });
+    renderer.resize(900, 600, 1);
+
+    for (const styleId of remaining9) {
+      renderer.setStyle(styleId);
+      renderer.setLyrics(gapLyrics);
+
+      // Opaque mid-song gap after line 1
+      renderer.setModes({ isOverlayMode: false, isEmbeddedTransparent: false });
+      canvas.ctx2d.ops.length = 0;
+      renderer.setSyncState({
+        timeSeconds: 12.0,
+        activeLineIndex: -1,
+        activeWordIndex: -1,
+        wordProgress: 0,
+        isInstrumentalGap: true,
+        gapProgress: 0.43,
+        timeUntilNextLine: 6.0,
+        hasLyrics: true,
+        lastActiveLineIndex: 1,
+        nextLineIndex: 2,
+      });
+      assert.equal(renderer.renderFrame(1000), true, `${styleId} should render during gap`);
+      const fillTexts = canvas.ctx2d.ops
+        .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+        .map((op) => String(op[1]));
+      assert.ok(
+        fillTexts.some((t) => t.includes('♪') || t.includes('Instrumental')),
+        `${styleId} must render instrumental indicator during isInstrumentalGap`
+      );
+
+      // Overlay transparent gap must never draw full-viewport opaque fillRect(0, 0, 900, 600)
+      renderer.setModes({ isOverlayMode: true });
+      canvas.ctx2d.ops.length = 0;
+      assert.equal(renderer.renderFrame(1016), true);
+      const hasFullBg = canvas.ctx2d.ops.some(
+        (op) =>
+          Array.isArray(op) &&
+          op[0] === 'fillRect' &&
+          op[1] === 0 &&
+          op[2] === 0 &&
+          op[3] === 900 &&
+          op[4] === 600
+      );
+      assert.equal(hasFullBg, false, `${styleId} overlay gap must not draw full-screen fillRect`);
+    }
+
+    // WS4: BrutalistZine avoids 0.02em letterSpacing on cursive Arabic / Devanagari
+    const registry = new StyleRegistry();
+    const zine = registry.get('BrutalistZine');
+    const arabicLyrics = {
+      providerName: 'Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 0,
+          endSeconds: 4,
+          text: 'مرحبا بالعالم',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'مرحبا', startSeconds: 0, endSeconds: 2 },
+            { text: 'بالعالم', startSeconds: 2, endSeconds: 4 },
+          ],
+        },
+      ],
+    };
+    const zineSpec = zine.getMeasurementSpec({
+      lyrics: arabicLyrics,
+      scriptMode: 'original',
+    });
+    assert.equal(zineSpec.letterSpacing, '0px', 'BrutalistZine must disable 0.02em letterSpacing for Arabic/Devanagari');
+
+    // WS4: TypewriterEditorial grapheme-safe slicing never emits lone UTF-16 surrogates
+    renderer.setStyle('TypewriterEditorial');
+    renderer.setModes({ isOverlayMode: false, isEmbeddedTransparent: false });
+    const emojiWordLyrics = {
+      providerName: 'Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 0,
+          endSeconds: 4,
+          text: '🌙✨🎵',
+          isSynthesizedWords: false,
+          words: [{ text: '🌙✨🎵', startSeconds: 0, endSeconds: 4 }],
+        },
+      ],
+    };
+    renderer.setLyrics(emojiWordLyrics);
+    renderer.setSyncState({ timeSeconds: 1.0, activeLineIndex: 0, activeWordIndex: 0, wordProgress: 0.2 });
+    canvas.ctx2d.ops.length = 0;
+    renderer.renderFrame(1050);
+    const typedTexts = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+      .map((op) => String(op[1]));
+    for (const txt of typedTexts) {
+      assert.equal(/[\uD800-\uDFFF]/.test(txt) && !/^(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[^\uD800-\uDFFF])*$/.test(txt), false, `Lone surrogate found in TypewriterEditorial output: ${txt}`);
+    }
+    assert.ok(typedTexts.includes('🌙'), 'Grapheme-safe slice should reveal whole surrogate-pair emoji cleanly');
+
+    renderer.dispose();
   });
 });

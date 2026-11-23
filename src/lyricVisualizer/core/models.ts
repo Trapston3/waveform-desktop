@@ -298,6 +298,13 @@ export type LyricsSourceKind =
   | 'Unsynced'
   | 'FallbackSynthesis';
 
+export type LyricsScriptMode =
+  | 'auto'
+  | 'original'
+  | 'romanized'
+  | 'romanized_translation'
+  | 'original_translation';
+
 export interface LyricWord {
   readonly text: string;
   readonly startSeconds: number;
@@ -310,6 +317,9 @@ export interface LyricLine {
   readonly text: string;
   readonly words: readonly LyricWord[];
   readonly isSynthesizedWords: boolean;
+  readonly romanizedText?: string;
+  readonly romanizedWords?: readonly LyricWord[];
+  readonly translatedText?: string;
 }
 
 export interface Lyrics {
@@ -330,6 +340,9 @@ export interface TrackParsedLineInput {
   readonly endTimeMs: number;
   readonly text: string;
   readonly words?: readonly TrackParsedWordInput[];
+  readonly romanizedText?: string;
+  readonly romanizedWords?: readonly TrackParsedWordInput[];
+  readonly translatedText?: string;
 }
 
 export interface TrackInfo {
@@ -416,6 +429,8 @@ export interface MeasuredLineLayout {
   readonly width: number;
   readonly height: number;
   readonly words: readonly MeasuredWordLayout[];
+  readonly secondaryText?: string | null;
+  readonly isRomanized?: boolean;
 }
 
 export interface LyricsLayout {
@@ -471,6 +486,13 @@ export interface StyleFrameContext {
   readonly vignetteStrength: number;
   readonly textAlign: LyricTextAlign;
   readonly trackMetadata: StyleTrackMetadata | null;
+  readonly scriptMode?: LyricsScriptMode;
+  readonly isInstrumentalGap?: boolean;
+  readonly gapProgress?: number;
+  readonly timeUntilNextLine?: number;
+  readonly hasLyrics?: boolean;
+  readonly lastActiveLineIndex?: number;
+  readonly nextLineIndex?: number;
   readonly recordHitRect: (
     lineIndex: number,
     x: number,
@@ -494,6 +516,7 @@ export interface LyricVisualizerConfig {
   readonly textAlign: LyricTextAlign;
   readonly nowPlayingLayout: NowPlayingLayoutMode;
   readonly hideAlbumCover: boolean;
+  readonly scriptMode: LyricsScriptMode;
   readonly overlayEnabled: boolean;
   readonly overlayMonitorIds: readonly string[];
   readonly overlayOpacity: number;
@@ -518,6 +541,7 @@ export const DEFAULT_LYRIC_VISUALIZER_CONFIG: LyricVisualizerConfig = {
   textAlign: 'center',
   nowPlayingLayout: 'split',
   hideAlbumCover: false,
+  scriptMode: 'auto',
   overlayEnabled: false,
   overlayMonitorIds: [],
   overlayOpacity: 0.9,

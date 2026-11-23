@@ -13,6 +13,7 @@ import {
   getStyleDefinition,
   type LyricPalette,
   type Lyrics,
+  type LyricsScriptMode,
   type LyricTextAlign,
   type LyricVisualizerConfig,
   type NowPlayingLayoutMode,
@@ -94,6 +95,7 @@ export interface LyricVisualizerState {
   setTextAlign: (align: LyricTextAlign) => void;
   setNowPlayingLayout: (layout: NowPlayingLayoutMode) => void;
   setHideAlbumCover: (hide: boolean) => void;
+  setScriptMode: (mode: LyricsScriptMode) => void;
 
   setCurrentSongKey: (songKey: string | null) => Promise<void>;
   setSongOffsetMs: (offsetMs: number, songKey?: string | null) => void;
@@ -176,6 +178,16 @@ function isValidTextAlign(val: unknown): val is LyricTextAlign {
 
 function isValidNowPlayingLayout(val: unknown): val is NowPlayingLayoutMode {
   return val === 'split' || val === 'centered' || val === 'ambient';
+}
+
+function isValidScriptMode(val: unknown): val is LyricsScriptMode {
+  return (
+    val === 'auto' ||
+    val === 'original' ||
+    val === 'romanized' ||
+    val === 'romanized_translation' ||
+    val === 'original_translation'
+  );
 }
 
 function sanitizeVariationMap(
@@ -289,6 +301,9 @@ function loadPersistedState(): {
       typeof (c as any).hideAlbumCover === 'boolean'
         ? (c as any).hideAlbumCover
         : DEFAULT_LYRIC_VISUALIZER_CONFIG.hideAlbumCover,
+    scriptMode: isValidScriptMode((c as any).scriptMode)
+      ? (c as any).scriptMode
+      : DEFAULT_LYRIC_VISUALIZER_CONFIG.scriptMode,
     overlayEnabled:
       typeof c.overlayEnabled === 'boolean'
         ? c.overlayEnabled
@@ -621,6 +636,20 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     const flag = Boolean(hide);
     set((s) => {
       const nextConfig: LyricVisualizerConfig = { ...s.config, hideAlbumCover: flag };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setScriptMode: (mode: LyricsScriptMode) => {
+    if (!isValidScriptMode(mode)) return;
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, scriptMode: mode };
       savePersistedState({
         config: nextConfig,
         perSongOffsetsMs: s.perSongOffsetsMs,
@@ -1060,6 +1089,9 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
           ...payload.config,
           styleId: migrated.styleId,
           variationByStyle: migrated.variationByStyle,
+          scriptMode: isValidScriptMode((payload.config as any).scriptMode)
+            ? (payload.config as any).scriptMode
+            : s.config.scriptMode,
         };
       }
 

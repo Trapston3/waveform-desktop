@@ -7,11 +7,13 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   formatTimestamp,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -29,6 +31,7 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
 
   private scrollY = 0;
   private initialized = false;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 {
     return variationId === 'warm-ink' ? 1 : 0;
@@ -40,12 +43,15 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
       fontSizeMultiplier: 1.06,
       fontFamilyOverride: resolveSerifFamily(frame.fontFamily),
       maxLineWidthRatio: 0.76,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
   reset(): void {
     this.scrollY = 0;
     this.initialized = false;
+    this.lastKnownActiveIdx = -1;
   }
 
   render(
@@ -88,13 +94,17 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
         varIdx === 0 ? 'rgba(203, 213, 225, 0.065)' : 'rgba(244, 232, 212, 0.08)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(globalLeftMargin, 24);
-      ctx.lineTo(globalLeftMargin, height - 24);
+      // Omit hard vertical margin rule at focal.left when split-view inset is active
+      if (focal.left <= 2) {
+        ctx.moveTo(globalLeftMargin, 24);
+        ctx.lineTo(globalLeftMargin, height - 24);
+      }
       ctx.moveTo(width - marginX, 24);
       ctx.lineTo(width - marginX, height - 24);
+      const ruleStart = focal.left > 2 ? marginX : globalLeftMargin;
       const ruleStep = 44;
       for (let y = 64; y < height - 40; y += ruleStep) {
-        ctx.moveTo(globalLeftMargin, y);
+        ctx.moveTo(ruleStart, y);
         ctx.lineTo(width - marginX, y);
       }
       ctx.stroke();
@@ -119,12 +129,30 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height, 'Awaiting manuscript...');
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      } else {
+        drawEmptyState(ctx, frame, width, height, 'Awaiting manuscript...');
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -156,11 +184,6 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
     const inkGhost = varIdx === 0 ? '#94a3b8' : '#d7cab8';
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -172,8 +195,9 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
     ctx.fillStyle = frame.palette.accentPrimary;
     ctx.globalAlpha = 0.76;
     const folioTag = varIdx === 0 ? 'FOLIO // SLATE' : 'FOLIO // WARM-INK';
+    const lineNumLabel = hasActiveLine ? String(scrollIdx + 1).padStart(2, '0') : '--';
     ctx.fillText(
-      `${folioTag}  ·  LINE ${String(activeIdx + 1).padStart(2, '0')}  /  ${formatTimestamp(activeLine.startSeconds)}`,
+      `${folioTag}  ·  LINE ${lineNumLabel}  /  ${formatTimestamp(activeLine.startSeconds)}`,
       leftContentX,
       Math.max(26, height * 0.12)
     );
@@ -181,13 +205,22 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
       const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
-      const screenY = centerY + lineCenterOffset - line.height * 0.5;
+      const gapOffset =
+        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+          ? i <= scrollIdx
+            ? -58
+            : 58
+          : 0;
+      const screenY = centerY + lineCenterOffset - line.height * 0.5 + gapOffset;
 
       if (screenY + line.height < -60 || screenY > height + 60) continue;
-      if (!isBrowsing && Math.abs(i - activeIdx) > 1) continue;
+      if (!isBrowsing && Math.abs(i - scrollIdx) > 1) continue;
 
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
       const lineBaseX = isCenterAlign ? Math.max(leftContentX, line.x) : leftContentX;
 
       const hitLocalX = Math.max(12, lineBaseX - 16);
@@ -225,8 +258,12 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
             cursorY = wy;
           } else if (w === frame.activeWordIndex) {
             const p = clamp01(frame.wordProgress);
-            const charCount = Math.max(1, Math.ceil(word.text.length * Math.max(0.15, p)));
-            const revealed = word.text.slice(0, charCount);
+            let revealed = word.text;
+            if (p < 0.999) {
+              const chars = [...word.text];
+              const charCount = Math.max(1, Math.ceil(chars.length * Math.max(0.15, p)));
+              revealed = chars.slice(0, charCount).join('');
+            }
             ctx.globalAlpha = frame.lineFadeAlpha;
             ctx.fillStyle = inkBright;
             ctx.fillText(revealed, wx, wy);
@@ -248,6 +285,16 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
           ctx.fillStyle = frame.palette.accentPrimary;
           ctx.fillRect(cursorX, cursorY + 4, 3, Math.max(18, fontSize * 0.95));
         }
+
+        if (secondaryText) {
+          const secFont = Math.max(12, Math.round(fontSize * 0.42));
+          ctx.save();
+          ctx.font = `400 italic ${secFont}px ${serifFamily}`;
+          ctx.fillStyle = inkGhost;
+          ctx.globalAlpha = 0.78 * frame.lineFadeAlpha;
+          ctx.fillText(secondaryText, lineBaseX, screenY + line.height + 4);
+          ctx.restore();
+        }
       } else {
         const subScale = isBrowsing ? 0.85 : 0.66;
         const subFont = Math.max(14, Math.round(fontSize * subScale));
@@ -264,5 +311,9 @@ export class TypewriterEditorialStyle implements ILyricVisualStyle {
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+    }
   }
 }

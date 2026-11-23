@@ -10,10 +10,12 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -28,6 +30,7 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
   private smoothLineIndex = 0;
   private initialized = false;
   private tunnelPhase = 0;
+  private lastKnownActiveIdx = -1;
 
   // Pre-allocated lane buffers (zero per-frame heap allocations)
   private readonly laneY = new Float32Array(MAX_PLANES);
@@ -42,11 +45,13 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
     return 0;
   }
 
-  getMeasurementSpec(): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     return {
       fontWeight: 800,
       fontSizeMultiplier: 1.04,
       maxLineWidthRatio: 0.82,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
@@ -54,6 +59,7 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
     this.smoothLineIndex = 0;
     this.initialized = false;
     this.tunnelPhase = 0;
+    this.lastKnownActiveIdx = -1;
   }
 
   render(
@@ -196,24 +202,48 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height);
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      } else {
+        drawEmptyState(ctx, frame, width, height);
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
-      this.smoothLineIndex = activeIdx;
-      this.initialized = true;
-    } else {
-      const rate = Math.min(1, Math.max(0.016, frame.deltaSeconds) * 6.5);
-      this.smoothLineIndex += (activeIdx - this.smoothLineIndex) * rate;
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
     }
-
-    const lineH = Math.max(32, layout.lineHeightPx);
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
     const manualScroll =
       typeof frame.manualScrollY === 'number' && Number.isFinite(frame.manualScrollY)
         ? frame.manualScrollY
         : 0;
+    const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
+
+    const targetPlaneFloat =
+      frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+        ? Math.min(layout.lines.length - 1, scrollIdx + 0.5)
+        : scrollIdx;
+    if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
+      this.smoothLineIndex = targetPlaneFloat;
+      this.initialized = true;
+    } else {
+      const rate = Math.min(1, Math.max(0.016, frame.deltaSeconds) * 6.5);
+      this.smoothLineIndex += (targetPlaneFloat - this.smoothLineIndex) * rate;
+    }
+
+    const lineH = Math.max(32, layout.lineHeightPx);
     // Manual scroll shifts the focal plane smoothly through the 3D Z-stack
     const centerLineFloat = Math.max(
       0,
@@ -296,11 +326,6 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
     }
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -314,18 +339,26 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
       const persp = this.lanePersp[slot];
       const planeY = this.laneY[slot];
       const depthDist = Math.abs(this.laneRel[slot]);
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
+      const isPast = hasActiveLine
+        ? i < frame.activeLineIndex
+        : i <= scrollIdx && (frame.lyrics?.lines[i]?.endSeconds ?? 0) <= frame.timeSeconds;
       const isFocal = i === pivotIdx;
       const isHovered = i === hoveredIdx;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
 
       const scaledH = line.height * persp;
       if (planeY + scaledH * 0.5 < -60 || planeY - scaledH * 0.5 > height + 60) continue;
 
-      const dofAlpha = isActive
-        ? frame.lineFadeAlpha
-        : isHovered
-        ? 0.88
-        : Math.max(0.22, 0.78 * Math.exp(-depthDist * 0.42));
+      const gapDim = frame.isInstrumentalGap && !isBrowsing && !hasActiveLine ? 0.52 : 1.0;
+      const dofAlpha =
+        (isActive
+          ? frame.lineFadeAlpha
+          : isHovered
+          ? 0.88
+          : Math.max(0.22, 0.78 * Math.exp(-depthDist * 0.42))) * gapDim;
 
       const planeXShift = camDriftX * (1 - persp) * 1.35;
       const lineBaseX = isLeftAlign ? leftPad : line.x;
@@ -389,7 +422,7 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
 
       if (!isActive) {
         ctx.globalAlpha = dofAlpha;
-        ctx.fillStyle = i < activeIdx ? frame.palette.textUpcoming : '#e2e8f0';
+        ctx.fillStyle = isPast ? frame.palette.textUpcoming : '#e2e8f0';
         ctx.shadowColor = 'rgba(4, 6, 12, 0.75)';
         ctx.shadowBlur = depthDist > 1.5 ? 6 : 2;
         for (let w = 0; w < line.words.length; w++) {
@@ -402,7 +435,7 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
           const wx = lineBaseX + word.x;
           const wy = word.y;
           const isCurrent = unsyncedOrLineLevel ? true : w === frame.activeWordIndex;
-          const isPast = !unsyncedOrLineLevel && w < frame.activeWordIndex;
+          const isPastWord = !unsyncedOrLineLevel && w < frame.activeWordIndex;
 
           // Crisp Z-extrusion depth shadow behind active line words
           ctx.save();
@@ -412,15 +445,30 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
           ctx.fillText(word.text, wx + 2.5, wy + 3.5);
           ctx.restore();
 
-          ctx.globalAlpha = (isCurrent ? 1.0 : isPast ? 0.96 : 0.76) * dofAlpha;
+          ctx.globalAlpha = (isCurrent ? 1.0 : isPastWord ? 0.96 : 0.76) * dofAlpha;
           ctx.fillStyle = isCurrent
             ? '#ffffff'
-            : isPast
+            : isPastWord
             ? '#f1f5f9'
             : frame.palette.textActive;
           ctx.shadowColor = isCurrent ? frame.palette.accentPrimary : 'rgba(15, 23, 42, 0.65)';
           ctx.shadowBlur = isCurrent ? 20 + frame.audio.bassEnergy * 10 : 6;
           ctx.fillText(word.text, wx, wy);
+        }
+        if (secondaryText) {
+          const secFont = Math.max(12, Math.round(fontSize * 0.4));
+          ctx.save();
+          ctx.font = `500 ${secFont}px ${frame.fontFamily}`;
+          ctx.fillStyle = frame.palette.textUpcoming;
+          ctx.globalAlpha = 0.72 * dofAlpha;
+          ctx.shadowBlur = 0;
+          ctx.textAlign = isLeftAlign ? 'left' : 'center';
+          ctx.fillText(
+            secondaryText,
+            isLeftAlign ? leftPad : cx,
+            line.height + 4
+          );
+          ctx.restore();
         }
       }
 
@@ -428,5 +476,9 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+    }
   }
 }

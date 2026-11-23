@@ -2,6 +2,11 @@
 // LRC & TTML syllable-synced lyrics parser and active word tracker conforming to Feature 16 & 22
 
 import { universalFetch, InnerTubeClient } from './InnerTubeClient';
+import {
+  hasNonLatinScript,
+  mapRomanizedWords,
+  transliterateToLatin,
+} from '../utils/transliterate';
 
 export interface LyricSyllable {
   text: string;
@@ -21,7 +26,10 @@ export interface LyricLine {
   backgroundLine?: LyricLine;
   alignment?: 'start' | 'end';
   romanization?: string;
+  romanizedText?: string;
+  romanizedWords?: LyricSyllable[];
   translation?: string;
+  translatedText?: string;
   isRtl?: boolean;
 }
 
@@ -391,7 +399,226 @@ export class LyricsService {
 
   private static readonly lyricsCache = new Map<string, LyricsData>();
   private static readonly pendingFetches = new Map<string, Promise<LyricsData | null>>();
+  private static readonly translationCache = new Map<string, string[]>();
+  private static readonly pendingTranslations = new Map<string, Promise<LyricsData>>();
   private static readonly MAX_CACHE_SIZE = 100;
+  private static readonly TRANSLATE_TIMEOUT_MS = 4000;
+
+  private static enrichLineNonLatin(line: LyricLine): LyricLine {
+    const existingRom = (line.romanizedText || line.romanization || '').trim();
+    const existingTrans = (line.translatedText || line.translation || '').trim();
+
+    let romText = existingRom;
+    if (!romText && hasNonLatinScript(line.text)) {
+      const candidate = transliterateToLatin(line.text).trim();
+      if (candidate && candidate !== line.text.trim()) {
+        romText = candidate;
+      }
+    }
+
+    let nextBgLine = line.backgroundLine;
+    let bgChanged = false;
+    if (line.backgroundLine) {
+      const enrichedBg = this.enrichLineNonLatin(line.backgroundLine);
+      if (enrichedBg !== line.backgroundLine) {
+        nextBgLine = enrichedBg;
+        bgChanged = true;
+      }
+    }
+
+    const hasExistingRomWords = Array.isArray(line.romanizedWords) && line.romanizedWords.length > 0;
+    let nextRomWords = line.romanizedWords;
+    if (romText && !hasExistingRomWords) {
+      const sourceWords = (line.syllables || [])
+        .filter((s) => typeof s.text === 'string' && s.text.trim().length > 0)
+        .map((s) => ({
+          text: s.text.trim(),
+          startSeconds: Math.max(0, s.startTimeMs / 1000),
+          endSeconds: Math.max(Math.max(0, s.startTimeMs / 1000) + 0.02, s.endTimeMs / 1000),
+        }));
+      const lineStartSec = Math.max(0, line.startTimeMs / 1000);
+      const lineEndSec = Math.max(lineStartSec + 0.05, line.endTimeMs / 1000);
+      const mapped = mapRomanizedWords(sourceWords, romText, lineStartSec, lineEndSec);
+      if (mapped.length > 0) {
+        nextRomWords = mapped.map((w) => ({
+          text: w.text,
+          startTimeMs: Math.round(w.startSeconds * 1000),
+          endTimeMs: Math.round(w.endSeconds * 1000),
+        }));
+      }
+    }
+
+    const romNeedsSync = Boolean(romText) && (line.romanizedText !== romText || line.romanization !== romText);
+    const transNeedsSync = Boolean(existingTrans) && (line.translatedText !== existingTrans || line.translation !== existingTrans);
+    const wordsChanged = nextRomWords !== line.romanizedWords;
+
+    if (!romNeedsSync && !transNeedsSync && !wordsChanged && !bgChanged) {
+      return line;
+    }
+
+    return {
+      ...line,
+      ...(romText ? { romanization: romText, romanizedText: romText } : {}),
+      ...(nextRomWords ? { romanizedWords: nextRomWords } : {}),
+      ...(existingTrans ? { translation: existingTrans, translatedText: existingTrans } : {}),
+      ...(bgChanged ? { backgroundLine: nextBgLine } : {}),
+    };
+  }
+
+  /**
+   * Synchronously enriches non-Latin lyrics with deterministic offline romanization
+   * and proportional word-level timing, keeping romanization/romanizedText and
+   * translation/translatedText synchronized.
+   */
+  public static enrichNonLatinLyrics(parsed: LyricsData): LyricsData {
+    if (!parsed || !Array.isArray(parsed.lines) || parsed.lines.length === 0) {
+      return parsed;
+    }
+    let changed = false;
+    const nextLines = parsed.lines.map((line) => {
+      const enriched = this.enrichLineNonLatin(line);
+      if (enriched !== line) changed = true;
+      return enriched;
+    });
+    return changed ? { ...parsed, lines: nextLines } : parsed;
+  }
+
+  /**
+   * Lightweight cached async translation enrichment via Google Translate GTX endpoint
+   * with a strict 4s timeout and graceful offline fallback.
+   */
+  public static async translateLyricsLines(parsed: LyricsData, targetLang = 'en'): Promise<LyricsData> {
+    if (!parsed || !Array.isArray(parsed.lines) || parsed.lines.length === 0) {
+      return parsed;
+    }
+
+    const targetIndices: number[] = [];
+    for (let i = 0; i < parsed.lines.length; i++) {
+      const line = parsed.lines[i];
+      const text = (line.text || '').trim();
+      const existingTrans = (line.translatedText || line.translation || '').trim();
+      if (!text || existingTrans) continue;
+      if (/^(source|written by|lyrics licensed by|provided by):/i.test(text)) continue;
+      targetIndices.push(i);
+    }
+
+    if (targetIndices.length === 0) {
+      return parsed;
+    }
+
+    const sourceTexts = targetIndices.map((idx) => parsed.lines[idx].text.replace(/[\r\n]+/g, ' ').trim());
+    const cacheKey = `${targetLang}:${sourceTexts.join('\n')}`;
+
+    const applyTranslations = (translations: string[]): LyricsData => {
+      let changed = false;
+      const nextLines = parsed.lines.slice();
+      for (let k = 0; k < targetIndices.length; k++) {
+        const lineIdx = targetIndices[k];
+        const orig = sourceTexts[k];
+        const tr = (translations[k] || '').trim();
+        if (!tr || tr.toLowerCase() === orig.toLowerCase()) continue;
+        nextLines[lineIdx] = {
+          ...nextLines[lineIdx],
+          translation: tr,
+          translatedText: tr,
+        };
+        changed = true;
+      }
+      return changed ? { ...parsed, lines: nextLines } : parsed;
+    };
+
+    if (this.translationCache.has(cacheKey)) {
+      const cached = this.translationCache.get(cacheKey)!;
+      this.translationCache.delete(cacheKey);
+      this.translationCache.set(cacheKey, cached);
+      return applyTranslations(cached);
+    }
+
+    if (this.pendingTranslations.has(cacheKey)) {
+      return this.pendingTranslations.get(cacheKey)!;
+    }
+
+    const translatePromise = (async (): Promise<LyricsData> => {
+      try {
+        const translatedAll = new Array<string>(sourceTexts.length).fill('');
+        let offset = 0;
+        let receivedAny = false;
+
+        while (offset < sourceTexts.length) {
+          const chunk: string[] = [];
+          let chunkChars = 0;
+          while (offset + chunk.length < sourceTexts.length && chunk.length < 25) {
+            const candidate = sourceTexts[offset + chunk.length];
+            if (chunk.length > 0 && chunkChars + candidate.length + 1 > 1400) break;
+            chunk.push(candidate);
+            chunkChars += candidate.length + 1;
+          }
+
+          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(
+            targetLang
+          )}&dt=t&q=${encodeURIComponent(chunk.join('\n'))}`;
+
+          let timeoutId: ReturnType<typeof setTimeout> | null = null;
+          try {
+            const timeoutPromise = new Promise<null>((resolve) => {
+              timeoutId = setTimeout(() => resolve(null), this.TRANSLATE_TIMEOUT_MS);
+            });
+            const res = await Promise.race([
+              universalFetch(url, { method: 'GET' }),
+              timeoutPromise,
+            ]);
+            if (res && res.ok) {
+              const payload = await res.json<any>();
+              if (Array.isArray(payload) && Array.isArray(payload[0])) {
+                const joined = payload[0]
+                  .map((seg: any) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
+                  .join('');
+                const parts = joined.split('\n');
+                if (parts.length === chunk.length) {
+                  for (let j = 0; j < chunk.length; j++) {
+                    const t = parts[j].trim();
+                    if (t) {
+                      translatedAll[offset + j] = t;
+                      receivedAny = true;
+                    }
+                  }
+                } else if (chunk.length === 1 && joined.trim()) {
+                  translatedAll[offset] = joined.trim();
+                  receivedAny = true;
+                }
+              }
+            }
+          } catch {
+            // Graceful offline / timeout fallback
+          } finally {
+            if (timeoutId !== null) clearTimeout(timeoutId);
+          }
+
+          offset += chunk.length;
+        }
+
+        if (!receivedAny) {
+          return parsed;
+        }
+
+        if (this.translationCache.size >= this.MAX_CACHE_SIZE) {
+          const oldestKey = this.translationCache.keys().next().value;
+          if (oldestKey !== undefined) this.translationCache.delete(oldestKey);
+        }
+        this.translationCache.set(cacheKey, translatedAll);
+        return applyTranslations(translatedAll);
+      } catch {
+        return parsed;
+      }
+    })();
+
+    this.pendingTranslations.set(cacheKey, translatePromise);
+    try {
+      return await translatePromise;
+    } finally {
+      this.pendingTranslations.delete(cacheKey);
+    }
+  }
 
   /**
    * Centralized lyrics fetcher with in-memory bounded LRU cache, in-flight deduplication,
@@ -542,9 +769,15 @@ export class LyricsService {
   public static clearCache(): void {
     this.lyricsCache.clear();
     this.pendingFetches.clear();
+    this.translationCache.clear();
+    this.pendingTranslations.clear();
   }
 
   public static getCacheSize(): number {
     return this.lyricsCache.size;
   }
+}
+
+export function enrichNonLatinLyrics(parsed: LyricsData): LyricsData {
+  return LyricsService.enrichNonLatinLyrics(parsed);
 }

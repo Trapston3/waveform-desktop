@@ -9,6 +9,7 @@ import {
   type LyricPalette,
   type Lyrics,
   type LyricsLayout,
+  type LyricsScriptMode,
   type LyricTextAlign,
   type MotionIntensity,
   type StyleFrameContext,
@@ -44,11 +45,18 @@ export interface LyricStageFrameInput {
   wordProgress: number;
   lineFadeAlpha?: number;
   didSeekThisFrame?: boolean;
+  isInstrumentalGap?: boolean;
+  gapProgress?: number;
+  timeUntilNextLine?: number;
+  hasLyrics?: boolean;
+  lastActiveLineIndex?: number;
+  nextLineIndex?: number;
 }
 
 export interface LyricStageRendererOptions {
   canvas: HTMLCanvasElement;
   webGlCanvas?: HTMLCanvasElement | null;
+  shipCanvas?: HTMLCanvasElement | null;
   styleId?: VisualStyleId;
   variationId?: string;
   fontFamily?: string;
@@ -64,6 +72,7 @@ export interface LyricStageRendererOptions {
   backgroundOpacity?: number;
   vignetteStrength?: number;
   textAlign?: LyricTextAlign;
+  scriptMode?: LyricsScriptMode;
   trackMetadata?: StyleTrackMetadata | null;
   onSampleFrame?: (outAudio: AudioFrameMetrics) => LyricStageFrameInput | void;
   onFollowStateChange?: (isFollowing: boolean) => void;
@@ -100,6 +109,13 @@ interface MutableStyleFrameContext {
   vignetteStrength: number;
   textAlign: LyricTextAlign;
   trackMetadata: StyleTrackMetadata | null;
+  scriptMode: LyricsScriptMode;
+  isInstrumentalGap: boolean;
+  gapProgress: number;
+  timeUntilNextLine: number;
+  hasLyrics: boolean;
+  lastActiveLineIndex: number;
+  nextLineIndex: number;
   recordHitRect: (
     lineIndex: number,
     x: number,
@@ -192,7 +208,7 @@ export class LyricStageRenderer {
     this.canvas = options.canvas;
     this.ctx = options.canvas.getContext('2d');
     this.webGlLayer = options.webGlCanvas ? new WebGlEffectLayer(options.webGlCanvas) : null;
-    this.ship3dScene = new Ship3DScene();
+    this.ship3dScene = new Ship3DScene(options.shipCanvas);
     this.measurer = new LyricsMeasurer();
     this.registry = new StyleRegistry();
     this.onSampleFrame = options.onSampleFrame;
@@ -272,6 +288,13 @@ export class LyricStageRenderer {
           : 0.55,
       textAlign: options.textAlign === 'left' ? 'left' : 'center',
       trackMetadata: options.trackMetadata ?? null,
+      scriptMode: options.scriptMode ?? 'auto',
+      isInstrumentalGap: false,
+      gapProgress: 0,
+      timeUntilNextLine: Number.POSITIVE_INFINITY,
+      hasLyrics: false,
+      lastActiveLineIndex: -1,
+      nextLineIndex: -1,
       recordHitRect: this.boundRecordHitRect,
     };
 
@@ -460,6 +483,14 @@ export class LyricStageRenderer {
     this.frameContext.trackMetadata = meta;
   }
 
+  setScriptMode(scriptMode: LyricsScriptMode): void {
+    const next: LyricsScriptMode = scriptMode ?? 'auto';
+    if (this.frameContext.scriptMode === next) return;
+    this.frameContext.scriptMode = next;
+    this.frameContext.layout = null;
+    this.measurer.invalidate();
+  }
+
   setLyrics(lyrics: Lyrics | null): void {
     const changed = this.frameContext.lyrics !== lyrics;
     this.frameContext.lyrics = lyrics;
@@ -472,6 +503,7 @@ export class LyricStageRenderer {
       this.frameContext.manualScrollY = 0;
       this.hoveredLineIndex = -1;
       this.frameContext.hoveredLineIndex = -1;
+      this.frameContext.lastActiveLineIndex = -1;
       this.hitRectCount = 0;
       this.updateFollowingState(true);
     }
@@ -516,6 +548,115 @@ export class LyricStageRenderer {
     }
   }
 
+  private applySyncGapTelemetry(state: LyricStageFrameInput): void {
+    const fc = this.frameContext;
+    if (state.isInstrumentalGap !== undefined) {
+      fc.isInstrumentalGap = Boolean(state.isInstrumentalGap);
+      fc.gapProgress =
+        typeof state.gapProgress === 'number' && Number.isFinite(state.gapProgress)
+          ? Math.max(0, Math.min(1, state.gapProgress))
+          : 0;
+      fc.timeUntilNextLine =
+        typeof state.timeUntilNextLine === 'number'
+          ? state.timeUntilNextLine
+          : Number.POSITIVE_INFINITY;
+      fc.hasLyrics =
+        state.hasLyrics !== undefined
+          ? Boolean(state.hasLyrics)
+          : Boolean(fc.lyrics && fc.lyrics.lines.length > 0);
+      fc.lastActiveLineIndex =
+        typeof state.lastActiveLineIndex === 'number'
+          ? state.lastActiveLineIndex
+          : state.activeLineIndex >= 0
+          ? state.activeLineIndex
+          : fc.lastActiveLineIndex;
+      fc.nextLineIndex =
+        typeof state.nextLineIndex === 'number' ? state.nextLineIndex : -1;
+      return;
+    }
+
+    const lines = fc.lyrics?.lines;
+    if (!lines || lines.length === 0) {
+      fc.hasLyrics = false;
+      fc.isInstrumentalGap = true;
+      fc.gapProgress = 0;
+      fc.timeUntilNextLine = Number.POSITIVE_INFINITY;
+      fc.lastActiveLineIndex = -1;
+      fc.nextLineIndex = -1;
+      return;
+    }
+
+    fc.hasLyrics = true;
+    const t = fc.timeSeconds;
+    const activeIdx = fc.activeLineIndex;
+    let isGap = false;
+    let gapProgress = 0;
+    let timeUntilNext = Number.POSITIVE_INFINITY;
+    let lastActive = fc.lastActiveLineIndex;
+    let nextIdx = -1;
+
+    if (activeIdx >= 0 && activeIdx < lines.length) {
+      lastActive = activeIdx;
+      const line = lines[activeIdx];
+      const lastWordEnd =
+        line.words.length > 0 ? line.words[line.words.length - 1].endSeconds : line.endSeconds;
+      if (activeIdx + 1 < lines.length) {
+        nextIdx = activeIdx + 1;
+        const nextStart = lines[nextIdx].startSeconds;
+        timeUntilNext = Math.max(0, nextStart - t);
+        const tailGap = nextStart - lastWordEnd;
+        if (tailGap >= 3.5 && t > lastWordEnd) {
+          isGap = true;
+          gapProgress = Math.max(0, Math.min(1, (t - lastWordEnd) / Math.max(0.001, tailGap)));
+        }
+      } else if (line.words.length > 0 && t > lastWordEnd && line.endSeconds - lastWordEnd >= 3.5) {
+        isGap = true;
+        gapProgress = Math.max(0, Math.min(1, (t - lastWordEnd) / Math.max(0.001, line.endSeconds - lastWordEnd)));
+      }
+    } else if (t < lines[0].startSeconds) {
+      nextIdx = 0;
+      lastActive = -1;
+      const firstStart = lines[0].startSeconds;
+      timeUntilNext = Math.max(0, firstStart - t);
+      if (firstStart > 3.0) {
+        isGap = true;
+        gapProgress = Math.max(0, Math.min(1, t / Math.max(0.001, firstStart)));
+      }
+    } else if (t > lines[lines.length - 1].endSeconds) {
+      lastActive = lines.length - 1;
+      isGap = true;
+      gapProgress = 1;
+    } else {
+      let prevIdx = 0;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].endSeconds < t) prevIdx = i;
+        else break;
+      }
+      lastActive = prevIdx;
+      nextIdx = prevIdx + 1 < lines.length ? prevIdx + 1 : -1;
+      if (nextIdx >= 0) {
+        const prevLine = lines[prevIdx];
+        const prevEnd =
+          prevLine.words.length > 0
+            ? Math.min(prevLine.endSeconds, prevLine.words[prevLine.words.length - 1].endSeconds)
+            : prevLine.endSeconds;
+        const nextStart = lines[nextIdx].startSeconds;
+        const gapDur = nextStart - prevEnd;
+        timeUntilNext = Math.max(0, nextStart - t);
+        if (gapDur >= 3.5) {
+          isGap = true;
+          gapProgress = Math.max(0, Math.min(1, (t - prevEnd) / Math.max(0.001, gapDur)));
+        }
+      }
+    }
+
+    fc.isInstrumentalGap = isGap;
+    fc.gapProgress = gapProgress;
+    fc.timeUntilNextLine = timeUntilNext;
+    fc.lastActiveLineIndex = lastActive;
+    fc.nextLineIndex = nextIdx;
+  }
+
   setSyncState(state: LyricStageFrameInput): void {
     this.frameContext.timeSeconds = state.timeSeconds;
     this.frameContext.activeLineIndex = state.activeLineIndex;
@@ -523,6 +664,7 @@ export class LyricStageRenderer {
     this.frameContext.wordProgress = state.wordProgress;
     this.frameContext.lineFadeAlpha = state.lineFadeAlpha ?? 1;
     this.frameContext.didSeekThisFrame = Boolean(state.didSeekThisFrame);
+    this.applySyncGapTelemetry(state);
     if (this.frameContext.didSeekThisFrame) {
       this.manualScrollY = 0;
       this.targetManualScrollY = 0;
@@ -579,6 +721,7 @@ export class LyricStageRenderer {
     if (this.webGlLayer) {
       this.webGlLayer.resize(safeW, safeH, clampedDpr);
     }
+    this.ship3dScene.resize(safeW, safeH, clampedDpr);
   }
 
   start(): void {
@@ -652,6 +795,7 @@ export class LyricStageRenderer {
         this.frameContext.wordProgress = sampled.wordProgress;
         this.frameContext.lineFadeAlpha = sampled.lineFadeAlpha ?? 1;
         this.frameContext.didSeekThisFrame = Boolean(sampled.didSeekThisFrame);
+        this.applySyncGapTelemetry(sampled);
       }
     }
 
@@ -702,7 +846,9 @@ export class LyricStageRenderer {
       this.frameContext.fontFamily,
       this.frameContext.fontSizeScale,
       undefined,
-      measurementSpec
+      measurementSpec,
+      this.frameContext.scriptMode,
+      this.styleId
     );
 
     const isTransparent = Boolean(
@@ -766,10 +912,13 @@ export class LyricStageRenderer {
         this.frameContext.palette,
         this.frameContext.reduceMotion,
         isTransparent,
-        undefined,
-        undefined,
-        focalCenterX
+        this.frameContext.variationId,
+        this.frameContext.backgroundOpacity,
+        focalCenterX,
+        this.frameContext.hasWebGlBackdrop
       );
+    } else {
+      this.ship3dScene.clear();
     }
 
     // 4. Reset hit-rect pool and render active visual style
@@ -782,11 +931,6 @@ export class LyricStageRenderer {
       this.height
     );
     this.ctx.restore();
-
-    // In transparent embedded/overlay split-view, enforce clean focal boundary at x < contentInsetLeft
-    if (isTransparent && this.currentContentInsetLeft > 2) {
-      this.ctx.clearRect(0, 0, Math.floor(this.currentContentInsetLeft), this.height);
-    }
 
     // Refresh hover hit-test if pointer is active over canvas
     if (this.pointerX >= 0 && this.pointerY >= 0) {
@@ -836,9 +980,15 @@ export class LyricStageRenderer {
     }
 
     // 3. Fallback layout-based vertical hit test (incorporating manualScrollY)
+    const fallbackActive =
+      this.frameContext.activeLineIndex >= 0
+        ? this.frameContext.activeLineIndex
+        : this.frameContext.lastActiveLineIndex >= 0
+        ? this.frameContext.lastActiveLineIndex
+        : 0;
     const activeIdx = Math.max(
       0,
-      Math.min(layout.lines.length - 1, this.frameContext.activeLineIndex)
+      Math.min(layout.lines.length - 1, fallbackActive)
     );
     const activeLine = layout.lines[activeIdx];
     const anchorY = this.height * (this.frameContext.isOverlayMode ? 0.52 : 0.46);
@@ -866,6 +1016,7 @@ export class LyricStageRenderer {
       this.boundFontsLoadingDone = null;
     }
     this.registry.disposeAll();
+    this.ship3dScene.dispose();
     this.webGlLayer?.dispose();
     this.measurer.invalidate();
   }

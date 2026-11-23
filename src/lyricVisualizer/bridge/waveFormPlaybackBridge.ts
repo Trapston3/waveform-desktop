@@ -15,6 +15,7 @@ import {
   type TrackInfo,
 } from '../core/models';
 import { snapAllSyncEngines } from '../core/syncEngine';
+import { enrichLyricsRomanization } from '../core/lyricsPipeline';
 import { registerPlayerBridgeResync, usePlayerStore } from '../../state/playerStore';
 import { useLyricsStore } from '../../state/lyricsStore';
 import type { Song } from '../../models/Song';
@@ -52,6 +53,15 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
   let allSynthesized = true;
 
   const lines: LyricLine[] = parsed.lines.map((line, idx) => {
+    const rawRom =
+      (typeof line.romanization === 'string' && line.romanization.trim()) ||
+      (typeof (line as any).romanizedText === 'string' && (line as any).romanizedText.trim()) ||
+      undefined;
+    const rawTrans =
+      (typeof line.translation === 'string' && line.translation.trim()) ||
+      (typeof (line as any).translatedText === 'string' && (line as any).translatedText.trim()) ||
+      undefined;
+
     if (isUnsynced) {
       const startSec = idx * 4;
       const endSec = (idx + 1) * 4;
@@ -61,6 +71,8 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
         text: line.text || '',
         words: [],
         isSynthesizedWords: false,
+        ...(rawRom ? { romanizedText: rawRom } : {}),
+        ...(rawTrans ? { translatedText: rawTrans } : {}),
       };
     }
 
@@ -92,6 +104,8 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
         text: line.text || words.map((w) => w.text).join(' '),
         words,
         isSynthesizedWords: isInterpolatedLrc,
+        ...(rawRom ? { romanizedText: rawRom } : {}),
+        ...(rawTrans ? { translatedText: rawTrans } : {}),
       };
     }
 
@@ -104,6 +118,8 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
         text: line.text || '',
         words: [],
         isSynthesizedWords: true,
+        ...(rawRom ? { romanizedText: rawRom } : {}),
+        ...(rawTrans ? { translatedText: rawTrans } : {}),
       };
     }
 
@@ -136,6 +152,8 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
       text: line.text || '',
       words,
       isSynthesizedWords: true,
+      ...(rawRom ? { romanizedText: rawRom } : {}),
+      ...(rawTrans ? { translatedText: rawTrans } : {}),
     };
   });
 
@@ -148,11 +166,11 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
     sourceKind = 'FallbackSynthesis';
   }
 
-  return {
+  return enrichLyricsRomanization({
     providerName: parsed.provider || 'WaveForm',
     sourceKind,
     lines,
-  };
+  });
 }
 
 /**
@@ -180,6 +198,14 @@ export function songToTrackInfo(
           startTimeMs: l.startTimeMs,
           endTimeMs: l.endTimeMs,
           text: l.text,
+          romanizedText:
+            typeof l.romanization === 'string' && l.romanization.trim()
+              ? l.romanization.trim()
+              : undefined,
+          translatedText:
+            typeof l.translation === 'string' && l.translation.trim()
+              ? l.translation.trim()
+              : undefined,
           words: Array.isArray(l.syllables)
             ? l.syllables
                 .filter((s) => typeof s.text === 'string' && s.text.trim().length > 0)

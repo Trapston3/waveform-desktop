@@ -17,6 +17,12 @@ export interface SyncFrameResult {
   readonly wordProgress: number;
   readonly lineFadeAlpha: number;
   readonly didSeekThisFrame: boolean;
+  readonly isInstrumentalGap: boolean;
+  readonly gapProgress: number;
+  readonly timeUntilNextLine: number;
+  readonly hasLyrics: boolean;
+  readonly lastActiveLineIndex: number;
+  readonly nextLineIndex: number;
 }
 
 function clamp01(v: number): number {
@@ -254,16 +260,23 @@ export class SyncEngine {
         wordProgress: 0,
         lineFadeAlpha: 0,
         didSeekThisFrame,
+        isInstrumentalGap: true,
+        gapProgress: 0,
+        timeUntilNextLine: Number.POSITIVE_INFINITY,
+        hasLyrics: false,
+        lastActiveLineIndex: -1,
+        nextLineIndex: -1,
       };
     }
 
-    const activeLineIndex = binarySearchLine(lyrics.lines, timeSeconds);
+    const lines = lyrics.lines;
+    const activeLineIndex = binarySearchLine(lines, timeSeconds);
     this.lastLineIndex = activeLineIndex;
     let activeWordIndex = -1;
     let wordProgress = 0;
 
     if (activeLineIndex >= 0) {
-      const line = lyrics.lines[activeLineIndex];
+      const line = lines[activeLineIndex];
       if (line.words.length > 0) {
         activeWordIndex = binarySearchWord(line.words, timeSeconds);
         if (activeWordIndex >= 0) {
@@ -280,7 +293,79 @@ export class SyncEngine {
       }
     }
 
-    const lineFadeAlpha = computeLineFadeAlpha(lyrics.lines, timeSeconds, activeLineIndex);
+    const lineFadeAlpha = computeLineFadeAlpha(lines, timeSeconds, activeLineIndex);
+
+    // Compute instrumental gap telemetry
+    let isInstrumentalGap = false;
+    let gapProgress = 0;
+    let timeUntilNextLine = Number.POSITIVE_INFINITY;
+    let lastActiveLineIndex = -1;
+    let nextLineIndex = -1;
+
+    if (activeLineIndex >= 0) {
+      lastActiveLineIndex = activeLineIndex;
+      const line = lines[activeLineIndex];
+      const lastWordEnd =
+        line.words.length > 0 ? line.words[line.words.length - 1].endSeconds : line.endSeconds;
+
+      if (activeLineIndex + 1 < lines.length) {
+        nextLineIndex = activeLineIndex + 1;
+        const nextStart = lines[nextLineIndex].startSeconds;
+        timeUntilNextLine = Math.max(0, nextStart - timeSeconds);
+        const tailGap = nextStart - lastWordEnd;
+        if (tailGap >= 3.5 && timeSeconds > lastWordEnd) {
+          isInstrumentalGap = true;
+          gapProgress = clamp01((timeSeconds - lastWordEnd) / Math.max(0.001, tailGap));
+        }
+      } else if (line.words.length > 0 && timeSeconds > lastWordEnd && line.endSeconds - lastWordEnd >= 3.5) {
+        isInstrumentalGap = true;
+        gapProgress = clamp01((timeSeconds - lastWordEnd) / Math.max(0.001, line.endSeconds - lastWordEnd));
+      }
+    } else if (timeSeconds < lines[0].startSeconds) {
+      // Intro before first line
+      nextLineIndex = 0;
+      const firstStart = lines[0].startSeconds;
+      timeUntilNextLine = Math.max(0, firstStart - timeSeconds);
+      if (firstStart > 3.0) {
+        isInstrumentalGap = true;
+        gapProgress = clamp01(timeSeconds / Math.max(0.001, firstStart));
+      }
+    } else if (timeSeconds > lines[lines.length - 1].endSeconds) {
+      // Outro after last line
+      lastActiveLineIndex = lines.length - 1;
+      isInstrumentalGap = true;
+      gapProgress = 1;
+    } else {
+      // Explicit gap between lines[prevIdx] and lines[prevIdx + 1]
+      let low = 0;
+      let high = lines.length - 1;
+      let prevIdx = 0;
+      while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (lines[mid].endSeconds < timeSeconds) {
+          prevIdx = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      lastActiveLineIndex = prevIdx;
+      nextLineIndex = prevIdx + 1 < lines.length ? prevIdx + 1 : -1;
+      if (nextLineIndex >= 0) {
+        const prevLine = lines[prevIdx];
+        const prevVocalEnd =
+          prevLine.words.length > 0
+            ? Math.min(prevLine.endSeconds, prevLine.words[prevLine.words.length - 1].endSeconds)
+            : prevLine.endSeconds;
+        const nextStart = lines[nextLineIndex].startSeconds;
+        const gapDur = nextStart - prevVocalEnd;
+        timeUntilNextLine = Math.max(0, nextStart - timeSeconds);
+        if (gapDur >= 3.5) {
+          isInstrumentalGap = true;
+          gapProgress = clamp01((timeSeconds - prevVocalEnd) / Math.max(0.001, gapDur));
+        }
+      }
+    }
 
     return {
       timeSeconds,
@@ -289,6 +374,12 @@ export class SyncEngine {
       wordProgress,
       lineFadeAlpha,
       didSeekThisFrame,
+      isInstrumentalGap,
+      gapProgress,
+      timeUntilNextLine,
+      hasLyrics: true,
+      lastActiveLineIndex,
+      nextLineIndex,
     };
   }
 }

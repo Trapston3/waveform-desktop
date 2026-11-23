@@ -1,6 +1,42 @@
 import { parseLrc } from './lrcParser';
 import type { ILyricsProvider, LyricLine, Lyrics, LyricWord, TrackInfo } from './models';
 import { synthesizeLyricsWords } from './wordSynthesizer';
+import { hasNonLatinScript, mapRomanizedWords, transliterateToLatin } from '../../utils/transliterate';
+
+export function enrichLyricsRomanization(lyrics: Lyrics): Lyrics {
+  let changed = false;
+  const nextLines: LyricLine[] = lyrics.lines.map((line) => {
+    const existingRom = typeof line.romanizedText === 'string' ? line.romanizedText.trim() : '';
+    const computedRom =
+      existingRom.length > 0
+        ? existingRom
+        : hasNonLatinScript(line.text)
+        ? transliterateToLatin(line.text)
+        : '';
+
+    if (!computedRom) {
+      return line;
+    }
+
+    const existingRomWords =
+      line.romanizedWords && line.romanizedWords.length > 0 ? line.romanizedWords : null;
+    const nextRomWords =
+      existingRomWords ?? mapRomanizedWords(line.words, computedRom, line.startSeconds, line.endSeconds);
+
+    if (existingRom === computedRom && existingRomWords) {
+      return line;
+    }
+
+    changed = true;
+    return {
+      ...line,
+      romanizedText: computedRom,
+      romanizedWords: nextRomWords,
+    };
+  });
+
+  return changed ? { ...lyrics, lines: nextLines } : lyrics;
+}
 
 export interface LyricsCacheAdapter {
   getCachedLyrics(songKey: string): Promise<Lyrics | null> | Lyrics | null;
@@ -45,12 +81,27 @@ export class EmbeddedTrackLyricsProvider implements ILyricsProvider {
           hasWordLevel = true;
         }
 
+        const romanizedWords: LyricWord[] | undefined =
+          line.romanizedWords && line.romanizedWords.length > 0
+            ? line.romanizedWords.map((w) => ({
+                text: w.text,
+                startSeconds: Math.max(startSeconds, w.startTimeMs / 1000),
+                endSeconds: Math.max(
+                  Math.max(startSeconds, w.startTimeMs / 1000) + 0.02,
+                  w.endTimeMs / 1000,
+                ),
+              }))
+            : undefined;
+
         return {
           startSeconds,
           endSeconds,
           text: line.text,
           words,
           isSynthesizedWords: false,
+          ...(line.romanizedText ? { romanizedText: line.romanizedText } : {}),
+          ...(romanizedWords ? { romanizedWords } : {}),
+          ...(line.translatedText ? { translatedText: line.translatedText } : {}),
         };
       });
 
@@ -217,11 +268,12 @@ export class LyricsPipeline {
   }
 
   private ensureWordTimings(lyrics: Lyrics): Lyrics {
-    if (lyrics.sourceKind === 'WordSynced' && lyrics.lines.every((l) => l.words.length > 0)) {
-      return lyrics;
-    }
-    return synthesizeLyricsWords(lyrics, {
-      sourceKind: lyrics.sourceKind === 'LineSynced' ? 'LineSynced' : 'FallbackSynthesis',
-    });
+    const withWords =
+      lyrics.sourceKind === 'WordSynced' && lyrics.lines.every((l) => l.words.length > 0)
+        ? lyrics
+        : synthesizeLyricsWords(lyrics, {
+            sourceKind: lyrics.sourceKind === 'LineSynced' ? 'LineSynced' : 'FallbackSynthesis',
+          });
+    return enrichLyricsRomanization(withWords);
   }
 }

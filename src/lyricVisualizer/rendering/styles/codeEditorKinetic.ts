@@ -8,6 +8,8 @@
 import type {
   Lyrics,
   LyricsLayout,
+  LyricsScriptMode,
+  LyricWord,
   StyleFrameContext,
   StyleTrackMetadata,
 } from '../../core/models';
@@ -20,9 +22,15 @@ import {
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
+import {
+  hasNonLatinScript,
+  mapRomanizedWords,
+  transliterateToLatin,
+} from '../../../utils/transliterate';
 
 export const CODE_FONT_STACK =
   "'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace";
@@ -34,7 +42,11 @@ export type CodeWordEffect =
   | 'lift'
   | 'sink'
   | 'cascade'
-  | 'split';
+  | 'split'
+  | 'nullish'
+  | 'loop'
+  | 'async'
+  | 'return';
 
 export type CodeTokenRole =
   | 'identifier'
@@ -145,6 +157,40 @@ const CODE_WORD_EFFECT_MAP: Readonly<Record<string, CodeWordEffect>> = {
   break: 'split',
   breaking: 'split',
   shatter: 'split',
+  // nullish
+  null: 'nullish',
+  empty: 'nullish',
+  void: 'nullish',
+  zero: 'nullish',
+  hollow: 'nullish',
+  blank: 'nullish',
+  undefined: 'nullish',
+  // loop
+  forever: 'loop',
+  always: 'loop',
+  loop: 'loop',
+  repeat: 'loop',
+  endless: 'loop',
+  eternal: 'loop',
+  circle: 'loop',
+  cycle: 'loop',
+  round: 'loop',
+  // async
+  wait: 'async',
+  waiting: 'async',
+  await: 'async',
+  stay: 'async',
+  pause: 'async',
+  hold: 'async',
+  linger: 'async',
+  breathe: 'async',
+  promise: 'async',
+  // return
+  return: 'return',
+  escape: 'return',
+  leave: 'return',
+  exit: 'return',
+  bail: 'return',
 };
 
 export function detectCodeWordEffect(word: string): CodeWordEffect | null {
@@ -470,11 +516,15 @@ interface PrecomputedCodeLine {
   readonly centerY: number;
   readonly maxRightX: number;
   readonly ghostAnnotation: string | null;
+  readonly inlineComment: string | null;
+  readonly hasAsyncBreakpoint: boolean;
+  readonly gitDiff: 1 | -1 | 0;
 }
 
 function toSlug(input: string | undefined, fallback: string): string {
   if (!input || typeof input !== 'string') return fallback;
-  const s = input
+  const normalized = hasNonLatinScript(input) ? transliterateToLatin(input) : input;
+  const s = normalized
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
@@ -491,6 +541,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
   private cachedLayout: LyricsLayout | null = null;
   private cachedWidth = -1;
   private cachedFontSize = -1;
+  private cachedScriptMode: LyricsScriptMode = 'auto';
   private codeLines: PrecomputedCodeLine[] = [];
   private totalCodeHeight = 0;
 
@@ -519,6 +570,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
   private cameraZoom = 1.0;
   private whipChromatic = 0;
   private lastActiveLineIdx = -1;
+  private lastKnownActiveIdx = -1;
   private initialized = false;
 
   getVariationIndex(variationId: string): number {
@@ -528,12 +580,14 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     return 0; // 'ide-macro'
   }
 
-  getMeasurementSpec(): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     return {
       fontWeight: 600,
       fontSizeMultiplier: 0.78,
       fontFamilyOverride: CODE_FONT_STACK,
       maxLineWidthRatio: 0.82,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
@@ -542,6 +596,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     this.cachedLayout = null;
     this.cachedWidth = -1;
     this.cachedFontSize = -1;
+    this.cachedScriptMode = 'auto';
     this.codeLines = [];
     this.totalCodeHeight = 0;
     this.scrollY = 0;
@@ -552,6 +607,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     this.cameraZoom = 1.0;
     this.whipChromatic = 0;
     this.lastActiveLineIdx = -1;
+    this.lastKnownActiveIdx = -1;
     this.initialized = false;
   }
 
@@ -591,14 +647,16 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     ctx: CanvasRenderingContext2D,
     lyrics: Lyrics,
     layout: LyricsLayout,
-    focalWidth: number
+    focalWidth: number,
+    scriptMode: LyricsScriptMode
   ): void {
     const codeFontSize = Math.max(15, Math.min(30, Math.round(layout.fontSizePx * 0.88)));
     if (
       this.cachedLyrics === lyrics &&
       this.cachedLayout === layout &&
       this.cachedWidth === focalWidth &&
-      this.cachedFontSize === codeFontSize
+      this.cachedFontSize === codeFontSize &&
+      this.cachedScriptMode === scriptMode
     ) {
       return;
     }
@@ -607,6 +665,8 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     this.cachedLayout = layout;
     this.cachedWidth = focalWidth;
     this.cachedFontSize = codeFontSize;
+    this.cachedScriptMode = scriptMode;
+    this.lastKnownActiveIdx = -1;
 
     ctx.save();
     ctx.font = `600 ${codeFontSize}px ${CODE_FONT_STACK}`;
@@ -618,7 +678,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     const rowHeight = Math.round(codeFontSize * 1.62);
     const lineGap = Math.round(codeFontSize * 0.52);
 
-    // Count line repetitions for chorus escalation
     const seenCounts = new Map<string, number>();
     let cursorY = 0;
 
@@ -629,9 +688,30 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const rep = (seenCounts.get(normKey) ?? 0) + 1;
       seenCounts.set(normKey, rep);
 
+      const display = resolveDisplayLine(line, scriptMode, this.id);
+      let codeSourceText = display.primaryText;
+      let codeSourceWords: readonly LyricWord[] = display.primaryWords;
+      if (hasNonLatinScript(codeSourceText)) {
+        const fallbackRom =
+          (typeof line.romanizedText === 'string' && line.romanizedText.trim()) ||
+          transliterateToLatin(codeSourceText);
+        if (fallbackRom && !hasNonLatinScript(fallbackRom)) {
+          codeSourceText = fallbackRom;
+          codeSourceWords =
+            line.romanizedWords && line.romanizedWords.length > 0
+              ? line.romanizedWords
+              : mapRomanizedWords(line.words, fallbackRom, line.startSeconds, line.endSeconds);
+        }
+      }
+
+      const codeWordTargetCount =
+        codeSourceWords.length > 0
+          ? codeSourceWords.length
+          : codeSourceText.trim().split(/\s+/).filter(Boolean).length;
+
       const transformed = transformLyricLineToCodeTokens(
-        line.text,
-        measured.words.length,
+        codeSourceText,
+        codeWordTargetCount,
         i,
         rep
       );
@@ -642,14 +722,18 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       let maxRightX = indentPx;
 
       const visualTokens: PrecomputedVisualToken[] = new Array(transformed.length);
-      const wordVisualIndices = new Int32Array(measured.words.length);
+      const measuredCount = Math.max(1, measured.words.length);
+      const wordVisualIndices = new Int32Array(measuredCount);
       wordVisualIndices.fill(-1);
+
+      let hasAsyncBreakpoint = false;
+      let hasNegOrDel = false;
+      let hasAddOrRise = false;
 
       for (let t = 0; t < transformed.length; t++) {
         const tok = transformed[t];
         const tokW = Math.max(4, ctx.measureText(tok.text).width);
 
-        // Wrap cleanly if token exceeds maxCodeLineWidth
         if (penX > indentPx + 20 && penX + tokW > maxCodeLineWidth && tok.wordIndex >= 0) {
           penX = indentPx + Math.round(codeFontSize * 1.1);
           penY += rowHeight;
@@ -661,6 +745,13 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         for (let c = 0; c < chars.length; c++) {
           charOffsets[c] = cOff;
           cOff += ctx.measureText(chars[c]).width;
+        }
+
+        if (tok.effect === 'async') hasAsyncBreakpoint = true;
+        if (tok.role === 'negation' || tok.effect === 'strikethrough' || tok.effect === 'squiggle') {
+          hasNegOrDel = true;
+        } else if (tok.effect === 'lift' || tok.effect === 'return' || tok.effect === 'loop') {
+          hasAddOrRise = true;
         }
 
         visualTokens[t] = {
@@ -685,6 +776,25 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         if (penX > maxRightX) maxRightX = penX;
       }
 
+      // If measured.words count differed from codeSourceWords count, fill proportional indices
+      if (measured.words.length > 0 && transformed.wordTokenIndices.length > 0) {
+        for (let mw = 0; mw < measured.words.length; mw++) {
+          if (wordVisualIndices[mw] < 0) {
+            const mappedIdx = Math.min(
+              transformed.wordTokenIndices.length - 1,
+              Math.floor((mw / measured.words.length) * transformed.wordTokenIndices.length)
+            );
+            wordVisualIndices[mw] = transformed.wordTokenIndices[mappedIdx];
+          }
+        }
+      }
+
+      const commentBody =
+        display.secondaryText ??
+        (hasNonLatinScript(line.text) ? line.translatedText?.trim() || line.text.trim() : null);
+      const inlineComment = commentBody ? `// ${commentBody}` : null;
+      const gitDiff: 1 | -1 | 0 = hasNegOrDel ? -1 : hasAddOrRise || i % 3 === 0 ? 1 : 0;
+
       const lineH = penY + rowHeight;
       result[i] = {
         lineIndex: i,
@@ -700,6 +810,9 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         centerY: cursorY + lineH * 0.5,
         maxRightX,
         ghostAnnotation: transformed.ghostAnnotation,
+        inlineComment,
+        hasAsyncBreakpoint,
+        gitDiff,
       };
 
       cursorY += lineH + lineGap;
@@ -762,6 +875,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     frame: StyleFrameContext,
     focalLeft: number,
     focalWidth: number,
+    fullWidth: number,
     height: number,
     variationIdx: number,
     motionScale: number
@@ -770,13 +884,13 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     const cy = height * 0.52;
 
     if (variationIdx === 1) {
-      // LED Stage Matrix: warm amber/crimson stadium LED pixel grid + bottom beat-reactive wash + crowd silhouette
+      // LED Stage Matrix: spans FULL width with zero seam at focal.left
       const step = 22;
       const bass = frame.audio.bassEnergy;
       const mid = frame.audio.midEnergy;
       const treble = frame.audio.trebleEnergy;
       const beatKick = motionScale > 0 && frame.audio.beatDetected ? 0.12 : 0;
-      const rightEdge = focalLeft + focalWidth - 16;
+      const rightEdge = fullWidth - 16;
 
       ctx.save();
       for (let pass = 0; pass < 2; pass++) {
@@ -784,7 +898,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         let rowIdx = 0;
         for (let gy = 64; gy < height - 28; gy += step) {
           let colIdx = 0;
-          for (let gx = focalLeft + 20; gx < rightEdge; gx += step) {
+          for (let gx = 16; gx < rightEdge; gx += step) {
             if (((rowIdx + colIdx) & 1) === pass) {
               const wave =
                 motionScale === 0
@@ -804,7 +918,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         }
       }
 
-      // Bottom-edge beat-reactive warm amber/crimson stage light wash
+      // Bottom-edge beat-reactive warm amber/crimson stage light wash across FULL width
       const washTop = height * 0.68;
       const washGrad = ctx.createLinearGradient(0, washTop, 0, height);
       washGrad.addColorStop(0, 'rgba(255, 46, 59, 0)');
@@ -812,19 +926,19 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       washGrad.addColorStop(1, 'rgba(255, 46, 59, 0.48)');
       ctx.globalAlpha = 0.28 + bass * 0.45 + beatKick * 1.4;
       ctx.fillStyle = washGrad;
-      ctx.fillRect(focalLeft, washTop, focalWidth, height - washTop);
+      ctx.fillRect(0, washTop, fullWidth, height - washTop);
 
-      // Subtle crowd silhouette curve along bottom edge
+      // Subtle crowd silhouette curve along bottom edge across FULL width
       const crowdBaseY = height - 8;
-      const bumpCount = 12;
-      const bumpW = focalWidth / bumpCount;
+      const bumpCount = 16;
+      const bumpW = fullWidth / bumpCount;
       ctx.globalAlpha = 0.72;
       ctx.fillStyle = '#030407';
       ctx.beginPath();
-      ctx.moveTo(focalLeft, height);
-      ctx.lineTo(focalLeft, crowdBaseY);
+      ctx.moveTo(0, height);
+      ctx.lineTo(0, crowdBaseY);
       for (let c = 0; c < bumpCount; c++) {
-        const sx = focalLeft + c * bumpW;
+        const sx = c * bumpW;
         const ex = sx + bumpW;
         const ctrlX = sx + bumpW * 0.5;
         const sway =
@@ -834,7 +948,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         const crestH = 7 + ((c * 7 + 3) % 5) * 2.4 + sway;
         ctx.quadraticCurveTo(ctrlX, crowdBaseY - crestH, ex, crowdBaseY - (c % 3) * 1.5);
       }
-      ctx.lineTo(focalLeft + focalWidth, height);
+      ctx.lineTo(fullWidth, height);
       ctx.closePath();
       ctx.fill();
       ctx.restore();
@@ -860,7 +974,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         ctx.arc(0, 0, radius, 0, Math.PI * 2);
         ctx.stroke();
 
-        // Rotating phase arc
         const dir = rIdx % 2 === 0 ? 1 : -1;
         const angle =
           (motionScale === 0 ? 0.4 : beatsElapsed * 0.65 * dir) + rIdx * 1.4;
@@ -872,7 +985,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         ctx.stroke();
       }
 
-      // Mechanical gear-tooth ticks around the inner gear ring
       const innerR = baseR * 0.52;
       const gearSpin = motionScale === 0 ? 0.2 : beatsElapsed * 0.65;
       const gearTeeth = 24;
@@ -888,7 +1000,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       }
       ctx.stroke();
 
-      // 12 geometric clockwork tick marks around outer orbit
       const outerR = baseR * 1.08;
       ctx.strokeStyle = 'rgba(230, 237, 243, 0.14)';
       ctx.lineWidth = 1.2;
@@ -902,7 +1013,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       }
       ctx.stroke();
 
-      // Crisp sweeping crimson clock hand synced to song progress / BPM (1 full sweep per 4 beats)
       const lastLineEnd =
         frame.lyrics && frame.lyrics.lines.length > 0
           ? frame.lyrics.lines[frame.lyrics.lines.length - 1].endSeconds
@@ -951,15 +1061,21 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     ctx.globalAlpha = alpha;
     ctx.fillStyle = tok.color;
 
-    // Glow on active word, negation/hook tokens, or repeated chorus escalation
     if (isActiveLine && (isWordActive || tok.role === 'negation' || repeatCount > 1 || variationIdx === 1)) {
       ctx.shadowColor = tok.color;
       const baseGlow = isWordActive ? 14 : tok.role === 'negation' ? 10 : 6;
       ctx.shadowBlur = baseGlow + Math.min(8, (repeatCount - 1) * 3) + (variationIdx === 1 ? 4 : 0);
     }
 
+    // Nullish pill background behind token
+    if (eff === 'nullish' && effectActive) {
+      drawRoundedRectPath(ctx, tx - 3, ty - 1, tok.width + 6, tok.height + 3, 4);
+      ctx.fillStyle = 'rgba(139, 148, 158, 0.16)';
+      ctx.fill();
+      ctx.fillStyle = '#c9d1d9';
+    }
+
     if (eff === 'mirror' && effectActive) {
-      // Horizontal mirror flip scaleX(-1) around word center
       const cx = tx + tok.width * 0.5;
       const cy = ty + tok.height * 0.5;
       ctx.translate(cx, cy);
@@ -971,19 +1087,27 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     } else if (eff === 'sink' && effectActive) {
       const sinkY = motionScale === 0 ? 3 : 5.5 * easeOutCubic(p) * Math.min(1.2, motionScale);
       ctx.fillText(tok.text, tx, ty + sinkY);
+    } else if (eff === 'return' && effectActive) {
+      const punch = isWordActive && motionScale > 0 ? 1 + 0.1 * Math.sin(p * Math.PI) : 1.0;
+      const cx = tx + tok.width * 0.5;
+      const cy = ty + tok.height * 0.5;
+      ctx.translate(cx, cy);
+      ctx.scale(punch, punch);
+      ctx.translate(-cx, -cy);
+      ctx.fillStyle = '#ff7b72';
+      ctx.fillText(tok.text, tx, ty);
     } else if (eff === 'cascade' && effectActive && tok.chars.length > 0) {
       const stepY = (motionScale === 0 ? 1.2 : 2.2 * Math.min(1.25, motionScale)) * easeOutCubic(p);
       for (let c = 0; c < tok.chars.length; c++) {
         ctx.fillText(tok.chars[c], tx + tok.charOffsets[c], ty + c * stepY);
       }
-    } else if (eff === 'split' && effectActive) {
+    } else if (eff === 'split' && effectActive && typeof ctx.clip === 'function') {
       const splitShift =
         motionScale === 0
           ? 1.5
           : (isWordActive ? Math.sin(p * Math.PI) * 3.8 : 2.0) * Math.min(1.3, motionScale);
       const midY = ty + tok.height * 0.52;
 
-      // Top slice shifted left
       ctx.save();
       ctx.beginPath();
       ctx.rect(tx - 8, ty - 6, tok.width + 16, tok.height * 0.54 + 6);
@@ -991,7 +1115,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       ctx.fillText(tok.text, tx - splitShift, ty);
       ctx.restore();
 
-      // Bottom slice shifted right
       ctx.save();
       ctx.beginPath();
       ctx.rect(tx - 8, midY, tok.width + 16, tok.height * 0.6 + 6);
@@ -1004,18 +1127,23 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
 
     ctx.shadowBlur = 0;
 
-    // Crimson strikethrough sweep on 'strikethrough' tokens
+    // Crimson strikethrough + animated delete cursor sweep
     if (eff === 'strikethrough' && (effectActive || !isActiveLine)) {
       const strikeRatio = isActiveLine ? Math.max(0.25, easeOutCubic(p)) : 1.0;
       const strikeY = ty + tok.height * 0.54;
+      const tipX = tx - 1 + (tok.width + 2) * strikeRatio;
       ctx.fillStyle = CODE_COLOR_NEGATION;
       ctx.shadowColor = CODE_COLOR_NEGATION;
       ctx.shadowBlur = isActiveLine ? 8 : 0;
       ctx.fillRect(tx - 1, strikeY, (tok.width + 2) * strikeRatio, 2.2);
+      if (isActiveLine && isWordActive && p < 0.98) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(tipX, ty + 1, 2, tok.height);
+      }
       ctx.shadowBlur = 0;
     }
 
-    // Red IDE diagnostic wavy squiggle underline on 'squiggle' tokens
+    // Red IDE diagnostic wavy squiggle + floating IDE diagnostic pill ('ERR_BROKEN' / 'TypeError')
     if (eff === 'squiggle' && (effectActive || !isActiveLine)) {
       const squigY = ty + tok.height + 3;
       const step = 4.5;
@@ -1030,6 +1158,76 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         ctx.lineTo(tx + clampedX, squigY + wave);
       }
       ctx.stroke();
+
+      if (isActiveLine && isWordActive) {
+        const diagText = tok.text.includes('broken') ? 'ERR_BROKEN' : 'TypeError';
+        ctx.save();
+        ctx.font = `700 9.5px ${CODE_FONT_STACK}`;
+        const pillW = Math.max(58, ctx.measureText(diagText).width + 10);
+        const pillH = 14;
+        const pillX = tx;
+        const pillY = ty - pillH - 3;
+        drawRoundedRectPath(ctx, pillX, pillY, pillW, pillH, 4);
+        ctx.fillStyle = 'rgba(40, 12, 18, 0.92)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 46, 59, 0.7)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ff7b72';
+        ctx.fillText(diagText, pillX + 5, pillY + pillH * 0.5);
+        ctx.restore();
+      }
+    }
+
+    // Null/empty ghost dashed underline (no setLineDash needed)
+    if (eff === 'nullish' && effectActive) {
+      const uY = ty + tok.height + 2;
+      ctx.fillStyle = '#8b949e';
+      for (let gx = 0; gx < tok.width; gx += 6) {
+        ctx.fillRect(tx + gx, uY, Math.min(3.5, tok.width - gx), 1.4);
+      }
+    }
+
+    // Loop while(true) / ∞ badge
+    if (eff === 'loop' && isActiveLine && (isWordActive || isWordPassed)) {
+      ctx.save();
+      ctx.font = `700 9.5px ${CODE_FONT_STACK}`;
+      const badge = '∞ while(true)';
+      const bw = Math.max(58, ctx.measureText(badge).width + 8);
+      const bx = tx;
+      const by = ty - 16;
+      drawRoundedRectPath(ctx, bx, by, bw, 14, 4);
+      ctx.fillStyle = 'rgba(22, 32, 48, 0.92)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(122, 162, 247, 0.55)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = CODE_COLOR_METHOD;
+      ctx.fillText(badge, bx + 4, by + 7);
+      ctx.restore();
+    }
+
+    // Async/wait inline 'await' tag
+    if (eff === 'async' && isActiveLine && isWordActive) {
+      ctx.save();
+      ctx.font = `700 9.5px ${CODE_FONT_STACK}`;
+      const bx = tx;
+      const by = ty - 16;
+      drawRoundedRectPath(ctx, bx, by, 38, 14, 4);
+      ctx.fillStyle = 'rgba(42, 22, 54, 0.92)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(198, 120, 221, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#d2a8ff';
+      ctx.fillText('await', bx + 19, by + 7);
+      ctx.restore();
     }
 
     ctx.restore();
@@ -1038,7 +1236,9 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
   private drawIdeChromeAndTelemetry(
     ctx: CanvasRenderingContext2D,
     frame: StyleFrameContext,
+    focalLeft: number,
     focalWidth: number,
+    fullWidth: number,
     activeRepeatCount: number,
     activeIsParen: boolean
   ): number {
@@ -1047,62 +1247,58 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     const totalTopH = tabBarH + crumbBarH;
 
     ctx.save();
-    // 1. Muted top tab bar
+    // 1. Full-width top tab bar (no vertical seam at focalLeft)
     ctx.fillStyle = 'rgba(10, 12, 18, 0.92)';
-    ctx.fillRect(0, 0, focalWidth, tabBarH);
+    ctx.fillRect(0, 0, fullWidth, tabBarH);
 
-    // Active tab pill
+    // Active tab pill positioned at focalLeft
     const activeTabW = Math.min(230, Math.max(148, this.tabTitleLabel.length * 8.2 + 28));
     ctx.fillStyle = '#0f131d';
-    ctx.fillRect(0, 0, activeTabW, tabBarH);
+    ctx.fillRect(focalLeft, 0, activeTabW, tabBarH);
     ctx.fillStyle = CODE_COLOR_NEGATION;
-    ctx.fillRect(0, 0, activeTabW, 2);
+    ctx.fillRect(focalLeft, 0, activeTabW, 2);
 
-    // Small status dot + <track_slug>.js ×
     ctx.fillStyle = CODE_COLOR_HOOK;
     ctx.beginPath();
-    ctx.arc(14, tabBarH * 0.5, 3.2, 0, Math.PI * 2);
+    ctx.arc(focalLeft + 14, tabBarH * 0.5, 3.2, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.font = `600 11.5px ${CODE_FONT_STACK}`;
     ctx.fillStyle = CODE_COLOR_IDENTIFIER;
-    ctx.fillText(this.tabTitleLabel, 24, tabBarH * 0.5 + 0.5);
+    ctx.fillText(this.tabTitleLabel, focalLeft + 24, tabBarH * 0.5 + 0.5);
 
-    // Secondary muted tab
     ctx.font = `500 11px ${CODE_FONT_STACK}`;
     ctx.fillStyle = CODE_COLOR_PUNCTUATION;
-    ctx.fillText('session_sync.ts', activeTabW + 16, tabBarH * 0.5 + 0.5);
+    ctx.fillText('session_sync.ts', focalLeft + activeTabW + 16, tabBarH * 0.5 + 0.5);
 
-    // Tab bar bottom divider
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, tabBarH);
-    ctx.lineTo(focalWidth, tabBarH);
+    ctx.lineTo(fullWidth, tabBarH);
     ctx.stroke();
 
-    // 2. Breadcrumb bar (<artist_slug> > <album_slug> > <track_slug>.js)
+    // 2. Full-width breadcrumb bar
     ctx.fillStyle = 'rgba(7, 9, 14, 0.88)';
-    ctx.fillRect(0, tabBarH, focalWidth, crumbBarH);
+    ctx.fillRect(0, tabBarH, fullWidth, crumbBarH);
     ctx.font = `500 10.5px ${CODE_FONT_STACK}`;
     ctx.fillStyle = '#8b949e';
-    ctx.fillText(this.breadcrumbLabel, 14, tabBarH + crumbBarH * 0.5);
+    ctx.fillText(this.breadcrumbLabel, focalLeft + 14, tabBarH + crumbBarH * 0.5);
 
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
     ctx.beginPath();
     ctx.moveTo(0, totalTopH);
-    ctx.lineTo(focalWidth, totalTopH);
+    ctx.lineTo(fullWidth, totalTopH);
     ctx.stroke();
 
     // 3. Dark-glass telemetry pills on right side of chrome
     if (focalWidth >= 420) {
-      let pillRightX = focalWidth - 12;
+      let pillRightX = fullWidth - 12;
       const pillY = 6;
       const pillH = 19;
 
-      // BPM telemetry pill
       ctx.font = `600 10px ${CODE_FONT_STACK}`;
       const bpmW = ctx.measureText(this.bpmTelemetryLabel).width + 16;
       pillRightX -= bpmW;
@@ -1115,7 +1311,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       ctx.fillStyle = CODE_COLOR_METHOD;
       ctx.fillText(this.bpmTelemetryLabel, pillRightX + 8, pillY + pillH * 0.5 + 0.5);
 
-      // Chorus or session telemetry pill
       const statusText =
         activeRepeatCount > 1
           ? '● chorus'
@@ -1132,7 +1327,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
           : '#3fb950';
       const statusW = ctx.measureText(statusText).width + 16;
       pillRightX -= statusW + 8;
-      if (pillRightX > activeTabW + 20) {
+      if (pillRightX > focalLeft + activeTabW + 20) {
         drawRoundedRectPath(ctx, pillRightX, pillY, statusW, pillH, 9.5);
         ctx.fillStyle = 'rgba(22, 27, 38, 0.86)';
         ctx.fill();
@@ -1191,6 +1386,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         frame,
         focal.left,
         focalWidth,
+        width,
         height,
         variationIdx,
         motionScale
@@ -1212,17 +1408,49 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     const lyrics = frame.lyrics;
     const layout = frame.layout;
     if (!lyrics || !layout || lyrics.lines.length === 0 || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height, '// awaiting_lyrics.stream()');
+      const chromeH = !isTransparent
+        ? this.drawIdeChromeAndTelemetry(ctx, frame, focal.left, focalWidth, width, 1, false)
+        : 0;
+      this.drawInstrumentalCodeLine(
+        ctx,
+        frame,
+        focal.left + Math.max(54, Math.round(focalWidth * 0.08)) + 16,
+        focal.left + Math.max(54, Math.round(focalWidth * 0.08)),
+        chromeH + (height - chromeH) * 0.46,
+        Math.round(18 * (frame.fontSizeScale || 1)),
+        focal.left,
+        focalWidth,
+        motionScale
+      );
       return;
     }
 
-    this.ensurePrecomputed(ctx, lyrics, layout, focalWidth);
+    const scriptMode: LyricsScriptMode = frame.scriptMode ?? 'auto';
+    this.ensurePrecomputed(ctx, lyrics, layout, focalWidth, scriptMode);
     if (this.codeLines.length === 0) {
       drawEmptyState(ctx, frame, width, height, '// awaiting_lyrics.stream()');
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(this.codeLines.length - 1, frame.activeLineIndex));
+    // WS6: preserve lastActiveLineIndex across instrumental breaks (never snap -1 -> 0)
+    let resolvedActiveIdx = frame.activeLineIndex;
+    if (resolvedActiveIdx >= 0) {
+      this.lastKnownActiveIdx = Math.min(this.codeLines.length - 1, resolvedActiveIdx);
+    } else if (typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0) {
+      resolvedActiveIdx = frame.lastActiveLineIndex;
+    } else if (this.lastKnownActiveIdx >= 0) {
+      resolvedActiveIdx = this.lastKnownActiveIdx;
+    } else {
+      resolvedActiveIdx = 0;
+      for (let i = 0; i < lyrics.lines.length; i++) {
+        if (lyrics.lines[i].startSeconds <= frame.timeSeconds) {
+          resolvedActiveIdx = i;
+        } else {
+          break;
+        }
+      }
+    }
+    const activeIdx = Math.max(0, Math.min(this.codeLines.length - 1, resolvedActiveIdx));
     const activeCodeLine = this.codeLines[activeIdx];
     const codeFontSize = this.cachedFontSize;
     const gutterWidth = Math.max(54, Math.round(focalWidth * 0.08));
@@ -1254,7 +1482,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       frame.isFollowingPlayback !== false &&
       Math.abs(frame.manualScrollY ?? 0) < 1;
 
-    // Detect line jump or beat strike for whip-pan chromatic split
     if (this.initialized && this.lastActiveLineIdx !== activeIdx) {
       if (isMacroCameraActive) {
         this.whipChromatic = Math.min(1.0, this.whipChromatic + 0.85);
@@ -1307,31 +1534,28 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       Math.min(this.totalCodeHeight + height * 0.35, this.scrollY + manualOffset)
     );
 
-    ctx.save();
-    // Strict focal stage clipping when contentInsetLeft > 2
-    if ((frame.contentInsetLeft ?? 0) > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
-    if (focal.left > 0) ctx.translate(focal.left, 0);
-
-    // Draw top IDE tab bar, breadcrumb, and telemetry pills (in non-transparent mode)
+    // WS2: Draw top IDE chrome across FULL width before translating focal stage (zero seam)
     const chromeTopH = !isTransparent
       ? this.drawIdeChromeAndTelemetry(
           ctx,
           frame,
+          focal.left,
           focalWidth,
+          width,
           activeCodeLine.repeatCount,
           activeCodeLine.isParenthetical
         )
       : 0;
 
-    // Clip code viewport below top IDE chrome
     ctx.save();
-    if (chromeTopH > 0) {
+    // WS2: no hard focal.left clip; translate code column into focal stage cleanly
+    if (focal.left > 0) ctx.translate(focal.left, 0);
+
+    // Clip vertically below top IDE chrome only (full width horizontally)
+    ctx.save();
+    if (chromeTopH > 0 && typeof ctx.rect === 'function' && typeof ctx.clip === 'function') {
       ctx.beginPath();
-      ctx.rect(0, chromeTopH, focalWidth, Math.max(1, height - chromeTopH));
+      ctx.rect(-focal.left, chromeTopH, width, Math.max(1, height - chromeTopH));
       ctx.clip();
     }
 
@@ -1341,7 +1565,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       ? Math.sin(frame.timeSeconds * 0.48) * 0.0085 * motionScale
       : 0;
 
-    // Apply macro camera pan/zoom/3D slant around active cursor focal point
     if (this.cameraZoom !== 1.0 || this.cameraPanX !== 0 || slantAngle !== 0) {
       const focusX = focalWidth * 0.46;
       ctx.translate(focusX - this.cameraPanX, focusY);
@@ -1388,7 +1611,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         (frame.activeLineIndex < 0 && lyrics.lines[i].endSeconds < frame.timeSeconds);
       const dist = Math.abs(i - activeIdx);
 
-      // Record hit rect in canvas coordinates for click-to-seek and hover (aligned with macro camera zoom)
       const hitY =
         (this.cameraZoom !== 1.0
           ? focusY + (screenY - focusY) * this.cameraZoom
@@ -1403,15 +1625,26 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         hitH
       );
 
-      // Active or hovered line highlight band + left gutter bar
+      // WS2: Active/hovered line highlight band fades cleanly across left edge (zero seam)
       if (isActive || isHovered) {
         ctx.save();
-        ctx.fillStyle = isActive
+        const fadeLeft = focal.left > 2 ? -Math.min(focal.left, 90) : 0;
+        const bandColor = isActive
           ? cl.isParenthetical
             ? 'rgba(122, 162, 247, 0.10)'
             : 'rgba(255, 46, 59, 0.085)'
           : 'rgba(230, 237, 243, 0.045)';
-        ctx.fillRect(0, screenY - 5, focalWidth, cl.lineH + 6);
+        if (fadeLeft < 0) {
+          const bandGrad = ctx.createLinearGradient(fadeLeft, 0, focalWidth, 0);
+          bandGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+          bandGrad.addColorStop(Math.min(0.45, Math.abs(fadeLeft) / (focalWidth - fadeLeft)), bandColor);
+          bandGrad.addColorStop(1, bandColor);
+          ctx.fillStyle = bandGrad;
+          ctx.fillRect(fadeLeft, screenY - 5, focalWidth - fadeLeft, cl.lineH + 6);
+        } else {
+          ctx.fillStyle = bandColor;
+          ctx.fillRect(0, screenY - 5, focalWidth, cl.lineH + 6);
+        }
 
         ctx.fillStyle = isActive
           ? cl.isParenthetical
@@ -1419,6 +1652,28 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
             : CODE_COLOR_NEGATION
           : CODE_COLOR_PUNCTUATION;
         ctx.fillRect(gutterWidth - 2.5, screenY - 5, 2.5, cl.lineH + 6);
+        ctx.restore();
+      }
+
+      // Git diff '+' / '-' gutter marker
+      if (cl.gitDiff !== 0) {
+        ctx.save();
+        ctx.fillStyle = cl.gitDiff > 0 ? '#3fb950' : CODE_COLOR_NEGATION;
+        ctx.globalAlpha = isActive ? 0.85 : 0.35;
+        ctx.fillRect(gutterWidth - 6, screenY + 2, 2, Math.max(10, cl.lineH - 8));
+        ctx.restore();
+      }
+
+      // Pulsing red gutter breakpoint dot on async/wait lines
+      if (cl.hasAsyncBreakpoint) {
+        const bpPulse =
+          motionScale === 0 ? 0.85 : 0.55 + 0.45 * Math.sin(frame.timeSeconds * 5.2 + i);
+        ctx.save();
+        ctx.fillStyle = CODE_COLOR_NEGATION;
+        ctx.globalAlpha = (isActive ? 0.95 : 0.45) * bpPulse;
+        ctx.beginPath();
+        ctx.arc(16, screenY + codeFontSize * 0.55, 4.2 * (0.9 + 0.15 * bpPulse), 0, Math.PI * 2);
+        ctx.fill();
         ctx.restore();
       }
 
@@ -1450,7 +1705,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         ? Math.max(0.32, 0.72 - dist * 0.12)
         : Math.max(0.22, 0.48 - dist * 0.08);
 
-      // Optional whip-pan / beat RGB chromatic split behind active line
       if (isActive && this.whipChromatic > 0.08 && motionScale > 0) {
         const shift = this.whipChromatic * 2.4 * Math.min(1.3, motionScale);
         ctx.save();
@@ -1522,22 +1776,81 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         }
       }
 
-      // Inline understated ghost annotation (• never read, • repeat)
-      if (cl.ghostAnnotation && (isActive || isPast || isHovered)) {
-        const gx = codeOriginX + cl.maxRightX + 14;
-        if (gx + 90 < focalWidth) {
-          ctx.save();
-          ctx.font = `500 ${Math.round(codeFontSize * 0.72)}px ${CODE_FONT_STACK}`;
-          ctx.fillStyle = cl.repeatCount > 1 ? CODE_COLOR_HOOK : '#484f58';
-          ctx.globalAlpha = isActive ? 0.72 : 0.42;
-          ctx.fillText(cl.ghostAnnotation, gx, screenY + 3);
-          ctx.restore();
+      // Trailing inline original/translated comment (`// ...`) + ghost annotation
+      let tailX = codeOriginX + cl.maxRightX + 14;
+      if (cl.inlineComment && tailX + 40 < focalWidth) {
+        ctx.save();
+        ctx.font = `500 ${Math.round(codeFontSize * 0.76)}px ${CODE_FONT_STACK}`;
+        ctx.fillStyle = '#6e7681';
+        ctx.globalAlpha = isActive ? 0.78 : isPast ? 0.45 : 0.3;
+        ctx.fillText(cl.inlineComment, tailX, screenY + 2);
+        const cWidth = ctx.measureText(cl.inlineComment).width;
+        tailX += (Number.isFinite(cWidth) ? cWidth : cl.inlineComment.length * 8) + 12;
+        ctx.restore();
+      }
+      if (cl.ghostAnnotation && (isActive || isPast || isHovered) && tailX + 70 < focalWidth) {
+        ctx.save();
+        ctx.font = `500 ${Math.round(codeFontSize * 0.72)}px ${CODE_FONT_STACK}`;
+        ctx.fillStyle = cl.repeatCount > 1 ? CODE_COLOR_HOOK : '#484f58';
+        ctx.globalAlpha = isActive ? 0.72 : 0.42;
+        ctx.fillText(cl.ghostAnnotation, tailX, screenY + 3);
+        ctx.restore();
+      }
+    }
+
+    // WS6: Live pulsing instrumental code line during instrumental gaps
+    let nextLineIdx =
+      typeof frame.nextLineIndex === 'number' ? frame.nextLineIndex : -1;
+    if (nextLineIdx < 0) {
+      for (let i = 0; i < lyrics.lines.length; i++) {
+        if (lyrics.lines[i].startSeconds > frame.timeSeconds) {
+          nextLineIdx = i;
+          break;
         }
+      }
+    }
+    const nextLine =
+      nextLineIdx >= 0 && nextLineIdx < lyrics.lines.length ? lyrics.lines[nextLineIdx] : null;
+    const prevEnd =
+      nextLineIdx > 0
+        ? Math.min(
+            lyrics.lines[nextLineIdx - 1].endSeconds,
+            lyrics.lines[nextLineIdx - 1].words.length > 0
+              ? lyrics.lines[nextLineIdx - 1].words[lyrics.lines[nextLineIdx - 1].words.length - 1].endSeconds
+              : lyrics.lines[nextLineIdx - 1].endSeconds
+          )
+        : 0;
+    const gapDur = nextLine ? nextLine.startSeconds - prevEnd : 0;
+    const isGap =
+      typeof frame.isInstrumentalGap === 'boolean'
+        ? frame.isInstrumentalGap
+        : frame.activeLineIndex < 0 &&
+          ((nextLineIdx === 0 && nextLine!.startSeconds > 3.0) ||
+            (nextLineIdx > 0 && gapDur >= 3.5) ||
+            nextLineIdx < 0);
+
+    if (isGap) {
+      const gapScreenY =
+        nextLineIdx === 0
+          ? anchorY - codeFontSize * 0.6
+          : anchorY + (activeCodeLine.topY + activeCodeLine.lineH + 12 - effectiveScrollY);
+      if (gapScreenY > minY && gapScreenY < maxY) {
+        this.drawInstrumentalCodeLine(
+          ctx,
+          frame,
+          codeOriginX,
+          gutterWidth,
+          gapScreenY,
+          codeFontSize,
+          0,
+          focalWidth,
+          motionScale
+        );
       }
     }
 
     // Glowing Crimson Block Cursor (█) or Secondary Blue Bar Cursor + Floating Collaborator Pill
-    if (frame.activeLineIndex >= 0 && activeIdx < this.codeLines.length) {
+    if (!isGap && frame.activeLineIndex >= 0 && activeIdx < this.codeLines.length) {
       const curScreenX = codeOriginX + this.cursorX;
       const curScreenY = anchorY + (this.cursorY - effectiveScrollY);
       const isSecondary = activeCodeLine.isParenthetical;
@@ -1546,7 +1859,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const cursorH = Math.round(codeFontSize * 1.12);
 
       ctx.save();
-      // Cursor block with luminous crimson/blue bloom
       ctx.shadowColor = cursorColor;
       ctx.shadowBlur = 16 + frame.audio.bassEnergy * 8;
       ctx.fillStyle = cursorColor;
@@ -1554,13 +1866,11 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       drawRoundedRectPath(ctx, curScreenX, curScreenY - 1, cursorW, cursorH, 2);
       ctx.fill();
 
-      // Crisp top-edge cursor core
       ctx.shadowBlur = 0;
       ctx.fillStyle = '#ffffff';
       ctx.globalAlpha = 0.65;
       ctx.fillRect(curScreenX, curScreenY - 1, cursorW, 2);
 
-      // Floating Collaborator Pill above cursor (<artist_slug> or secondary collaborator)
       const pillLabel = isSecondary ? this.secondaryCollabSlug : this.primaryCollabSlug;
       ctx.font = `700 10px ${CODE_FONT_STACK}`;
       const pillW = Math.max(54, ctx.measureText(pillLabel).width + 14);
@@ -1568,7 +1878,6 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const pillX = Math.max(gutterWidth + 4, Math.min(focalWidth - pillW - 8, curScreenX - 2));
       const pillY = curScreenY - pillH - 4;
 
-      // Connector stem from pill to cursor
       ctx.fillStyle = cursorColor;
       ctx.globalAlpha = 0.9;
       ctx.fillRect(curScreenX + 1, pillY + pillH - 1, 2, 5);
@@ -1586,25 +1895,124 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     }
 
     ctx.restore(); // end code viewport clip
-    ctx.restore(); // end focal stage clip
+    ctx.restore(); // end focal translate
 
-    // Edge vignette (non-transparent stage)
+    // WS2: Edge vignette across FULL (0, 0, width, height)
     if (!isTransparent && vignetteStrength > 0.02) {
       ctx.save();
       const vig = ctx.createRadialGradient(
-        focal.centerX,
+        width * 0.5,
         height * 0.5,
-        Math.min(focalWidth, height) * 0.3,
-        focal.centerX,
+        Math.min(width, height) * 0.3,
+        width * 0.5,
         height * 0.5,
-        Math.max(focalWidth, height) * 0.78
+        Math.max(width, height) * 0.78
       );
       vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
       vig.addColorStop(1, 'rgba(0, 0, 0, 0.78)');
       ctx.globalAlpha = vignetteStrength * bgOpacity;
       ctx.fillStyle = vig;
-      ctx.fillRect(focal.left, 0, width - focal.left, height);
+      ctx.fillRect(0, 0, width, height);
       ctx.restore();
     }
+  }
+
+  private drawInstrumentalCodeLine(
+    ctx: CanvasRenderingContext2D,
+    frame: StyleFrameContext,
+    codeOriginX: number,
+    gutterWidth: number,
+    screenY: number,
+    codeFontSize: number,
+    leftBase: number,
+    focalWidth: number,
+    motionScale: number
+  ): void {
+    const t = frame.timeSeconds || 0;
+    const bass = frame.audio.bassEnergy ?? 0;
+    const pulse = motionScale === 0 ? 0.85 : 0.65 + 0.35 * Math.sin(t * 4.2);
+    const rowH = Math.round(codeFontSize * 1.62);
+
+    ctx.save();
+    // Pulsing breakpoint dot in gutter
+    ctx.fillStyle = CODE_COLOR_NEGATION;
+    ctx.globalAlpha = 0.75 * pulse;
+    ctx.beginPath();
+    ctx.arc(leftBase + 16, screenY + codeFontSize * 0.55, 4.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Subtle active band
+    ctx.fillStyle = 'rgba(122, 162, 247, 0.08)';
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(leftBase, screenY - 4, focalWidth, rowH + 4);
+
+    // Tokenized live statement: await audio.solo(); // ♪ instrumental...
+    ctx.font = `600 ${codeFontSize}px ${CODE_FONT_STACK}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    let penX = codeOriginX;
+
+    const kw = 'await ';
+    ctx.fillStyle = '#d2a8ff';
+    ctx.globalAlpha = 0.96;
+    ctx.fillText(kw, penX, screenY);
+    penX += ctx.measureText(kw).width || kw.length * codeFontSize * 0.6;
+
+    const obj = 'audio';
+    ctx.fillStyle = CODE_COLOR_IDENTIFIER;
+    ctx.fillText(obj, penX, screenY);
+    penX += ctx.measureText(obj).width || obj.length * codeFontSize * 0.6;
+
+    const dot = '.';
+    ctx.fillStyle = CODE_COLOR_PUNCTUATION;
+    ctx.fillText(dot, penX, screenY);
+    penX += ctx.measureText(dot).width || codeFontSize * 0.6;
+
+    const fnCall = 'solo()';
+    ctx.fillStyle = CODE_COLOR_METHOD;
+    ctx.fillText(fnCall, penX, screenY);
+    penX += ctx.measureText(fnCall).width || fnCall.length * codeFontSize * 0.6;
+
+    const semi = '; ';
+    ctx.fillStyle = CODE_COLOR_PUNCTUATION;
+    ctx.fillText(semi, penX, screenY);
+    penX += ctx.measureText(semi).width || codeFontSize * 0.6;
+
+    // Blinking crimson block cursor at end of statement
+    const cursorW = Math.max(8, Math.round(codeFontSize * 0.55));
+    const cursorVisible = motionScale === 0 ? true : Math.sin(t * 6.4) >= -0.2;
+    if (cursorVisible) {
+      ctx.fillStyle = CODE_COLOR_NEGATION;
+      ctx.shadowColor = CODE_COLOR_NEGATION;
+      ctx.shadowBlur = 12 + bass * 8;
+      ctx.globalAlpha = 0.9;
+      drawRoundedRectPath(ctx, penX, screenY, cursorW, Math.round(codeFontSize * 1.08), 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    const commentX = penX + cursorW + 10;
+    if (commentX + 60 < leftBase + focalWidth) {
+      ctx.fillStyle = '#6e7681';
+      ctx.globalAlpha = 0.72 * pulse;
+      ctx.font = `500 ${Math.round(codeFontSize * 0.85)}px ${CODE_FONT_STACK}`;
+      ctx.fillText('// ♪ instrumental...', commentX, screenY + 1);
+    }
+
+    // Beat-reactive progress/audio bar beneath statement
+    const barW = Math.min(240, Math.max(100, focalWidth * 0.35));
+    const barY = screenY + rowH - 2;
+    const progress =
+      typeof frame.gapProgress === 'number' && Number.isFinite(frame.gapProgress) && frame.gapProgress > 0
+        ? clamp01(frame.gapProgress)
+        : clamp01(0.25 + bass * 0.75);
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(codeOriginX, barY, barW, 2);
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = CODE_COLOR_METHOD;
+    ctx.fillRect(codeOriginX, barY, Math.max(8, barW * progress), 2);
+
+    ctx.restore();
   }
 }

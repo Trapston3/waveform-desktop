@@ -26,8 +26,17 @@ register(`data:text/javascript,${encodeURIComponent(resolverHook)}`, import.meta
 
 const { AudioEngine } = await import('../../src/audio/AudioEngine.ts');
 const { AutoEqLoader, CURATED_AUTOEQ_PROFILES } = await import('../../src/audio/AutoEqLoader.ts');
+const {
+  SqliteAutoEqReader,
+  readEqPresetsFromBuffer,
+  normalizeAutoEqCompact,
+  extractMeasurementRig,
+  scoreAutoEqMatch,
+} = await import('../../src/audio/sqliteReader.ts');
+const { AutoEqProcessor, computeBiquadMagnitudeDb } = await import('../../src/audio/DspChain.ts');
 const { LiveVisualizer } = await import('../../src/audio/LiveVisualizer.ts');
 const { mockSongs } = await import('../fixtures/mockSongs.mjs');
+import fs from 'node:fs';
 
 // ============================================================================
 // SUITE 1: UNCURATED HEADPHONE MODEL LOOKUPS FROM auto_eq.db
@@ -471,6 +480,12 @@ describe('Empirical Challenge 5: Visualizer Zero-Allocation Memory Stability', (
       assert.ok(energy[0] >= 0.0);
     });
 
+    // Warm up JIT compilation before taking baseline heap snapshot
+    for (let w = 0; w < 200; w++) {
+      engine.triggerLivePcmBlock(pcmBlock);
+    }
+    dispatchCount = 0;
+
     if (global.gc) global.gc();
     const initialHeap = process.memoryUsage().heapUsed;
 
@@ -540,5 +555,90 @@ describe('Empirical Challenge 5: Visualizer Zero-Allocation Memory Stability', (
     engine.triggerLivePcmBlock(new Float32Array(0));
 
     assert.strictEqual(receivedSafeBands, true, 'All dispatched energy bands must be finite and clamped in [0.0, 1.0]');
+  });
+});
+
+// ============================================================================
+// SUITE 6: PURE-TS SQLITE READER, FUZZY AUTOEQ RANKING & DSP HIGH_SHELF/MAGNITUDE
+// ============================================================================
+describe('Empirical Challenge 6: Pure-TS SQLite Reader, Fuzzy Ranking & DSP Response Curve', () => {
+  test('SQLITE-01: Pure-TS B-tree reader parses all 17,703 rows (8,850 parametric) without node:sqlite', async () => {
+    const buf = fs.readFileSync('src/assets/data/auto_eq.db');
+    const rows = readEqPresetsFromBuffer(new Uint8Array(buf));
+    assert.strictEqual(rows.length, 17703);
+    assert.strictEqual(rows.filter((r) => r.parametric === 1).length, 8850);
+
+    const reader = new SqliteAutoEqReader('src/assets/data/auto_eq.db');
+    assert.strictEqual(reader.totalCount, 17703);
+    assert.strictEqual(reader.parametricCount, 8850);
+    reader.close();
+
+    const status = await AutoEqLoader.getStatus();
+    assert.strictEqual(status.ready, true);
+    assert.strictEqual(status.totalCount, 17703);
+    assert.strictEqual(status.parametricCount, 8850);
+  });
+
+  test('RANK-01: Fuzzy compact ranking resolves sony whch-720n -> Sony WH-CH720N #1, hd 600, and airpods in <5ms', async () => {
+    assert.strictEqual(normalizeAutoEqCompact('sony whch-720n'), 'sonywhch720n');
+    assert.strictEqual(extractMeasurementRig('Oratory1990 over-ear').rig, 'Oratory1990');
+    assert.ok(
+      scoreAutoEqMatch('sony whch-720n', { name: 'Sony WH-CH720N', meta: 'Rtings', parametric: true }) >
+        scoreAutoEqMatch('sony whch-720n', { name: 'Sony WH-CH700N', meta: 'Rtings', parametric: true })
+    );
+
+    const whchSearch = await AutoEqLoader.searchHeadphones('sony whch-720n', 10);
+    assert.ok(whchSearch.length > 0);
+    assert.strictEqual(whchSearch[0].name, 'Sony WH-CH720N');
+    assert.strictEqual(whchSearch[0].parametric, true);
+
+    const whchProfile = await AutoEqLoader.findProfile('sony whch-720n');
+    assert.ok(whchProfile);
+    assert.strictEqual(whchProfile.name, 'Sony WH-CH720N');
+    assert.strictEqual(whchProfile.filters.length, 10);
+
+    // Repeat search latency must be < 5ms
+    const t0 = performance.now();
+    const whchRepeat = await AutoEqLoader.searchHeadphones('sony whch-720n', 10);
+    const repeatMs = performance.now() - t0;
+    assert.strictEqual(whchRepeat[0].name, 'Sony WH-CH720N');
+    assert.ok(repeatMs < 5.0, `Repeat search took ${repeatMs.toFixed(2)}ms (expected < 5ms)`);
+
+    const hd600Results = await AutoEqLoader.searchHeadphones('hd 600', 10);
+    assert.ok(hd600Results.length > 0);
+    assert.strictEqual(hd600Results[0].name, 'Sennheiser HD 600');
+
+    const airpodsResults = await AutoEqLoader.searchHeadphones('airpods', 10);
+    assert.ok(airpodsResults.length >= 3);
+    assert.ok(airpodsResults.every((r) => r.name.toLowerCase().includes('airpods')));
+    assert.ok(airpodsResults[0].parametric);
+  });
+
+  test('DSP-MAG-01: HIGH_SHELF b2 RBJ fix and computeBiquadMagnitudeDb match exact acoustic transfer', () => {
+    const hsFilter = { type: 'HIGH_SHELF', freq: 10000, q: 0.707, gainDb: 6.0 };
+    const freqs = [20, 1000, 10000, 20000];
+    const mag = computeBiquadMagnitudeDb([hsFilter], 0, freqs, 48000);
+
+    assert.ok(Math.abs(mag[0]) < 0.05, `HIGH_SHELF DC/20Hz gain must be ~0 dB, got ${mag[0]}`);
+    assert.ok(Math.abs(mag[1]) < 0.1, `HIGH_SHELF 1kHz gain must be ~0 dB, got ${mag[1]}`);
+    assert.ok(Math.abs(mag[2] - 3.0) < 0.2, `HIGH_SHELF 10kHz midpoint must be ~+3 dB, got ${mag[2]}`);
+    assert.ok(mag[3] > 5.5 && mag[3] <= 6.1, `HIGH_SHELF 20kHz gain must approach +6 dB, got ${mag[3]}`);
+
+    // Verify preamp offset applies cleanly
+    const withPreamp = computeBiquadMagnitudeDb([hsFilter], -4.5, freqs, 48000);
+    for (let i = 0; i < freqs.length; i++) {
+      assert.ok(Math.abs(withPreamp[i] - (mag[i] - 4.5)) < 1e-6);
+    }
+
+    // Also verify RBJ HIGH_SHELF b2 coefficient matches positive (A - 1) * cosW0 formula
+    const coeffs = AutoEqProcessor.calculateBiquadCoefficients(hsFilter, 48000);
+    const A = Math.pow(10, 6.0 / 40);
+    const w0 = (2 * Math.PI * 10000) / 48000;
+    const cosW0 = Math.cos(w0);
+    const alpha = Math.sin(w0) / (2 * 0.707);
+    const sqrtA2Alpha = 2 * Math.sqrt(A) * alpha;
+    const expectedA0 = (A + 1) - (A - 1) * cosW0 + sqrtA2Alpha;
+    const expectedB2 = (A * ((A + 1) + (A - 1) * cosW0 - sqrtA2Alpha)) / expectedA0;
+    assert.ok(Math.abs(coeffs.b2 - expectedB2) < 1e-12);
   });
 });

@@ -25,6 +25,7 @@ import { usePlayerStore } from '../../state/playerStore';
 import {
   resolveStyleVariationId,
   VISUAL_STYLE_DEFINITIONS,
+  type LyricsScriptMode,
   type VisualStyleId,
 } from '../../lyricVisualizer/core';
 import {
@@ -44,6 +45,7 @@ import {
   type AccountAuthStatus,
   type AccountProvider,
 } from '../../services/AccountAuthService';
+import type { DiscordDisplayFormat } from '../../services/DiscordRpcService';
 import type { AppSettings } from '../../models/Settings';
 
 export interface SettingsModalProps {
@@ -80,6 +82,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     spotify: { connected: false },
   });
   const [authBusy, setAuthBusy] = useState<AccountProvider | null>(null);
+  const [discordStatus, setDiscordStatus] = useState<{
+    status?: string;
+    connected?: boolean;
+    lastError?: string | null;
+  } | null>(null);
 
   const { settings, updateSettings, resetToDefaults } = useSettingsStore();
   const resetListeningData = useLibraryStore((s) => s.resetListeningData);
@@ -110,6 +117,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       .then((status) => setAuthStatus(status))
       .catch(() => {});
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const getStatus = (window as any)?.electronAPI?.discordRpcGetStatus;
+    if (typeof getStatus !== 'function') return;
+
+    const refresh = () => {
+      Promise.resolve(getStatus())
+        .then((snap) => {
+          if (!cancelled && snap && typeof snap === 'object') {
+            setDiscordStatus(snap);
+          }
+        })
+        .catch(() => {});
+    };
+
+    refresh();
+    if (activeTab !== 'integrations') return () => {
+      cancelled = true;
+    };
+
+    const interval = setInterval(refresh, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [
+    isOpen,
+    activeTab,
+    settings['scrobble.discordRpcEnabled'],
+    settings['scrobble.discordClientId'],
+    settings['scrobble.discordDisplayFormat'],
+  ]);
 
   if (!isOpen) return null;
 
@@ -646,6 +687,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       ),
     },
     {
+      id: 'translationEnabled',
+      tab: 'lyrics',
+      title: 'Lyrics Translation',
+      description: 'Show English translations for non-Latin and foreign lyrics when available',
+      keywords: 'lyrics translation english non-latin subtitles',
+      control: (
+        <input
+          type="checkbox"
+          checked={Boolean(settings['lyrics.translationEnabled'])}
+          onChange={(e) => handleUpdate({ 'lyrics.translationEnabled': e.target.checked })}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'lyricsScriptMode',
+      tab: 'lyrics',
+      title: 'Lyrics Script',
+      description: 'Choose original script, romanization, and translation display across Classic & Visualizer views',
+      keywords: 'lyrics script romanized original translation mode',
+      control: (
+        <select
+          value={vizConfig.scriptMode ?? settings['lyrics.scriptMode'] ?? 'auto'}
+          onChange={(e) =>
+            handleUpdate({ 'lyrics.scriptMode': e.target.value as LyricsScriptMode })
+          }
+          className="px-3 py-1.5 rounded-lg bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs text-[var(--color-primary)]"
+        >
+          <option value="auto">Auto (Romanize for Code)</option>
+          <option value="original">Original</option>
+          <option value="romanized">Romanized</option>
+          <option value="romanized_translation">Romanized + Translation</option>
+          <option value="original_translation">Original + Translation</option>
+        </select>
+      ),
+    },
+    {
       id: 'rtlSupport',
       tab: 'lyrics',
       title: 'Auto RTL Detection',
@@ -1079,14 +1157,124 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       id: 'discordRpc',
       tab: 'integrations',
       title: 'Discord Rich Presence (RPC)',
-      description: 'Show currently playing track on your Discord profile',
-      keywords: 'discord rpc presence',
+      description: 'Show currently playing track, quality badge, and buttons on your Discord profile',
+      keywords: 'discord rpc presence status rich',
+      control: (
+        <div className="flex items-center gap-2.5">
+          <span
+            data-testid="discord-rpc-status-badge"
+            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+              !settings['scrobble.discordRpcEnabled']
+                ? 'bg-white/10 text-[var(--color-on-surface-variant)]'
+                : discordStatus?.connected || discordStatus?.status === 'CONNECTED'
+                ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                : discordStatus?.status === 'CONNECTING'
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                : 'bg-white/10 text-[var(--color-on-surface-variant)]'
+            }`}
+          >
+            {!settings['scrobble.discordRpcEnabled']
+              ? 'Disabled'
+              : discordStatus?.connected || discordStatus?.status === 'CONNECTED'
+              ? 'Connected'
+              : discordStatus?.status === 'CONNECTING'
+              ? 'Connecting'
+              : 'Disconnected'}
+          </span>
+          <input
+            type="checkbox"
+            checked={Boolean(settings['scrobble.discordRpcEnabled'])}
+            onChange={(e) => handleUpdate({ 'scrobble.discordRpcEnabled': e.target.checked })}
+            className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+          />
+        </div>
+      ),
+    },
+    {
+      id: 'discordDisplayFormat',
+      tab: 'integrations',
+      title: 'Discord Status Display Format',
+      description: 'Choose what appears as your primary Listening status text in Discord',
+      keywords: 'discord display format song waveform artist title',
+      control: (
+        <select
+          value={settings['scrobble.discordDisplayFormat'] || 'song_on_waveform'}
+          onChange={(e) =>
+            handleUpdate({
+              'scrobble.discordDisplayFormat': e.target.value as DiscordDisplayFormat,
+            })
+          }
+          className="px-3 py-1.5 rounded-lg bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs text-[var(--color-primary)]"
+        >
+          <option value="song_on_waveform">Song on WaveForm</option>
+          <option value="song_title">Song Title Only</option>
+          <option value="artist">Artist Name</option>
+          <option value="waveform">WaveForm</option>
+        </select>
+      ),
+    },
+    {
+      id: 'discordShowQualityAndButtons',
+      tab: 'integrations',
+      title: 'Discord Quality Badge & Buttons',
+      description: 'Display stream quality indicator (Hi-Res/Lossless) and quick-link buttons in Discord',
+      keywords: 'discord quality badge buttons lossless',
       control: (
         <input
           type="checkbox"
-          checked={settings['scrobble.discordRpcEnabled']}
-          onChange={(e) => handleUpdate({ 'scrobble.discordRpcEnabled': e.target.checked })}
+          checked={settings['scrobble.discordShowQualityAndButtons'] !== false}
+          onChange={(e) =>
+            handleUpdate({ 'scrobble.discordShowQualityAndButtons': e.target.checked })
+          }
           className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'discordShowTimeRemaining',
+      tab: 'integrations',
+      title: 'Discord Playback Time Remaining',
+      description: 'Display live elapsed and remaining progress bar on your Discord profile',
+      keywords: 'discord time remaining timestamp progress',
+      control: (
+        <input
+          type="checkbox"
+          checked={settings['scrobble.discordShowTimeRemaining'] !== false}
+          onChange={(e) =>
+            handleUpdate({ 'scrobble.discordShowTimeRemaining': e.target.checked })
+          }
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'discordShowAlbumArt',
+      tab: 'integrations',
+      title: 'Discord Album Artwork',
+      description: 'Show album cover artwork in Discord Rich Presence',
+      keywords: 'discord album artwork cover image',
+      control: (
+        <input
+          type="checkbox"
+          checked={settings['scrobble.discordShowAlbumArt'] !== false}
+          onChange={(e) => handleUpdate({ 'scrobble.discordShowAlbumArt': e.target.checked })}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'discordClientId',
+      tab: 'integrations',
+      title: 'Discord Application Client ID',
+      description: 'Discord Developer Portal application ID used for Rich Presence IPC handshake',
+      keywords: 'discord client id application rpc',
+      control: (
+        <input
+          type="text"
+          value={settings['scrobble.discordClientId'] ?? '1574112665163530280'}
+          onChange={(e) => handleUpdate({ 'scrobble.discordClientId': e.target.value })}
+          placeholder="1574112665163530280"
+          className="w-44 px-2.5 py-1 rounded bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs font-mono"
         />
       ),
     },
@@ -1133,6 +1321,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
           onChange={(e) => handleUpdate({ 'listenTogether.nickname': e.target.value })}
           placeholder="Your nickname"
           className="w-36 px-2.5 py-1 rounded bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs"
+        />
+      ),
+    },
+    {
+      id: 'listenTogetherServerUrl',
+      tab: 'integrations',
+      title: 'Listen Together Relay URL',
+      description: 'Custom WebSocket relay endpoint for Listen Together rooms',
+      keywords: 'listen together party relay url websocket server',
+      control: (
+        <input
+          type="text"
+          value={settings['listenTogether.serverUrl'] ?? ''}
+          onChange={(e) => handleUpdate({ 'listenTogether.serverUrl': e.target.value })}
+          placeholder="wss://party.waveform.app/ws"
+          className="w-52 px-2.5 py-1 rounded bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs font-mono"
         />
       ),
     },

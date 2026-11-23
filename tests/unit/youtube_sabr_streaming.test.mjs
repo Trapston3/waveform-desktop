@@ -27,6 +27,8 @@ register(`data:text/javascript,${encodeURIComponent(resolverHook)}`, import.meta
 
 const { applyYouTubeAuthHeaders } = await import('../../electron/accountAuth.ts');
 const {
+  SABR_STALL_HANDOFF_MS,
+  createLiveJobStream,
   resolveYoutubeStreamForIpc,
   resolveYoutubeStreamProtocolRequest,
   resolveRemoteAudioProxyRequest,
@@ -35,6 +37,7 @@ const {
   destroyAllSabrStreams,
 } = await import('../../electron/youtubeSabrStream.ts');
 const { StreamResolver } = await import('../../src/services/StreamResolver.ts');
+const { MusicService } = await import('../../src/services/MusicService.ts');
 
 const tmpCacheDir = await fs.mkdtemp(path.join(os.tmpdir(), 'waveform-sabr-test-'));
 
@@ -470,4 +473,189 @@ test('resolveRemoteAudioProxyRequest converts upstream 200 OK to strict HTTP 206
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+// ---------------------------------------------------------------------------
+// 9. Mid-stream EOF/Error Hardening, 429/403 Proxy Retries & Cache Invalidation
+// ---------------------------------------------------------------------------
+
+test('SABR_STALL_HANDOFF_MS exceeds googlevideo stallDetectionMs (18_000ms)', () => {
+  assert.equal(SABR_STALL_HANDOFF_MS, 22_000);
+  assert.ok(SABR_STALL_HANDOFF_MS > 18_000);
+});
+
+test('createLiveJobStream errors (never closes cleanly) on mid-stream job.error, job.aborted, and containerGen invalidation', async () => {
+  const partPath = path.join(tmpCacheDir, 'live-err-test.webm.part');
+  const finalPath = path.join(tmpCacheDir, 'live-err-test.webm');
+  await fs.writeFile(partPath, new Uint8Array(64).fill(0xaa));
+  await fs.writeFile(finalPath, new Uint8Array(256).fill(0xbb));
+
+  // Case A: job.error mid-stream must trigger controller.error, never done: true
+  const errJob = {
+    videoId: 'LiveErr0001',
+    cacheDir: tmpCacheDir,
+    partPath,
+    finalPath,
+    metaPath: path.join(tmpCacheDir, 'live-err-test.json'),
+    ext: 'webm',
+    mimeType: 'audio/webm',
+    itag: 251,
+    durationSec: 200,
+    sourceClient: 'VISIONOS',
+    estimatedSize: 1000,
+    bytesWritten: 64,
+    finalSize: 0,
+    done: false,
+    error: null,
+    sabrStream: null,
+    childProcess: null,
+    fileHandle: null,
+    aborted: false,
+    waiters: new Set(),
+    completionPromise: Promise.resolve(),
+    startMs: 0,
+    actualStartMs: 0,
+    reportedTotal: 1000,
+    knownTotalSize: null,
+    isSeekJob: false,
+    abortController: null,
+    containerGen: 0,
+  };
+
+  const readerA = createLiveJobStream(errJob, 0, undefined, 25).getReader();
+  const firstA = await readerA.read();
+  assert.equal(firstA.done, false);
+  assert.equal(firstA.value.byteLength, 64);
+
+  errJob.error = new Error('Mid-stream SABR drop');
+  for (const w of errJob.waiters) w();
+  errJob.waiters.clear();
+
+  await assert.rejects(() => readerA.read(), /Mid-stream SABR drop/);
+
+  // Case B: containerGen change after reading from .part must reject instead of splicing .finalPath
+  const spliceJob = { ...errJob, error: null, waiters: new Set() };
+  const readerB = createLiveJobStream(spliceJob, 0, undefined, 25).getReader();
+  const firstB = await readerB.read();
+  assert.equal(firstB.done, false);
+  spliceJob.containerGen = 1;
+  spliceJob.done = true;
+  spliceJob.finalSize = 256;
+  await assert.rejects(() => readerB.read(), /invalidated.*cache rebuild/i);
+
+  // Case C: 2 consecutive zero-progress timeouts must trigger controller.error
+  const timeoutJob = { ...errJob, error: null, bytesWritten: 0, waiters: new Set() };
+  const readerC = createLiveJobStream(timeoutJob, 0, undefined, 15).getReader();
+  await assert.rejects(() => readerC.read(), /timed out with zero progress/i);
+});
+
+test('resolveRemoteAudioProxyRequest retries transient 403/429 responses with backoff', async () => {
+  const origFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) {
+      return new Response('Forbidden', { status: 403 });
+    }
+    return new Response(new Uint8Array([1, 2, 3, 4]), {
+      status: 206,
+      headers: {
+        'Content-Type': 'audio/flac',
+        'Content-Range': 'bytes 0-3/400',
+        'Content-Length': '4',
+      },
+    });
+  };
+
+  try {
+    const req = new Request(
+      'waveform-stream://proxy?url=' + encodeURIComponent('https://cdn.retry.example.com/ok.flac'),
+      { headers: { Range: 'bytes=0-3' } }
+    );
+    const res = await resolveRemoteAudioProxyRequest(req, tmpCacheDir);
+    assert.equal(calls, 2);
+    assert.equal(res.status, 206);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('StreamResolver.invalidateCache clears cached resolutions and iTunes 30s preview sets durationMs=30000', async () => {
+  const resolver = new StreamResolver();
+  const origFetch = globalThis.fetch;
+  let sabrCalls = 0;
+  let sawPreviewFetch = false;
+
+  const origWindow = globalThis.window;
+  globalThis.window = {
+    electronAPI: {
+      resolveYoutubeStream: async (vid) => {
+        sabrCalls++;
+        if (vid === 'AbCdEfGh123') {
+          return {
+            streamUrl: `waveform-stream://yt?v=${vid}&c=${sabrCalls}`,
+            mimeType: 'audio/webm',
+            durationSec: 180,
+          };
+        }
+        throw new Error('no sabr');
+      },
+    },
+  };
+
+  try {
+    const r1 = await resolver.resolve('AbCdEfGh123', 'Song', 'Artist', 180);
+    const r1Cached = await resolver.resolve('AbCdEfGh123', 'Song', 'Artist', 180);
+    assert.equal(r1.url, r1Cached.url);
+    assert.equal(sabrCalls, 1);
+
+    resolver.invalidateCache('AbCdEfGh123');
+    const r2 = await resolver.resolve('AbCdEfGh123', 'Song', 'Artist', 180);
+    assert.equal(sabrCalls, 2);
+    assert.notEqual(r1.url, r2.url);
+
+    // iTunes fallback durationMs === 30000 when primary/fallback sources fail
+    globalThis.fetch = async (url) => {
+      const s = String(url);
+      if (s.includes('itunes.apple.com/search')) {
+        sawPreviewFetch = true;
+        return new Response(
+          JSON.stringify({
+            results: [{ previewUrl: 'https://audio-ssl.itunes.apple.com/sample.m4a' }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('nope', { status: 404 });
+    };
+
+    const preview = await resolver.resolve('non_yt_preview_track', 'Obscure Track', 'Indie Artist', 200);
+    assert.equal(sawPreviewFetch, true);
+    assert.equal(preview.durationMs, 30000);
+  } finally {
+    globalThis.fetch = origFetch;
+    if (origWindow === undefined) delete globalThis.window;
+    else globalThis.window = origWindow;
+  }
+});
+
+test('MusicService.resolveStream forwards durationSec to StreamResolver.resolve', async () => {
+  const svc = new MusicService();
+  svc.setNetworkAvailable(true);
+  let capturedArgs = null;
+  svc.resolver = {
+    resolve: async (...args) => {
+      capturedArgs = args;
+      return {
+        url: 'waveform-stream://yt?v=dQw4w9WgXcQ',
+        quality: '160kbps Opus',
+        format: 'audio/webm',
+        bitrate: 160000,
+      };
+    },
+    invalidateCache: () => {},
+  };
+
+  await svc.resolveStream('dQw4w9WgXcQ', 'Never Gonna Give You Up', 'Rick Astley', 213);
+  assert.deepEqual(capturedArgs, ['dQw4w9WgXcQ', 'Never Gonna Give You Up', 'Rick Astley', 213]);
 });

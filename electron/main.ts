@@ -36,6 +36,23 @@ import {
   destroyAllSabrStreams,
 } from './youtubeSabrStream.js';
 import { createLyricVisualizerPlatformController } from './lyricVisualizerPlatform.js';
+import {
+  prewarmAutoEqDb,
+  searchAutoEqDb,
+  getAutoEqProfile,
+  getAutoEqStatus,
+} from './autoEqDb.js';
+import {
+  startPartyLanHost,
+  stopPartyLanHost,
+  getPartyLanInfo,
+  type LanHostOptions,
+} from './partyLanServer.js';
+import {
+  getSharedDiscordRpc,
+  type DiscordPlaybackInput,
+  type DiscordRpcConfig,
+} from './discordRpc.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -559,8 +576,6 @@ ipcMain.handle('network-fetch', async (_event, payload: { url: string; options?:
 });
 
 // AutoEQ Database & Packaged Data Asset Resolution (`auto_eq.db`, `.onnx` models)
-let autoEqDatabaseInstance: any = null;
-
 export function resolveDataAssetCandidatePaths(filename: string): string[] {
   const safeName = path.basename(filename);
   const unpackedResourceCandidates = process.resourcesPath
@@ -597,210 +612,55 @@ export function resolvePackagedDataAssetPath(filename: string): string | null {
   return null;
 }
 
-function getAutoEqDatabase(): any {
-  if (autoEqDatabaseInstance) return autoEqDatabaseInstance;
-  try {
-    const { DatabaseSync } = (process as any).getBuiltinModule
-      ? (process as any).getBuiltinModule('node:sqlite')
-      : require('node:sqlite');
-    if (!DatabaseSync) return null;
-
-    const candidatePaths = [
-      process.env.AUTOEQ_DB_PATH,
-      ...resolveDataAssetCandidatePaths('auto_eq.db'),
-    ].filter((p): p is string => typeof p === 'string' && p.length > 0);
-
-    for (const candidate of candidatePaths) {
-      try {
-        if (fs.existsSync(candidate)) {
-          autoEqDatabaseInstance = new DatabaseSync(candidate, { readOnly: true });
-          break;
-        }
-      } catch {
-        // Native SQLite cannot open paths inside virtual app.asar; continue to unpacked extraResources path
-      }
-    }
-  } catch (err) {
-    console.warn('[WaveForm Main] AutoEQ Database load bypassed:', err);
-  }
-  return autoEqDatabaseInstance;
-}
-
-const PAP_TAG_MAP: Record<number, string> = {
-  0x7003: 'PEAKING',
-  0x7004: 'LOW_SHELF',
-  0x7005: 'HIGH_SHELF',
-  0x7006: 'LOW_PASS',
-  0x7007: 'HIGH_PASS',
-  0x7008: 'BAND_PASS',
+const handleAutoEqSearch = async (_event: Electron.IpcMainInvokeEvent, query: string, limit = 20) => {
+  return searchAutoEqDb(query, limit, resolveDataAssetCandidatePaths('auto_eq.db'));
 };
 
-function decodePapBlobInMain(blob: Uint8Array): any[] {
-  const HEADER_SIZE = 36;
-  const RECORD_SIZE = 20;
-  if (!blob || blob.byteLength < HEADER_SIZE) return [];
-  if (blob[0] !== 0x50 || blob[1] !== 0x61 || blob[2] !== 0x50 || blob[3] !== 0x01) {
-    return [];
-  }
-  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
-  const filters: any[] = [];
-  const maxNyquist = 21609;
-  for (let i = HEADER_SIZE; i + RECORD_SIZE <= blob.byteLength; i += RECORD_SIZE) {
-    const tag = view.getUint32(i, true);
-    const gainDb = view.getFloat32(i + 4, true);
-    const freq = view.getUint32(i + 8, true);
-    const q = view.getFloat32(i + 12, true);
-    const safeFreq = Math.min(freq, maxNyquist);
-    const safeQ = q > 0.1 ? q : 0.1;
-    const safeGain = Math.max(-24, Math.min(12, gainDb));
-    filters.push({
-      type: PAP_TAG_MAP[tag] || 'PEAKING',
-      freq: safeFreq,
-      q: Number(safeQ.toFixed(2)),
-      gainDb: Number(safeGain.toFixed(1)),
-    });
-  }
-  return filters;
-}
+const handleAutoEqProfile = async (_event: Electron.IpcMainInvokeEvent, nameOrId: string | number) => {
+  return getAutoEqProfile(nameOrId, resolveDataAssetCandidatePaths('auto_eq.db'));
+};
 
-function calculatePreampInMain(filters: any[]): number {
-  let maxBoost = 0;
-  for (const f of filters) {
-    if (f.gainDb > maxBoost) maxBoost = f.gainDb;
-  }
-  return maxBoost > 0 ? -Number(maxBoost.toFixed(1)) : 0.0;
-}
+ipcMain.handle('autoeq:search', handleAutoEqSearch);
+ipcMain.handle('autoeq:getProfile', handleAutoEqProfile);
+ipcMain.handle('autoeq:status', async () => getAutoEqStatus(resolveDataAssetCandidatePaths('auto_eq.db')));
+ipcMain.handle('autoeq-search', handleAutoEqSearch);
+ipcMain.handle('autoeq-find-profile', handleAutoEqProfile);
 
-ipcMain.handle('autoeq-search', async (_event, query: string, limit = 20) => {
-  if (!query || typeof query !== 'string' || !query.trim()) return [];
-  const trimmed = query.trim().toLowerCase();
-  const db = getAutoEqDatabase();
-  const results: any[] = [];
-
-  const curated = [
-    { id: 'sony_wh1000xm4', name: 'Sony WH-1000XM4', meta: 'Oratory1990', parametric: true },
-    { id: 'sennheiser_hd600', name: 'Sennheiser HD 600', meta: 'Crinacle', parametric: true },
-    { id: 'apple_airpods_max', name: 'Apple AirPods Max', meta: 'Rtings', parametric: true },
-  ];
-  for (const c of curated) {
-    if (c.name.toLowerCase().includes(trimmed) || c.id.includes(trimmed)) {
-      results.push(c);
-    }
-  }
-
-  if (db) {
-    try {
-      const rows = db.prepare(
-        'SELECT _id, name, meta, parametric FROM eq_presets WHERE LOWER(name) LIKE ? ORDER BY parametric DESC LIMIT ?'
-      ).all(`%${trimmed}%`, limit);
-      for (const row of rows) {
-        if (!results.some((r: any) => r.name.toLowerCase() === row.name.toLowerCase())) {
-          results.push({
-            id: row._id,
-            name: row.name,
-            meta: row.meta,
-            parametric: row.parametric === 1,
-          });
-        }
-      }
-    } catch (err) {
-      console.warn('[WaveForm Main] AutoEQ IPC search error:', err);
-    }
-  }
-  return results.slice(0, limit);
+// Listen Together LAN WebSocket Host IPC
+ipcMain.handle('party:startLanHost', async (_event, options?: LanHostOptions) => {
+  return startPartyLanHost(options);
 });
 
-ipcMain.handle('autoeq-find-profile', async (_event, nameOrId: string) => {
-  if (!nameOrId || typeof nameOrId !== 'string') return null;
-  const trimmed = nameOrId.trim();
-  if (!trimmed) return null;
-  const lower = trimmed.toLowerCase();
+ipcMain.handle('party:stopLanHost', async () => {
+  await stopPartyLanHost();
+  return true;
+});
 
-  const curatedProfiles: Record<string, any> = {
-    sony_wh1000xm4: {
-      id: 'sony_wh1000xm4',
-      name: 'Sony WH-1000XM4',
-      type: 'Over-Ear',
-      source: 'Oratory1990',
-      preampGainDb: -5.6,
-      filters: [
-        { type: 'LOW_SHELF', freq: 105, q: 0.71, gainDb: -4.5 },
-        { type: 'PEAKING', freq: 210, q: 1.4, gainDb: 2.8 },
-        { type: 'PEAKING', freq: 1100, q: 2.1, gainDb: -3.2 },
-        { type: 'PEAKING', freq: 3200, q: 3.0, gainDb: 4.5 },
-        { type: 'PEAKING', freq: 6400, q: 2.5, gainDb: -2.0 },
-        { type: 'HIGH_SHELF', freq: 10000, q: 0.71, gainDb: -1.5 },
-      ],
-    },
-    sennheiser_hd600: {
-      id: 'sennheiser_hd600',
-      name: 'Sennheiser HD 600',
-      type: 'Open-Back Over-Ear',
-      source: 'Crinacle',
-      preampGainDb: -6.2,
-      filters: [
-        { type: 'LOW_SHELF', freq: 80, q: 0.71, gainDb: 5.5 },
-        { type: 'PEAKING', freq: 200, q: 1.2, gainDb: -1.0 },
-        { type: 'PEAKING', freq: 3500, q: 2.5, gainDb: -2.5 },
-        { type: 'PEAKING', freq: 5800, q: 4.0, gainDb: 2.0 },
-        { type: 'HIGH_SHELF', freq: 12000, q: 0.71, gainDb: 1.0 },
-      ],
-    },
-    apple_airpods_max: {
-      id: 'apple_airpods_max',
-      name: 'Apple AirPods Max',
-      type: 'Over-Ear ANC',
-      source: 'Rtings',
-      preampGainDb: -3.8,
-      filters: [
-        { type: 'LOW_SHELF', freq: 90, q: 0.71, gainDb: -2.0 },
-        { type: 'PEAKING', freq: 1250, q: 1.8, gainDb: 1.5 },
-        { type: 'PEAKING', freq: 4100, q: 2.8, gainDb: -3.0 },
-        { type: 'HIGH_SHELF', freq: 8500, q: 0.71, gainDb: 2.2 },
-      ],
-    },
-  };
+ipcMain.handle('party:getLanInfo', async () => {
+  return getPartyLanInfo();
+});
 
-  for (const [key, prof] of Object.entries(curatedProfiles)) {
-    if (key === lower || prof.name.toLowerCase() === lower) {
-      return prof;
-    }
-  }
+// Discord Rich Presence IPC
+ipcMain.handle('discordRpc:update', async (_event, payload: DiscordPlaybackInput) => {
+  if (!payload || typeof payload !== 'object') return false;
+  return getSharedDiscordRpc().update(payload);
+});
 
-  const db = getAutoEqDatabase();
-  if (db) {
-    try {
-      let row = db.prepare(
-        `SELECT name, meta, data_blob FROM eq_presets 
-         WHERE LOWER(name) = ? AND parametric = 1 
-         ORDER BY CASE WHEN meta LIKE '%Oratory1990%' THEN 1 WHEN meta LIKE '%Crinacle%' THEN 2 WHEN meta LIKE '%Rtings%' THEN 3 ELSE 4 END, _id ASC LIMIT 1`
-      ).get(lower);
+ipcMain.handle('discordRpc:clear', async () => {
+  getSharedDiscordRpc().clear();
+  return true;
+});
 
-      if (!row || !row.data_blob) {
-        row = db.prepare(
-          `SELECT name, meta, data_blob FROM eq_presets 
-           WHERE LOWER(name) LIKE ? AND parametric = 1 
-           ORDER BY CASE WHEN meta LIKE '%Oratory1990%' THEN 1 WHEN meta LIKE '%Crinacle%' THEN 2 WHEN meta LIKE '%Rtings%' THEN 3 ELSE 4 END, _id ASC LIMIT 1`
-        ).get(`%${lower}%`);
-      }
+ipcMain.handle('discordRpc:getStatus', async () => {
+  return getSharedDiscordRpc().getStatus();
+});
 
-      if (row && row.data_blob) {
-        const uint8 = new Uint8Array(row.data_blob);
-        const filters = decodePapBlobInMain(uint8);
-        const preampGainDb = calculatePreampInMain(filters);
-        return {
-          id: row.name.toLowerCase().replace(/[^a-z0-9]/g, '_'),
-          name: row.name,
-          source: row.meta || 'AutoEQ',
-          preampGainDb,
-          filters,
-        };
-      }
-    } catch (err) {
-      console.warn('[WaveForm Main] AutoEQ IPC find profile error:', err);
-    }
-  }
-  return null;
+ipcMain.handle('discordRpc:configure', async (_event, config: DiscordRpcConfig) => {
+  const safeConfig = config && typeof config === 'object' ? config : {};
+  return getSharedDiscordRpc().configure({
+    ...safeConfig,
+    userDataDir: app.getPath('userData'),
+  });
 });
 
 // App lifecycle
@@ -1312,6 +1172,8 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     registerLocalProtocol();
     configureMediaAndApiSession();
+    void prewarmAutoEqDb(resolveDataAssetCandidatePaths('auto_eq.db'));
+    getSharedDiscordRpc().configure({ userDataDir: app.getPath('userData') });
     mainWindow = createWindow();
     tray = createTray(mainWindow);
 
@@ -1340,9 +1202,15 @@ if (!gotTheLock) {
     }
   });
 
+  app.on('before-quit', () => {
+    getSharedDiscordRpc().shutdown();
+  });
+
   app.on('will-quit', () => {
     lyricVisualizerPlatform?.dispose();
     lyricVisualizerPlatform = null;
+    getSharedDiscordRpc().shutdown();
+    void stopPartyLanHost();
     void destroyAllSabrStreams();
   });
 }

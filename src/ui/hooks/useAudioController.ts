@@ -4,14 +4,67 @@
 import { useEffect, useRef } from 'react';
 import { isDeadOrStaleRestoredStreamUrl } from '../../audio/AudioEngine';
 import { getSharedWaveFormPlaybackBridge } from '../../lyricVisualizer/bridge/waveFormPlaybackBridge';
+import type { AppSettings } from '../../models/Settings';
+import {
+  DISCORD_DEFAULT_CLIENT_ID,
+  DiscordRpcService,
+  type DiscordRpcConfig,
+} from '../../services/DiscordRpcService';
+import { usePartyStore } from '../../services/PartySyncClient';
 import { StreamResolver } from '../../services/StreamResolver';
+import { useLibraryStore } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useSettingsStore } from '../../state/settingsStore';
 import { saveSyncSession } from '../../utils/sessionPersistence';
 
+const DISCORD_SETTING_KEYS = [
+  'scrobble.discordRpcEnabled',
+  'scrobble.discordClientId',
+  'scrobble.discordDisplayFormat',
+  'scrobble.discordShowTimeRemaining',
+  'scrobble.discordShowAlbumArt',
+  'scrobble.discordShowQualityAndButtons',
+] as const;
+
+function buildDiscordConfig(settings: AppSettings): DiscordRpcConfig {
+  const rawClientId = settings['scrobble.discordClientId'];
+  return {
+    enabled: Boolean(settings['scrobble.discordRpcEnabled']),
+    clientId:
+      typeof rawClientId === 'string' && rawClientId.trim()
+        ? rawClientId.trim()
+        : DISCORD_DEFAULT_CLIENT_ID,
+    displayFormat: settings['scrobble.discordDisplayFormat'] || 'song_on_waveform',
+    showTimeRemaining: settings['scrobble.discordShowTimeRemaining'] !== false,
+    showAlbumArt: settings['scrobble.discordShowAlbumArt'] !== false,
+    showButtons: settings['scrobble.discordShowQualityAndButtons'] !== false,
+  };
+}
+
+function resolveDurationSec(trackDurationSec: unknown, fallbackDurationMs: number): number {
+  if (typeof trackDurationSec === 'number' && Number.isFinite(trackDurationSec) && trackDurationSec > 0) {
+    return trackDurationSec;
+  }
+  return fallbackDurationMs > 0 ? fallbackDurationMs / 1000 : 0;
+}
+
 export function useAudioController() {
   const isInitialized = useRef(false);
+  const discordRpcRef = useRef<DiscordRpcService | null>(null);
+  const listenTelemetryRef = useRef<{
+    videoId: string | null;
+    listenedSec: number;
+    recordedForPlay: boolean;
+    lastEngineTimeSec: number;
+    lastTickMs: number;
+  }>({
+    videoId: null,
+    listenedSec: 0,
+    recordedForPlay: false,
+    lastEngineTimeSec: 0,
+    lastTickMs: 0,
+  });
 
   useEffect(() => {
     if (isInitialized.current) return;
@@ -80,7 +133,28 @@ export function useAudioController() {
       });
     }
 
-    // 3. Subscribe to DSP settings changes from settingsStore
+    // 3. Apply initial persisted DSP / AutoEQ state & subscribe to settingsStore changes
+    if (engine) {
+      const initialSettings = useSettingsStore.getState().settings;
+      try {
+        if (Array.isArray(initialSettings['dsp.equalizerBands'])) {
+          engine.setEqualizerBands(initialSettings['dsp.equalizerBands']);
+        }
+      } catch {}
+      try {
+        engine.setSpatialAudio(
+          Boolean(initialSettings['dsp.spatialAudioEnabled']),
+          initialSettings['dsp.spatialWidthGain']
+        );
+      } catch {}
+      const initialAutoEqEnabled = Boolean(initialSettings['dsp.autoEqEnabled']);
+      const initialAutoEqProfile = initialSettings['dsp.autoEqSelectedProfile'];
+      void usePlayerStore
+        .getState()
+        .loadAutoEqProfile(initialAutoEqEnabled && initialAutoEqProfile ? initialAutoEqProfile : '')
+        .catch(() => {});
+    }
+
     const unsubSettings = useSettingsStore.subscribe((state, prevState) => {
       if (!engine) return;
 
@@ -102,18 +176,189 @@ export function useAudioController() {
         );
       }
 
-      // AutoEQ profile
-      if (state.settings['dsp.autoEqSelectedProfile'] !== prevState?.settings?.['dsp.autoEqSelectedProfile']) {
+      // AutoEQ profile & enable/disable toggle -> update both audioEngine & playerStore.activeAutoEqProfile
+      if (
+        state.settings['dsp.autoEqSelectedProfile'] !== prevState?.settings?.['dsp.autoEqSelectedProfile'] ||
+        state.settings['dsp.autoEqEnabled'] !== prevState?.settings?.['dsp.autoEqEnabled']
+      ) {
+        const autoEqEnabled = Boolean(state.settings['dsp.autoEqEnabled']);
         const profile = state.settings['dsp.autoEqSelectedProfile'];
-        if (state.settings['dsp.autoEqEnabled'] && profile) {
-          engine.loadAutoEqProfile(profile).catch(() => {});
-        }
+        void usePlayerStore
+          .getState()
+          .loadAutoEqProfile(autoEqEnabled && profile ? profile : '')
+          .catch(() => {});
       }
     });
 
     return () => {
       if (unsubEnded) unsubEnded();
       unsubSettings();
+    };
+  }, []);
+
+  // 3B. Listen Together party state sync for Discord Join button + Discord Rich Presence lifecycle
+  useEffect(() => {
+    const rpc = discordRpcRef.current ?? (discordRpcRef.current = new DiscordRpcService());
+    let scrubDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastPush = {
+      videoId: null as string | null,
+      isPlaying: false,
+      posMs: 0,
+      pushedAtMs: 0,
+    };
+
+    const clearScrubTimer = () => {
+      if (scrubDebounceTimer !== null) {
+        clearTimeout(scrubDebounceTimer);
+        scrubDebounceTimer = null;
+      }
+    };
+
+    const pushDiscordPlayback = (overridePosMs?: number) => {
+      const settings = useSettingsStore.getState().settings;
+      const p = usePlayerStore.getState();
+      if (!settings['scrobble.discordRpcEnabled'] || !p.currentTrack) {
+        lastPush = { videoId: null, isPlaying: false, posMs: 0, pushedAtMs: 0 };
+        rpc.clearActivity();
+        return;
+      }
+
+      const rawPosMs =
+        overridePosMs ??
+        (p.isScrubbing
+          ? p.positionMs
+          : p.audioEngine
+          ? p.audioEngine.getCurrentPositionMs()
+          : p.positionMs);
+      const posMs = Math.max(0, Math.round(Number.isFinite(rawPosMs) ? rawPosMs : 0));
+      const engineDurMs = p.audioEngine ? p.audioEngine.getCurrentDurationMs() : 0;
+      const durMs =
+        engineDurMs > 0
+          ? engineDurMs
+          : p.durationMs > 0
+          ? p.durationMs
+          : Math.round(resolveDurationSec(p.currentTrack.durationSec, 0) * 1000);
+      const isPlaying = p.playbackState === 'PLAYING';
+      const activeQuality = p.activeStreamQuality || p.currentTrack.sourceQuality;
+
+      rpc.updatePlayback(
+        {
+          ...p.currentTrack,
+          sourceQuality: activeQuality,
+        },
+        posMs,
+        durMs,
+        isPlaying,
+        1.0
+      );
+      lastPush = {
+        videoId: p.currentTrack.videoId,
+        isPlaying,
+        posMs,
+        pushedAtMs: Date.now(),
+      };
+    };
+
+    // Initial mount config & party state (usePartyStore already manages player playback sync via attachPlayerStoreSync)
+    const initialParty = usePartyStore.getState();
+    rpc.setPartyState(
+      initialParty.status === 'connected' ? initialParty.partyCode : null,
+      initialParty.lanUrl
+    );
+    const initialConfig = buildDiscordConfig(useSettingsStore.getState().settings);
+    rpc.configure(initialConfig);
+    if (!initialConfig.enabled || !usePlayerStore.getState().currentTrack) {
+      rpc.clearActivity();
+    } else {
+      pushDiscordPlayback();
+    }
+
+    const unsubParty = usePartyStore.subscribe((party, prevParty) => {
+      if (
+        party.status === prevParty?.status &&
+        party.partyCode === prevParty?.partyCode &&
+        party.lanUrl === prevParty?.lanUrl
+      ) {
+        return;
+      }
+      rpc.setPartyState(party.status === 'connected' ? party.partyCode : null, party.lanUrl);
+      if (useSettingsStore.getState().settings['scrobble.discordRpcEnabled']) {
+        pushDiscordPlayback();
+      }
+    });
+
+    const unsubDiscordSettings = useSettingsStore.subscribe((state, prevState) => {
+      const changed = DISCORD_SETTING_KEYS.some(
+        (key) => state.settings[key] !== prevState?.settings?.[key]
+      );
+      if (!changed) return;
+
+      const cfg = buildDiscordConfig(state.settings);
+      rpc.configure(cfg);
+      if (!cfg.enabled) {
+        clearScrubTimer();
+        lastPush = { videoId: null, isPlaying: false, posMs: 0, pushedAtMs: 0 };
+        rpc.clearActivity();
+        return;
+      }
+      pushDiscordPlayback();
+    });
+
+    const unsubPlayerRpc = usePlayerStore.subscribe((state, prevState) => {
+      const trackChanged = state.currentTrack?.videoId !== prevState?.currentTrack?.videoId;
+      if (!state.currentTrack) {
+        if (trackChanged) {
+          clearScrubTimer();
+          lastPush = { videoId: null, isPlaying: false, posMs: 0, pushedAtMs: 0 };
+          rpc.clearActivity();
+        }
+        return;
+      }
+
+      if (!useSettingsStore.getState().settings['scrobble.discordRpcEnabled']) {
+        return;
+      }
+
+      const playStateChanged = state.playbackState !== prevState?.playbackState;
+      const qualityChanged = state.activeStreamQuality !== prevState?.activeStreamQuality;
+      const scrubCompleted = Boolean(prevState?.isScrubbing) && !state.isScrubbing;
+
+      if (trackChanged || playStateChanged || qualityChanged || scrubCompleted) {
+        clearScrubTimer();
+        pushDiscordPlayback(scrubCompleted ? state.positionMs : undefined);
+        return;
+      }
+
+      if (state.isScrubbing) {
+        if (state.positionMs !== prevState?.positionMs) {
+          clearScrubTimer();
+          scrubDebounceTimer = setTimeout(() => {
+            scrubDebounceTimer = null;
+            pushDiscordPlayback(usePlayerStore.getState().positionMs);
+          }, 400);
+        }
+        return;
+      }
+
+      if (state.positionMs !== prevState?.positionMs) {
+        const expectedPosMs = lastPush.isPlaying
+          ? lastPush.posMs + Math.max(0, Date.now() - lastPush.pushedAtMs)
+          : lastPush.posMs;
+        if (
+          lastPush.videoId !== state.currentTrack.videoId ||
+          Math.abs(state.positionMs - expectedPosMs) > 2000
+        ) {
+          pushDiscordPlayback(state.positionMs);
+        }
+      }
+    });
+
+    return () => {
+      clearScrubTimer();
+      unsubParty();
+      unsubDiscordSettings();
+      unsubPlayerRpc();
+      rpc.clearActivity();
     };
   }, []);
 
@@ -169,11 +414,12 @@ export function useAudioController() {
     } catch {}
   }, [currentTrack, playbackState]);
 
-  // 5. Real-media playback progress & throttled Zustand store synchronization (no synthetic progress)
+  // 5. Real-media playback progress, listening telemetry & throttled Zustand store synchronization (no synthetic progress)
   useEffect(() => {
     if (playbackState !== 'PLAYING') return;
 
     let lastStoreSyncTime = Date.now();
+    listenTelemetryRef.current.lastTickMs = lastStoreSyncTime;
 
     const timer = setInterval(() => {
       const state = usePlayerStore.getState();
@@ -198,6 +444,50 @@ export function useAudioController() {
         const storeTimeSec = state.positionMs / 1000;
 
         const now = Date.now();
+
+        // WS8 Listening telemetry: capped delta prevents OS sleep from inflating listened duration
+        const tel = listenTelemetryRef.current;
+        const trackId = state.currentTrack.videoId;
+        if (tel.videoId !== trackId) {
+          tel.videoId = trackId;
+          tel.listenedSec = 0;
+          tel.recordedForPlay = false;
+          tel.lastEngineTimeSec = engineTimeSec;
+          tel.lastTickMs = now;
+        } else if (
+          tel.recordedForPlay &&
+          engineTimeSec < 3 &&
+          (tel.lastEngineTimeSec >= 3 || engineTimeSec + 0.5 < tel.lastEngineTimeSec)
+        ) {
+          tel.listenedSec = 0;
+          tel.recordedForPlay = false;
+          tel.lastEngineTimeSec = engineTimeSec;
+          tel.lastTickMs = now;
+        }
+
+        const dtSec =
+          tel.lastTickMs > 0 ? Math.min(1.0, Math.max(0, (now - tel.lastTickMs) / 1000)) : 0;
+        tel.listenedSec += dtSec;
+        tel.lastEngineTimeSec = engineTimeSec;
+        tel.lastTickMs = now;
+
+        const durSec = resolveDurationSec(state.currentTrack.durationSec, nextDur);
+        if (
+          !tel.recordedForPlay &&
+          (tel.listenedSec >= 30 || (durSec > 0 && tel.listenedSec >= durSec * 0.5))
+        ) {
+          tel.recordedForPlay = true;
+          void useLibraryStore
+            .getState()
+            .recordListeningHistory(
+              {
+                ...state.currentTrack,
+                sourceQuality: state.activeStreamQuality || state.currentTrack.sourceQuality,
+              },
+              Math.round(Math.max(1, tel.listenedSec))
+            )
+            .catch(() => {});
+        }
         // Drift Watchdog: snap store + lyric visualizer if >1.0s out of sync
         if (
           !state.isScrubbing &&

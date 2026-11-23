@@ -1,5 +1,6 @@
 // src/ui/player/EqualizerModal.tsx
-// Floating Liquid Glass modal for 10-band SVF equalizer, live 17,703 AutoEQ database search, and Spatial Audio
+// Floating Liquid Glass modal for interactive 10-band SVF equalizer curve,
+// live 17,703 AutoEQ database search, and Spatial Audio
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -11,21 +12,41 @@ import {
   RotateCcw,
   Search,
   Check,
-  ChevronDown,
 } from 'lucide-react';
 import { usePlayerStore } from '../../state/playerStore';
 import { useSettingsStore } from '../../state/settingsStore';
-import { FACTORY_EQ_PRESETS, EQ_FREQUENCIES_HZ } from '../../audio/DspChain';
-import { AutoEqLoader, type AutoEqSearchResult } from '../../audio/AutoEqLoader';
+import { FACTORY_EQ_PRESETS } from '../../audio/DspChain';
+import {
+  AutoEqLoader,
+  extractMeasurementRig,
+  type AutoEqSearchResult,
+} from '../../audio/AutoEqLoader';
+import { InteractiveEqGraph } from '../components/InteractiveEqGraph';
 
 export interface EqualizerModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
+const POPULAR_HEADPHONES = [
+  'Sony WH-CH720N',
+  'Sony WH-1000XM4',
+  'Sennheiser HD 600',
+  'Beyerdynamic DT 770 Pro (80 Ohm)',
+  'Apple AirPods Pro 2',
+  'Apple AirPods Max',
+  'Audio-Technica ATH-M50x',
+  'Bose QuietComfort 45',
+] as const;
+
 export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose }) => {
-  const { setEqualizerBands, loadAutoEqProfile, setSpatialAudio } = usePlayerStore();
-  const { settings, updateSettings } = useSettingsStore();
+  const setEqualizerBands = usePlayerStore((s) => s.setEqualizerBands);
+  const loadAutoEqProfile = usePlayerStore((s) => s.loadAutoEqProfile);
+  const setSpatialAudio = usePlayerStore((s) => s.setSpatialAudio);
+  const activeAutoEqProfile = usePlayerStore((s) => s.activeAutoEqProfile);
+
+  const settings = useSettingsStore((s) => s.settings);
+  const updateSettings = useSettingsStore((s) => s.updateSettings);
 
   const [activePreset, setActivePreset] = useState<string>(
     settings['dsp.equalizerPreset'] || 'Flat'
@@ -36,46 +57,58 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
       : [...FACTORY_EQ_PRESETS.Flat]
   );
   const [spatialWidth, setSpatialWidth] = useState<number>(settings['dsp.spatialWidthGain'] || 2.5);
-  const [spatialEnabled, setSpatialEnabled] = useState<boolean>(settings['dsp.spatialAudioEnabled'] ?? true);
-  const [selectedAutoEq, setSelectedAutoEq] = useState<string>(settings['dsp.autoEqSelectedProfile'] || '');
+  const [spatialEnabled, setSpatialEnabled] = useState<boolean>(
+    settings['dsp.spatialAudioEnabled'] ?? true
+  );
+  const [selectedAutoEq, setSelectedAutoEq] = useState<string>(
+    settings['dsp.autoEqEnabled'] ? settings['dsp.autoEqSelectedProfile'] || '' : ''
+  );
 
   // Live AutoEQ Search State across 17,703 profiles
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<AutoEqSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const searchContainerRef = useRef<HTMLDivElement | null>(null);
+  const [autoEqFeedback, setAutoEqFeedback] = useState<string | null>(null);
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeqRef = useRef<number>(0);
+  const autoHydratedProfileRef = useRef<string | null>(null);
 
-  const popularHeadphones = [
-    'Sennheiser HD 600',
-    'Sony WH-1000XM4',
-    'Apple AirPods Max',
-    'Audio-Technica ATH-M50x',
-    'Beyerdynamic DT 770 Pro',
-    'Bose QuietComfort 45',
-  ];
-
-  // Sync settings when opened
+  // Sync settings when opened or changed externally
   useEffect(() => {
-    if (isOpen) {
-      if (settings['dsp.equalizerBands'] && settings['dsp.equalizerBands'].length === 10) {
-        setBands(settings['dsp.equalizerBands']);
-      }
-      if (settings['dsp.equalizerPreset']) {
-        setActivePreset(settings['dsp.equalizerPreset']);
-      }
-      if (settings['dsp.autoEqSelectedProfile'] !== undefined) {
-        setSelectedAutoEq(settings['dsp.autoEqSelectedProfile'] || '');
-      }
-      if (settings['dsp.spatialAudioEnabled'] !== undefined) {
-        setSpatialEnabled(settings['dsp.spatialAudioEnabled']);
-      }
-      if (settings['dsp.spatialWidthGain'] !== undefined) {
-        setSpatialWidth(settings['dsp.spatialWidthGain']);
-      }
+    if (!isOpen) return;
+    if (settings['dsp.equalizerBands'] && settings['dsp.equalizerBands'].length === 10) {
+      setBands([...settings['dsp.equalizerBands']]);
     }
-  }, [isOpen, settings]);
+    if (settings['dsp.equalizerPreset']) {
+      setActivePreset(settings['dsp.equalizerPreset']);
+    }
+    const enabled = Boolean(settings['dsp.autoEqEnabled']);
+    const savedProfile = enabled ? settings['dsp.autoEqSelectedProfile'] || '' : '';
+    setSelectedAutoEq(savedProfile);
+    if (
+      enabled &&
+      savedProfile &&
+      !activeAutoEqProfile &&
+      autoHydratedProfileRef.current !== savedProfile
+    ) {
+      autoHydratedProfileRef.current = savedProfile;
+      void loadAutoEqProfile(savedProfile);
+    }
+    if (settings['dsp.spatialAudioEnabled'] !== undefined) {
+      setSpatialEnabled(Boolean(settings['dsp.spatialAudioEnabled']));
+    }
+    if (settings['dsp.spatialWidthGain'] !== undefined) {
+      setSpatialWidth(settings['dsp.spatialWidthGain']);
+    }
+  }, [isOpen, settings, activeAutoEqProfile, loadAutoEqProfile]);
+
+  useEffect(() => {
+    if (activeAutoEqProfile?.name) {
+      setSelectedAutoEq(activeAutoEqProfile.name);
+    } else if (!settings['dsp.autoEqEnabled']) {
+      setSelectedAutoEq('');
+    }
+  }, [activeAutoEqProfile, settings]);
 
   // Close on Escape key
   useEffect(() => {
@@ -87,45 +120,44 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Click outside search dropdown to close
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
-        setIsDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  // Debounced AutoEQ search
+  // Debounced live AutoEQ search
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
+      searchTimeoutRef.current = null;
     }
 
-    if (!searchQuery.trim()) {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      searchSeqRef.current += 1;
       setSearchResults([]);
       setIsSearching(false);
       return;
     }
 
+    const seq = ++searchSeqRef.current;
     setIsSearching(true);
     searchTimeoutRef.current = setTimeout(async () => {
       try {
-        const results = await AutoEqLoader.searchHeadphones(searchQuery.trim(), 30);
-        setSearchResults(results);
-        setIsDropdownOpen(true);
+        const results = await AutoEqLoader.searchHeadphones(trimmed, 30);
+        if (seq === searchSeqRef.current) {
+          setSearchResults(Array.isArray(results) ? results : []);
+        }
       } catch {
-        setSearchResults([]);
+        if (seq === searchSeqRef.current) {
+          setSearchResults([]);
+        }
       } finally {
-        setIsSearching(false);
+        if (seq === searchSeqRef.current) {
+          setIsSearching(false);
+        }
       }
-    }, 180);
+    }, 60);
 
     return () => {
       if (searchTimeoutRef.current) {
         clearTimeout(searchTimeoutRef.current);
+        searchTimeoutRef.current = null;
       }
     };
   }, [searchQuery]);
@@ -138,7 +170,7 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
     setBands(updated);
     setActivePreset('Custom');
     setEqualizerBands(updated);
-    updateSettings({
+    void updateSettings({
       'dsp.equalizerBands': updated,
       'dsp.equalizerPreset': 'Custom',
     });
@@ -151,7 +183,7 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
     setBands(cloned);
     setActivePreset(name);
     setEqualizerBands(cloned);
-    updateSettings({
+    void updateSettings({
       'dsp.equalizerBands': cloned,
       'dsp.equalizerPreset': name,
     });
@@ -164,7 +196,7 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
   const handleSpatialToggle = (enabled: boolean) => {
     setSpatialEnabled(enabled);
     setSpatialAudio(enabled, spatialWidth);
-    updateSettings({
+    void updateSettings({
       'dsp.spatialAudioEnabled': enabled,
     });
   };
@@ -175,32 +207,46 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
     if (spatialEnabled) {
       setSpatialAudio(true, clamped);
     }
-    updateSettings({
+    void updateSettings({
       'dsp.spatialWidthGain': clamped,
     });
   };
 
   const handleAutoEqSelect = async (profileName: string) => {
-    setSelectedAutoEq(profileName);
-    setIsDropdownOpen(false);
-    setSearchQuery('');
-    if (profileName) {
-      await loadAutoEqProfile(profileName);
-      updateSettings({
-        'dsp.autoEqEnabled': true,
-        'dsp.autoEqSelectedProfile': profileName,
-      });
-    } else {
-      updateSettings({
+    setAutoEqFeedback(null);
+    if (!profileName) {
+      autoHydratedProfileRef.current = null;
+      setSelectedAutoEq('');
+      setSearchQuery('');
+      setSearchResults([]);
+      await loadAutoEqProfile('');
+      await updateSettings({
         'dsp.autoEqEnabled': false,
         'dsp.autoEqSelectedProfile': null,
       });
+      return;
+    }
+
+    const ok = await loadAutoEqProfile(profileName);
+    const resolvedName = usePlayerStore.getState().activeAutoEqProfile?.name || profileName;
+    if (ok) {
+      autoHydratedProfileRef.current = resolvedName;
+      setSelectedAutoEq(resolvedName);
+      setSearchQuery('');
+      setSearchResults([]);
+      await updateSettings({
+        'dsp.autoEqEnabled': true,
+        'dsp.autoEqSelectedProfile': resolvedName,
+      });
+    } else {
+      setAutoEqFeedback(`Could not load AutoEQ profile for "${profileName}".`);
     }
   };
 
-  const formatFreqLabel = (hz: number) => {
-    return hz >= 1000 ? `${hz / 1000}k` : `${hz}`;
-  };
+  const activeAutoEqName = activeAutoEqProfile?.name || selectedAutoEq;
+  const activeAutoEqRig = activeAutoEqProfile?.source
+    ? extractMeasurementRig(activeAutoEqProfile.source).rig
+    : null;
 
   return (
     <div
@@ -232,6 +278,7 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
 
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={handleResetFlat}
               title="Reset EQ bands to 0 dB Flat"
               className="spring-press liquid-glass-pill flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold text-[var(--color-on-surface-variant)] hover:text-white transition-all cursor-pointer"
@@ -241,6 +288,7 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
             </button>
 
             <button
+              type="button"
               onClick={onClose}
               title="Close Equalizer"
               className="spring-press liquid-glass-pill p-1.5 rounded-full text-[var(--color-on-surface-variant)] hover:text-white transition-colors cursor-pointer"
@@ -252,7 +300,7 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
 
         {/* Modal Scrollable Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Section 1: 10-Band SVF Equalizer */}
+          {/* Section 1: Interactive 10-Band SVF Equalizer Curve */}
           <section className="liquid-glass-card p-5 rounded-2xl space-y-4">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div>
@@ -264,9 +312,10 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
 
               {/* Preset Selector Chips */}
               <div className="flex items-center gap-1.5 flex-wrap">
-                {Object.keys(FACTORY_EQ_PRESETS).slice(0, 8).map((pName) => (
+                {Object.keys(FACTORY_EQ_PRESETS).map((pName) => (
                   <button
                     key={pName}
+                    type="button"
                     onClick={() => handleSelectPreset(pName)}
                     className={`spring-press px-3 py-1 rounded-full text-xs font-medium transition-all cursor-pointer ${
                       activePreset === pName
@@ -280,43 +329,19 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
               </div>
             </div>
 
-            {/* 10 Vertical Band Sliders */}
-            <div className="grid grid-cols-10 gap-2 h-56 items-end pt-4 pb-2 px-2 border-t border-white/10">
-              {EQ_FREQUENCIES_HZ.map((freq, idx) => {
-                const gain = bands[idx] ?? 0;
-                return (
-                  <div key={freq} className="flex flex-col items-center gap-2 h-full justify-between">
-                    <span className="text-[10px] font-mono font-semibold text-[var(--color-accent)]">
-                      {gain > 0 ? `+${gain.toFixed(1)}` : gain.toFixed(1)}
-                    </span>
-
-                    <div className="relative flex-1 flex items-center justify-center w-full">
-                      <input
-                        type="range"
-                        min="-12"
-                        max="12"
-                        step="0.5"
-                        value={gain}
-                        onChange={(e) => handleBandChange(idx, parseFloat(e.target.value))}
-                        className="h-36 w-1.5 accent-[var(--color-accent)] bg-white/15 rounded-full cursor-pointer appearance-none -rotate-90"
-                        style={{ transformOrigin: 'center' }}
-                      />
-                    </div>
-
-                    <span className="text-[11px] font-mono font-medium text-[var(--color-on-surface-variant)]">
-                      {formatFreqLabel(freq)}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
+            <InteractiveEqGraph
+              bands={bands}
+              onChangeBand={handleBandChange}
+              activeAutoEqProfile={activeAutoEqProfile}
+              heightClassName="h-56"
+            />
           </section>
 
           {/* Section 2: AutoEQ Search across 17,703 Profiles & Spatial Audio */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* AutoEQ Search & Calibration Card */}
             <section className="liquid-glass-card p-5 rounded-2xl space-y-4 relative">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <div className="p-2 rounded-xl bg-purple-500/15 text-purple-400">
                     <Headphones size={18} />
@@ -328,91 +353,75 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
                     </p>
                   </div>
                 </div>
-
-                {selectedAutoEq && (
-                  <button
-                    onClick={() => handleAutoEqSelect('')}
-                    className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer"
-                  >
-                    Clear Profile
-                  </button>
-                )}
               </div>
 
-              {/* Active Profile Banner */}
-              {selectedAutoEq ? (
-                <div className="flex items-center justify-between p-2.5 rounded-xl bg-purple-500/15 border border-purple-500/30">
-                  <div className="flex items-center gap-2">
-                    <Check size={14} className="text-purple-400" />
-                    <span className="text-xs font-semibold text-white truncate max-w-[200px]">
-                      {selectedAutoEq}
-                    </span>
+              {/* Active Profile Pill with Disable AutoEQ */}
+              {activeAutoEqName ? (
+                <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-purple-500/15 border border-purple-500/35">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Check size={14} className="text-purple-300 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-white truncate">
+                        {activeAutoEqName}
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[10px] text-purple-200/80 font-mono">
+                        {activeAutoEqRig && <span>{activeAutoEqRig}</span>}
+                        {activeAutoEqProfile && (
+                          <span>
+                            • Preamp {activeAutoEqProfile.preampGainDb > 0 ? '+' : ''}
+                            {activeAutoEqProfile.preampGainDb.toFixed(1)} dB
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <span className="text-[10px] text-purple-300 font-mono">Calibrated</span>
+                  <button
+                    type="button"
+                    onClick={() => void handleAutoEqSelect('')}
+                    className="px-2.5 py-1 rounded-full bg-white/10 hover:bg-red-500/30 border border-white/15 text-[11px] font-semibold text-white transition-colors cursor-pointer shrink-0"
+                  >
+                    Disable AutoEQ
+                  </button>
                 </div>
               ) : null}
 
-              {/* Searchable Input with Debounced Typeahead */}
-              <div ref={searchContainerRef} className="relative space-y-2">
-                <label className="text-xs font-semibold text-[var(--color-on-surface-variant)] block">
+              {/* Live Search Input & Instant Scrollable Results */}
+              <div className="space-y-2">
+                <label
+                  htmlFor="autoeq-search-modal"
+                  className="text-xs font-semibold text-[var(--color-on-surface-variant)] block"
+                >
                   Search Headphone Model
                 </label>
                 <div className="relative">
                   <Search
                     size={14}
-                    className="absolute left-3 top-2.5 text-[var(--color-on-surface-variant)]"
+                    className="pointer-events-none absolute left-3 top-2.5 text-[var(--color-on-surface-variant)]"
                   />
                   <input
+                    id="autoeq-search-modal"
                     type="text"
+                    spellCheck={false}
+                    autoComplete="off"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    onFocus={() => {
-                      if (searchResults.length > 0) setIsDropdownOpen(true);
-                    }}
-                    placeholder="e.g. Sennheiser HD 600, AirPods, Sony..."
-                    className="w-full pl-8 pr-8 py-2 bg-white/5 border border-white/10 rounded-xl text-xs text-white placeholder-white/30 focus:outline-none focus:border-[var(--color-accent)]"
+                    placeholder="e.g. Sony WH-CH720N, Sennheiser HD 600, AirPods..."
+                    className="w-full pl-8 pr-8 py-2 bg-white/5 border border-white/10 rounded-xl text-xs text-white placeholder-white/35 focus:outline-none focus:border-[var(--color-accent)]"
                   />
                   {searchQuery && (
                     <button
+                      type="button"
+                      aria-label="Clear AutoEQ search"
                       onClick={() => {
                         setSearchQuery('');
                         setSearchResults([]);
                       }}
-                      className="absolute right-2.5 top-2.5 text-[var(--color-on-surface-variant)] hover:text-white"
+                      className="absolute right-2.5 top-2.5 text-[var(--color-on-surface-variant)] hover:text-white cursor-pointer"
                     >
                       <X size={13} />
                     </button>
                   )}
                 </div>
-
-                {/* Dropdown Results across 17,703 profiles */}
-                {isDropdownOpen && searchResults.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1.5 max-h-48 overflow-y-auto bg-[#141419] border border-white/15 rounded-xl shadow-2xl z-30 divide-y divide-white/5">
-                    {searchResults.map((res) => (
-                      <button
-                        key={`${res.id}-${res.name}`}
-                        onClick={() => handleAutoEqSelect(res.name)}
-                        className="w-full text-left px-3.5 py-2 hover:bg-white/10 flex items-center justify-between text-xs transition-colors cursor-pointer group"
-                      >
-                        <span className="font-medium text-white group-hover:text-[var(--color-accent)] truncate mr-2">
-                          {res.name}
-                        </span>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {res.meta && (
-                            <span className="text-[10px] text-[var(--color-on-surface-variant)]">
-                              {res.meta}
-                            </span>
-                          )}
-                          {res.parametric && (
-                            <span className="text-[9px] px-1 py-0.2 bg-purple-500/20 text-purple-300 rounded font-mono">
-                              PaP
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
 
                 {isSearching && (
                   <p className="text-[10px] text-[var(--color-on-surface-variant)] italic">
@@ -420,25 +429,71 @@ export const EqualizerModal: React.FC<EqualizerModalProps> = ({ isOpen, onClose 
                   </p>
                 )}
 
+                {/* Instant Scrollable Live Results List */}
+                {searchQuery.trim().length > 0 && !isSearching && (
+                  <div className="max-h-48 overflow-y-auto bg-[#141419] border border-white/15 rounded-xl shadow-xl divide-y divide-white/5">
+                    {searchResults.length > 0 ? (
+                      searchResults.map((res) => {
+                        const rig = extractMeasurementRig(res.meta).rig;
+                        return (
+                          <button
+                            key={`${res.id}-${res.name}`}
+                            type="button"
+                            onClick={() => void handleAutoEqSelect(res.name)}
+                            className="w-full text-left px-3.5 py-2 hover:bg-white/10 flex items-center justify-between gap-2 text-xs transition-colors cursor-pointer group"
+                          >
+                            <span className="font-medium text-white group-hover:text-[var(--color-accent)] truncate">
+                              {res.name}
+                            </span>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-neutral-200 font-medium">
+                                {rig}
+                              </span>
+                              {res.parametric && (
+                                <span className="text-[9px] px-1.5 py-0.5 bg-purple-500/20 text-purple-300 rounded font-mono">
+                                  PaP
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="px-3.5 py-3 text-xs text-[var(--color-on-surface-variant)]">
+                        No matching headphone profiles found for &ldquo;{searchQuery.trim()}&rdquo;.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {autoEqFeedback && (
+                  <p className="text-[11px] text-amber-300">{autoEqFeedback}</p>
+                )}
+
                 {/* Popular Quick-Select Chips */}
                 <div className="pt-2">
                   <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] block mb-1.5">
-                    Popular Benchmarks:
+                    Popular Models:
                   </span>
                   <div className="flex flex-wrap gap-1.5">
-                    {popularHeadphones.map((hp) => (
-                      <button
-                        key={hp}
-                        onClick={() => handleAutoEqSelect(hp)}
-                        className={`text-[10px] px-2.5 py-1 rounded-full transition-all cursor-pointer ${
-                          selectedAutoEq === hp
-                            ? 'bg-purple-500 text-white font-semibold'
-                            : 'liquid-glass-pill text-[var(--color-on-surface-variant)] hover:text-white'
-                        }`}
-                      >
-                        {hp}
-                      </button>
-                    ))}
+                    {POPULAR_HEADPHONES.map((hp) => {
+                      const isActiveChip =
+                        activeAutoEqName.toLowerCase() === hp.toLowerCase();
+                      return (
+                        <button
+                          key={hp}
+                          type="button"
+                          onClick={() => void handleAutoEqSelect(hp)}
+                          className={`text-[10px] px-2.5 py-1 rounded-full transition-all cursor-pointer ${
+                            isActiveChip
+                              ? 'bg-purple-500 text-white font-semibold'
+                              : 'liquid-glass-pill text-[var(--color-on-surface-variant)] hover:text-white'
+                          }`}
+                        >
+                          {hp}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </div>

@@ -1,4 +1,5 @@
 import type { LyricLine, Lyrics, LyricsSourceKind, LyricWord } from './models';
+import { mapRomanizedWords } from '../../utils/transliterate';
 
 const VOWEL_CLUSTER_REGEX = /[aeiouy\u00C0-\u024F]+/gi;
 const STRONG_PUNCT_REGEX = /[.!?;:]$/;
@@ -64,12 +65,21 @@ export function synthesizeWordsForLine(line: LyricLine): LyricLine {
     cursor = wordEnd;
   }
 
+  const romanizedWords =
+    line.romanizedWords && line.romanizedWords.length > 0
+      ? line.romanizedWords
+      : line.romanizedText
+      ? mapRomanizedWords(words, line.romanizedText, lineStart, lineEnd)
+      : undefined;
+
   return {
+    ...line,
     startSeconds: lineStart,
     endSeconds: lineEnd,
     text: line.text,
     words,
     isSynthesizedWords: true,
+    ...(romanizedWords !== undefined ? { romanizedWords } : {}),
   };
 }
 

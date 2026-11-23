@@ -8,11 +8,13 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   formatTimestamp,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -24,6 +26,7 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
 
   private scrollY = 0;
   private initialized = false;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'p3-amber') return 1;
@@ -37,12 +40,15 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
       fontSizeMultiplier: 0.94,
       fontFamilyOverride: `"JetBrains Mono", ${frame.fontFamily}`,
       maxLineWidthRatio: 0.78,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
   reset(): void {
     this.scrollY = 0;
     this.initialized = false;
+    this.lastKnownActiveIdx = -1;
   }
 
   render(
@@ -118,12 +124,30 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height, '> AWAITING SIGNAL_');
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, phosphor);
+      } else {
+        drawEmptyState(ctx, frame, width, height, '> AWAITING SIGNAL_');
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -158,11 +182,6 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
       : (varIdx === 2 ? 2.1 : 1.1) + (frame.audio.beatDetected ? 0.75 : 0);
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -176,8 +195,9 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
       ctx.globalAlpha = 0.82 * flicker;
       const modeLabel =
         varIdx === 0 ? 'P31-PHOSPHOR' : varIdx === 1 ? 'P3-AMBER' : 'TRINITRON-RGB';
+      const channelTag = hasActiveLine ? String(scrollIdx + 1).padStart(2, '0') : '--';
       ctx.fillText(
-        `SYS://LYRIC-CRT [${modeLabel}]  CH:${String(activeIdx + 1).padStart(2, '0')}  T+${formatTimestamp(frame.timeSeconds)}`,
+        `SYS://LYRIC-CRT [${modeLabel}]  CH:${channelTag}  T+${formatTimestamp(frame.timeSeconds)}`,
         padX,
         Math.max(24, height * 0.11)
       );
@@ -186,13 +206,22 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
       const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
-      const screenY = cy + lineCenterOffset - line.height * 0.5;
+      const gapOffset =
+        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+          ? i <= scrollIdx
+            ? -58
+            : 58
+          : 0;
+      const screenY = cy + lineCenterOffset - line.height * 0.5 + gapOffset;
 
       if (screenY + line.height < -60 || screenY > height + 60) continue;
-      if (!isBrowsing && Math.abs(i - activeIdx) > 1) continue;
+      if (!isBrowsing && Math.abs(i - scrollIdx) > 1) continue;
 
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
       const lineBaseX = isCenterAlign ? Math.max(padX, line.x) : padX;
 
       const hitLocalX = Math.max(12, lineBaseX - fontSize);
@@ -260,6 +289,17 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
             ctx.fillText(word.text, wx, wy);
           }
         }
+
+        if (secondaryText) {
+          const secFont = Math.max(11, Math.round(fontSize * 0.44));
+          ctx.save();
+          ctx.font = `500 ${secFont}px ${monoFamily}`;
+          ctx.fillStyle = phosphorUpcoming;
+          ctx.shadowBlur = 0;
+          ctx.globalAlpha = 0.72 * frame.lineFadeAlpha * flicker;
+          ctx.fillText(secondaryText, lineBaseX, screenY + line.height + 4);
+          ctx.restore();
+        }
       } else {
         const subScale = isBrowsing ? 0.86 : 0.66;
         const subFont = Math.max(13, Math.round(fontSize * subScale));
@@ -277,5 +317,9 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, phosphor);
+    }
   }
 }

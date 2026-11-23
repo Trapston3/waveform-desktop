@@ -1,7 +1,7 @@
 // src/App.tsx
 // Root application workstation shell integrating navigation, audio controller, modals, and desktop ergonomics
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import { DesktopTitleBar } from './ui/layout/DesktopTitleBar';
 import { LeftSidebar, NavTab } from './ui/layout/LeftSidebar';
 import { MainViewport } from './ui/layout/MainViewport';
@@ -21,6 +21,7 @@ import { useContextMenu } from './ui/hooks/useContextMenu';
 
 import { SettingsModal } from './ui/common/SettingsModal';
 import { CreatePlaylistModal } from './ui/common/CreatePlaylistModal';
+import { ErrorBoundary } from './ui/common/ErrorBoundary';
 import { NowPlayingScreen } from './ui/player/NowPlayingScreen';
 import { ReplayStoriesModal } from './ui/player/ReplayStoriesModal';
 import { EqualizerModal } from './ui/player/EqualizerModal';
@@ -71,7 +72,12 @@ export const App: React.FC = () => {
 
   // 5. Library & Ambient portal store state
   const monthlyStats = useLibraryStore((s) => s.monthlyStats);
+  const yearlyReplayStats = useLibraryStore((s) => s.yearlyReplayStats);
   const isAmbientOpen = useLyricVisualizerStore((s) => s.isAmbientOpen);
+
+  const handleCloseReplay = useCallback(() => {
+    setReplayOpen(false);
+  }, [setReplayOpen]);
 
   // Inspector is open if either lyrics or queue is toggled and not in compact mode
   const isInspectorOpen = (isLyricsDrawerOpen || isQueueDrawerOpen) && dimensions.layoutMode !== 'compact';
@@ -174,11 +180,19 @@ export const App: React.FC = () => {
         onClose={() => setNowPlayingModalOpen(false)}
       />
 
-      <ReplayStoriesModal
-        isOpen={isReplayOpen}
-        onClose={() => setReplayOpen(false)}
-        monthlyStats={monthlyStats}
-      />
+      <ErrorBoundary
+        onClose={handleCloseReplay}
+        onReset={handleCloseReplay}
+        resetKey={isReplayOpen}
+        title="2026 Replay couldn't open"
+      >
+        <ReplayStoriesModal
+          isOpen={isReplayOpen}
+          onClose={handleCloseReplay}
+          yearlyStats={yearlyReplayStats}
+          monthlyStats={monthlyStats}
+        />
+      </ErrorBoundary>
 
       <EqualizerModal
         isOpen={isEqualizerOpen}

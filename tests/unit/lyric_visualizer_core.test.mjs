@@ -379,6 +379,105 @@ test('SyncEngine handles monotonic extrapolation, offset clamping, seek snaps, a
   assert.equal(f4.activeLineIndex, 1);
 });
 
+test('SyncEngine computes isInstrumentalGap, gapProgress, timeUntilNextLine, hasLyrics, lastActiveLineIndex, and nextLineIndex', () => {
+  const engine = new SyncEngine();
+  const track = { id: 'gap-track', title: 'Gap Song', artist: 'Tester', durationSeconds: 60 };
+
+  // 1. Empty / null lyrics -> hasLyrics: false, isInstrumentalGap: true
+  const emptyRes = engine.update(
+    { track, positionSeconds: 4.0, isPlaying: true, playbackRate: 1, timestampMs: 1000 },
+    null,
+    1000,
+  );
+  assert.equal(emptyRes.hasLyrics, false);
+  assert.equal(emptyRes.isInstrumentalGap, true);
+  assert.equal(emptyRes.gapProgress, 0);
+  assert.equal(emptyRes.timeUntilNextLine, Number.POSITIVE_INFINITY);
+  assert.equal(emptyRes.lastActiveLineIndex, -1);
+  assert.equal(emptyRes.nextLineIndex, -1);
+
+  const gapLyrics = {
+    providerName: 'Test',
+    sourceKind: 'WordSynced',
+    lines: [
+      {
+        startSeconds: 6.0,
+        endSeconds: 9.0,
+        text: 'First vocal line',
+        isSynthesizedWords: false,
+        words: [
+          { text: 'First', startSeconds: 6.0, endSeconds: 7.5 },
+          { text: 'vocal', startSeconds: 7.5, endSeconds: 9.0 },
+        ],
+      },
+      {
+        startSeconds: 19.0,
+        endSeconds: 22.0,
+        text: 'Second vocal line',
+        isSynthesizedWords: false,
+        words: [
+          { text: 'Second', startSeconds: 19.0, endSeconds: 20.5 },
+          { text: 'line', startSeconds: 20.5, endSeconds: 22.0 },
+        ],
+      },
+    ],
+  };
+
+  // 2. Intro (>3s before line 0): t = 3.0s / 6.0s -> gapProgress 0.5, timeUntilNextLine 3.0
+  const introRes = engine.update(
+    { track, positionSeconds: 3.0, isPlaying: false, playbackRate: 1, timestampMs: 1000, didSeek: true },
+    gapLyrics,
+    1000,
+  );
+  assert.equal(introRes.hasLyrics, true);
+  assert.equal(introRes.isInstrumentalGap, true);
+  assert.equal(introRes.activeLineIndex, -1);
+  assert.equal(introRes.lastActiveLineIndex, -1);
+  assert.equal(introRes.nextLineIndex, 0);
+  assert.ok(Math.abs(introRes.gapProgress - 0.5) < 1e-6);
+  assert.ok(Math.abs(introRes.timeUntilNextLine - 3.0) < 1e-6);
+
+  // 3. Active vocal line (6.0..9.0s): t = 7.0s -> isInstrumentalGap: false
+  const vocalRes = engine.update(
+    { track, positionSeconds: 7.0, isPlaying: false, playbackRate: 1, timestampMs: 2000, didSeek: true },
+    gapLyrics,
+    2000,
+  );
+  assert.equal(vocalRes.hasLyrics, true);
+  assert.equal(vocalRes.isInstrumentalGap, false);
+  assert.equal(vocalRes.activeLineIndex, 0);
+  assert.equal(vocalRes.lastActiveLineIndex, 0);
+  assert.equal(vocalRes.nextLineIndex, 1);
+
+  // 4. Mid-song instrumental gap (9.0..19.0s, >= 3.5s): t = 14.0s -> gapProgress 0.5, timeUntilNextLine 5.0
+  const midGapRes = engine.update(
+    { track, positionSeconds: 14.0, isPlaying: false, playbackRate: 1, timestampMs: 3000, didSeek: true },
+    gapLyrics,
+    3000,
+  );
+  assert.equal(midGapRes.hasLyrics, true);
+  assert.equal(midGapRes.isInstrumentalGap, true);
+  assert.equal(midGapRes.activeLineIndex, -1);
+  assert.equal(midGapRes.lastActiveLineIndex, 0);
+  assert.equal(midGapRes.nextLineIndex, 1);
+  assert.ok(Math.abs(midGapRes.gapProgress - 0.5) < 1e-6);
+  assert.ok(Math.abs(midGapRes.timeUntilNextLine - 5.0) < 1e-6);
+
+  // 5. Outro after last line (>22.0s): t = 28.0s
+  const outroRes = engine.update(
+    { track, positionSeconds: 28.0, isPlaying: false, playbackRate: 1, timestampMs: 4000, didSeek: true },
+    gapLyrics,
+    4000,
+  );
+  assert.equal(outroRes.hasLyrics, true);
+  assert.equal(outroRes.isInstrumentalGap, true);
+  assert.equal(outroRes.activeLineIndex, -1);
+  assert.equal(outroRes.lastActiveLineIndex, 1);
+  assert.equal(outroRes.nextLineIndex, -1);
+  assert.equal(outroRes.gapProgress, 1);
+  assert.equal(outroRes.timeUntilNextLine, Number.POSITIVE_INFINITY);
+});
+
 // ---------------------------------------------------------------------------
 // 6. LyricsPipeline
 // ---------------------------------------------------------------------------

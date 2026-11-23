@@ -531,7 +531,7 @@ export class AutoEqProcessor {
         const sqrtA2Alpha = 2 * Math.sqrt(A) * alpha;
         b0 = A * ((A + 1) + (A - 1) * cosW0 + sqrtA2Alpha);
         b1 = -2 * A * ((A - 1) + (A + 1) * cosW0);
-        b2 = A * ((A + 1) - (A - 1) * cosW0 - sqrtA2Alpha);
+        b2 = A * ((A + 1) + (A - 1) * cosW0 - sqrtA2Alpha);
         a0 = (A + 1) - (A - 1) * cosW0 + sqrtA2Alpha;
         a1 = 2 * ((A - 1) - (A + 1) * cosW0);
         a2 = (A + 1) - (A - 1) * cosW0 - sqrtA2Alpha;
@@ -842,4 +842,58 @@ export class DspChain {
     // 5. Lookahead Peak Limiter (0.985 Ceiling)
     return this.limiter.processStereo(eqL, eqR);
   }
+}
+
+/**
+ * Evaluates exact combined magnitude frequency response (in dB) of an AutoEQ filter cascade + preamp
+ * across a supplied frequency grid, suitable for real-time EQ/AutoEQ curve plotting.
+ */
+export function computeBiquadMagnitudeDb(
+  filters: AutoEqFilter[],
+  preampGainDb: number,
+  freqs: ArrayLike<number>,
+  sampleRate = 48000
+): number[] {
+  const validRate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 48000;
+  const fs = Math.max(8000, validRate);
+  const safePreamp = Number.isFinite(preampGainDb) ? preampGainDb : 0;
+
+  const list = Array.isArray(filters) ? filters : [];
+  const coeffsList: BiquadCoeffs[] = new Array(list.length);
+  for (let k = 0; k < list.length; k++) {
+    coeffsList[k] = AutoEqProcessor.calculateBiquadCoefficients(list[k], fs);
+  }
+
+  const out = new Array<number>(freqs.length);
+  const nyquist = fs * 0.5;
+  const twoPiOverFs = (2 * Math.PI) / fs;
+
+  for (let i = 0; i < freqs.length; i++) {
+    const rawFreq = freqs[i];
+    if (!Number.isFinite(rawFreq) || rawFreq <= 0) {
+      out[i] = safePreamp;
+      continue;
+    }
+    const f = Math.min(rawFreq, nyquist * 0.999);
+    const w = twoPiOverFs * f;
+    const cosW = Math.cos(w);
+    const sinW = Math.sin(w);
+    const cos2W = 2 * cosW * cosW - 1;
+    const sin2W = 2 * sinW * cosW;
+
+    let db = safePreamp;
+    for (let k = 0; k < coeffsList.length; k++) {
+      const c = coeffsList[k];
+      const numR = c.b0 + c.b1 * cosW + c.b2 * cos2W;
+      const numI = -(c.b1 * sinW + c.b2 * sin2W);
+      const denR = 1.0 + c.a1 * cosW + c.a2 * cos2W;
+      const denI = -(c.a1 * sinW + c.a2 * sin2W);
+      const numSq = numR * numR + numI * numI;
+      const denSq = Math.max(1e-30, denR * denR + denI * denI);
+      db += 10 * Math.log10(Math.max(1e-30, numSq / denSq));
+    }
+    out[i] = db;
+  }
+
+  return out;
 }

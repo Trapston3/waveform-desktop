@@ -1,5 +1,8 @@
 // src/models/Settings.ts
-// 70 typed options across 7 subsystems conforming to mockSettings.mjs
+// Typed application settings across 7 subsystems conforming to mockSettings.mjs
+
+import type { LyricsScriptMode } from '../lyricVisualizer/core/models';
+import type { DiscordDisplayFormat } from '../services/DiscordRpcService';
 
 export interface AppSettings {
   // Appearance & Theme (11 items)
@@ -49,11 +52,12 @@ export interface AppSettings {
   'dsp.spatialWidthGain': number;
   'dsp.spatialCrossfeedDelayMs': number;
 
-  // Lyrics Engine (8 items)
+  // Lyrics Engine (9 items)
   'lyrics.enabled': boolean;
   'lyrics.syllableSyncGlow': boolean;
   'lyrics.romanizationEnabled': boolean;
   'lyrics.translationEnabled': boolean;
+  'lyrics.scriptMode': LyricsScriptMode;
   'lyrics.fontSize': number;
   'lyrics.autoScrollSpeed': 'smooth' | 'instant';
   'lyrics.rtlSupport': boolean;
@@ -71,15 +75,18 @@ export interface AppSettings {
   'storage.syncLocalMetadata': boolean;
   'storage.embedArtworkInCache': boolean;
 
-  // External Integrations & Scrobbling (10 items)
+  // External Integrations & Scrobbling (13 items)
   'scrobble.lastFmEnabled': boolean;
   'scrobble.lastFmApiKey': string;
   'scrobble.lastFmSessionKey': string;
   'scrobble.listenBrainzEnabled': boolean;
   'scrobble.listenBrainzToken': string;
   'scrobble.discordRpcEnabled': boolean;
+  'scrobble.discordClientId': string;
+  'scrobble.discordDisplayFormat': DiscordDisplayFormat;
   'scrobble.discordShowTimeRemaining': boolean;
   'scrobble.discordShowAlbumArt': boolean;
+  'scrobble.discordShowQualityAndButtons': boolean;
   'listenTogether.serverUrl': string;
   'listenTogether.nickname': string;
 
@@ -145,11 +152,12 @@ export const defaultAppSettings: AppSettings = {
   'dsp.spatialWidthGain': 2.5,
   'dsp.spatialCrossfeedDelayMs': 15,
 
-  // Lyrics Engine (8 items)
+  // Lyrics Engine (9 items)
   'lyrics.enabled': true,
   'lyrics.syllableSyncGlow': true,
   'lyrics.romanizationEnabled': false,
   'lyrics.translationEnabled': false,
+  'lyrics.scriptMode': 'auto',
   'lyrics.fontSize': 24,
   'lyrics.autoScrollSpeed': 'smooth',
   'lyrics.rtlSupport': true,
@@ -167,15 +175,18 @@ export const defaultAppSettings: AppSettings = {
   'storage.syncLocalMetadata': true,
   'storage.embedArtworkInCache': true,
 
-  // External Integrations & Scrobbling (10 items)
+  // External Integrations & Scrobbling (13 items)
   'scrobble.lastFmEnabled': false,
   'scrobble.lastFmApiKey': '',
   'scrobble.lastFmSessionKey': '',
   'scrobble.listenBrainzEnabled': false,
   'scrobble.listenBrainzToken': '',
   'scrobble.discordRpcEnabled': true,
+  'scrobble.discordClientId': '1574112665163530280',
+  'scrobble.discordDisplayFormat': 'song_on_waveform',
   'scrobble.discordShowTimeRemaining': true,
   'scrobble.discordShowAlbumArt': true,
+  'scrobble.discordShowQualityAndButtons': true,
   'listenTogether.serverUrl': 'wss://party.waveform.app/ws',
   'listenTogether.nickname': 'DesktopListener',
 

@@ -79,6 +79,7 @@ interface ActiveStreamJob {
   knownTotalSize: number | null;
   isSeekJob: boolean;
   abortController: AbortController | null;
+  containerGen?: number;
 }
 
 const VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
@@ -86,8 +87,17 @@ const MAX_CACHE_BYTES = 512 * 1024 * 1024; // 512 MB
 const PRIME_MIN_BYTES = 32 * 1024; // 32 KB
 const VISITOR_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_OPEN_RANGE_CHUNK = 256 * 1024; // 256 KB chunk size for live open-ended stream reads
-const SABR_STALL_HANDOFF_MS = 12_000; // Allow up to 12s between SABR segments before yt-dlp handoff
+export const SABR_STALL_HANDOFF_MS = 22_000; // Exceeds googlevideo stallDetectionMs (18_000ms) so built-in recovery runs first
 const RANGE_WAIT_TIMEOUT_MS = 60_000;
+const MAX_SABR_PUMP_ATTEMPTS = 3;
+const MAX_EMPTY_CHUNKS_BEFORE_RETRY = 8;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    (t as any)?.unref?.();
+  });
+}
 
 export interface SabrStreamAuthOptions {
   cookie?: string;
@@ -96,6 +106,17 @@ export interface SabrStreamAuthOptions {
 }
 
 const PLAYER_CLIENTS: PlayerClientProfile[] = [
+  {
+    name: 'VISIONOS',
+    clientNameNum: 101,
+    clientVersion: '0.1',
+    userAgent:
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
+    osName: 'visionOS',
+    osVersion: '1.3.21O771',
+    deviceMake: 'Apple',
+    deviceModel: 'RealityDevice14,1',
+  },
   {
     name: 'ANDROID_VR',
     clientNameNum: 28,
@@ -130,17 +151,6 @@ const PLAYER_CLIENTS: PlayerClientProfile[] = [
     osVersion: '18.3.2.22D82',
     deviceMake: 'Apple',
     deviceModel: 'iPhone16,2',
-  },
-  {
-    name: 'VISIONOS',
-    clientNameNum: 101,
-    clientVersion: '0.1',
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
-    osName: 'visionOS',
-    osVersion: '1.3.21O771',
-    deviceMake: 'Apple',
-    deviceModel: 'RealityDevice14,1',
   },
 ];
 
@@ -231,6 +241,38 @@ export function parseFirstWebmClusterTimecodeMs(buf: Uint8Array): number | null 
     const tc = tryReadClusterTimecodeAt(view, pos);
     if (tc !== null) return tc;
     pos = view.indexOf(WEBM_CLUSTER_ID, pos + 1);
+  }
+  return null;
+}
+
+function getLastWebmClusterTimecodeMs(buf: Uint8Array): number | null {
+  if (!buf || buf.byteLength < 8) return null;
+  const view = Buffer.isBuffer(buf)
+    ? buf
+    : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+
+  let lastTc: number | null = null;
+  let pos = view.indexOf(WEBM_CLUSTER_ID, 0);
+  while (pos !== -1) {
+    const tc = tryReadClusterTimecodeAt(view, pos);
+    if (tc !== null) lastTc = tc;
+    pos = view.indexOf(WEBM_CLUSTER_ID, pos + 1);
+  }
+  return lastTc;
+}
+
+function stripWebmPrefixUpToTimecode(
+  chunk: Buffer,
+  minTimecodeExclusiveMs: number
+): Buffer | null {
+  if (!chunk || chunk.length === 0) return null;
+  let pos = chunk.indexOf(WEBM_CLUSTER_ID, 0);
+  while (pos !== -1) {
+    const tc = tryReadClusterTimecodeAt(chunk, pos);
+    if (tc !== null && tc > minTimecodeExclusiveMs) {
+      return pos === 0 ? chunk : chunk.subarray(pos);
+    }
+    pos = chunk.indexOf(WEBM_CLUSTER_ID, pos + 1);
   }
   return null;
 }
@@ -512,106 +554,140 @@ async function fetchPlayerMetadata(
   options?: SabrStreamAuthOptions
 ): Promise<PlayerMetadata> {
   let lastError = 'No player client returned SABR streaming metadata';
-
+  let activeVisitorData = visitorData;
   const count = PLAYER_CLIENTS.length;
-  for (let i = 0; i < count; i++) {
-    const profile = PLAYER_CLIENTS[(startIndex + i) % count];
-    try {
-      const clientContext: Record<string, unknown> = {
-        clientName: profile.name,
-        clientVersion: profile.clientVersion,
-        hl: 'en',
-        gl: 'US',
-        osName: profile.osName,
-        osVersion: profile.osVersion,
-        deviceMake: profile.deviceMake,
-        deviceModel: profile.deviceModel,
-      };
-      if (profile.androidSdkVersion) {
-        clientContext.androidSdkVersion = profile.androidSdkVersion;
-      }
-      if (visitorData) {
-        clientContext.visitorData = visitorData;
-      }
+  const maxPasses = 2;
 
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'User-Agent': profile.userAgent,
-        'X-YouTube-Client-Name': String(profile.clientNameNum),
-        'X-YouTube-Client-Version': profile.clientVersion,
-        Origin: 'https://www.youtube.com',
-        Referer: 'https://www.youtube.com/',
-      };
-      if (visitorData) {
-        headers['X-Goog-Visitor-Id'] = visitorData;
-      }
-      if (options?.cookie) {
-        headers['Cookie'] = options.cookie;
-      }
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let sawTransientHttpOrNet = false;
 
-      const payload: Record<string, unknown> = {
-        context: {
-          client: clientContext,
-          user: { lockedSafetyMode: false },
-          request: { useSsl: true },
-        },
-        videoId,
-        contentCheckOk: true,
-        racyCheckOk: true,
-      };
-      if (options?.reloadPlaybackParams) {
-        payload.playbackContext = {
-          reloadPlaybackContext: {
-            reloadPlaybackParams: options.reloadPlaybackParams,
-          },
-        };
+    for (let i = 0; i < count; i++) {
+      const profile = PLAYER_CLIENTS[(startIndex + i) % count];
+      for (let retry = 0; retry < 2; retry++) {
+        try {
+          const clientContext: Record<string, unknown> = {
+            clientName: profile.name,
+            clientVersion: profile.clientVersion,
+            hl: 'en',
+            gl: 'US',
+            osName: profile.osName,
+            osVersion: profile.osVersion,
+            deviceMake: profile.deviceMake,
+            deviceModel: profile.deviceModel,
+          };
+          if (profile.androidSdkVersion) {
+            clientContext.androidSdkVersion = profile.androidSdkVersion;
+          }
+          if (activeVisitorData) {
+            clientContext.visitorData = activeVisitorData;
+          }
+
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'User-Agent': profile.userAgent,
+            'X-YouTube-Client-Name': String(profile.clientNameNum),
+            'X-YouTube-Client-Version': profile.clientVersion,
+            Origin: 'https://www.youtube.com',
+            Referer: 'https://www.youtube.com/',
+          };
+          if (activeVisitorData) {
+            headers['X-Goog-Visitor-Id'] = activeVisitorData;
+          }
+          if (options?.cookie) {
+            headers['Cookie'] = options.cookie;
+          }
+
+          const payload: Record<string, unknown> = {
+            context: {
+              client: clientContext,
+              user: { lockedSafetyMode: false },
+              request: { useSsl: true },
+            },
+            videoId,
+            contentCheckOk: true,
+            racyCheckOk: true,
+          };
+          if (options?.reloadPlaybackParams) {
+            payload.playbackContext = {
+              reloadPlaybackContext: {
+                reloadPlaybackParams: options.reloadPlaybackParams,
+              },
+            };
+          }
+          if (options?.poToken) {
+            payload.serviceIntegrityDimensions = {
+              poToken: options.poToken,
+            };
+          }
+
+          const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+          });
+
+          if (res.status === 403 || res.status === 429) {
+            sawTransientHttpOrNet = true;
+            lastError = `${profile.name} (${profile.clientVersion}) HTTP ${res.status}`;
+            if (retry === 0) {
+              await sleepMs(res.status === 429 ? 1200 : 400);
+              if (res.status === 403) {
+                activeVisitorData = (await fetchFreshVisitorData(true)) || activeVisitorData;
+              }
+              continue;
+            }
+            break;
+          }
+
+          if (!res.ok) {
+            lastError = `${profile.name} (${profile.clientVersion}) HTTP ${res.status}`;
+            break;
+          }
+
+          const data = (await res.json()) as any;
+          if (data?.playabilityStatus?.status !== 'OK') {
+            lastError = `${profile.name} playabilityStatus=${data?.playabilityStatus?.status || 'UNKNOWN'}: ${data?.playabilityStatus?.reason || ''}`;
+            break;
+          }
+
+          const serverAbrStreamingUrl = data?.streamingData?.serverAbrStreamingUrl;
+          const videoPlaybackUstreamerConfig =
+            data?.playerConfig?.mediaCommonConfig?.mediaUstreamerRequestConfig
+              ?.videoPlaybackUstreamerConfig;
+          const adaptiveFormats = Array.isArray(data?.streamingData?.adaptiveFormats)
+            ? (data.streamingData.adaptiveFormats as FormatStream[])
+            : [];
+          const durationSec = Number(data?.videoDetails?.lengthSeconds) || 0;
+
+          if (serverAbrStreamingUrl && videoPlaybackUstreamerConfig && adaptiveFormats.length > 0) {
+            return {
+              serverAbrStreamingUrl,
+              videoPlaybackUstreamerConfig,
+              adaptiveFormats,
+              durationSec,
+              clientProfile: profile,
+            };
+          }
+
+          lastError = `${profile.name} response missing serverAbrStreamingUrl or ustreamerConfig`;
+          break;
+        } catch (err) {
+          sawTransientHttpOrNet = true;
+          lastError = `${profile.name} error: ${err instanceof Error ? err.message : String(err)}`;
+          if (retry === 0) {
+            await sleepMs(400);
+            continue;
+          }
+          break;
+        }
       }
-      if (options?.poToken) {
-        payload.serviceIntegrityDimensions = {
-          poToken: options.poToken,
-        };
-      }
-
-      const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok) {
-        lastError = `${profile.name} (${profile.clientVersion}) HTTP ${res.status}`;
-        continue;
-      }
-
-      const data = (await res.json()) as any;
-      if (data?.playabilityStatus?.status !== 'OK') {
-        lastError = `${profile.name} playabilityStatus=${data?.playabilityStatus?.status || 'UNKNOWN'}: ${data?.playabilityStatus?.reason || ''}`;
-        continue;
-      }
-
-      const serverAbrStreamingUrl = data?.streamingData?.serverAbrStreamingUrl;
-      const videoPlaybackUstreamerConfig =
-        data?.playerConfig?.mediaCommonConfig?.mediaUstreamerRequestConfig
-          ?.videoPlaybackUstreamerConfig;
-      const adaptiveFormats = Array.isArray(data?.streamingData?.adaptiveFormats)
-        ? (data.streamingData.adaptiveFormats as FormatStream[])
-        : [];
-      const durationSec = Number(data?.videoDetails?.lengthSeconds) || 0;
-
-      if (serverAbrStreamingUrl && videoPlaybackUstreamerConfig && adaptiveFormats.length > 0) {
-        return {
-          serverAbrStreamingUrl,
-          videoPlaybackUstreamerConfig,
-          adaptiveFormats,
-          durationSec,
-          clientProfile: profile,
-        };
-      }
-
-      lastError = `${profile.name} response missing serverAbrStreamingUrl or ustreamerConfig`;
-    } catch (err) {
-      lastError = `${profile.name} error: ${err instanceof Error ? err.message : String(err)}`;
     }
+
+    if (!sawTransientHttpOrNet || pass + 1 >= maxPasses) {
+      break;
+    }
+    await sleepMs(500 * (pass + 1));
+    activeVisitorData = (await fetchFreshVisitorData(true)) || activeVisitorData;
   }
 
   throw new Error(`Failed to resolve SABR player metadata for ${videoId}: ${lastError}`);
@@ -748,10 +824,13 @@ function sniffAudioMimeFromHeader(chunk: Buffer, fallbackMime: string): string {
 /**
  * Downloads the full audio track via yt-dlp (--js-runtimes node with tv_downgraded,web_embedded)
  * into a temporary part file and atomically promotes it to job.finalPath.
- * Can be used either as a direct fallback or as a seamless continuation when YouTube's
- * 60-second SABR prefix cap stalls a SabrStream mid-track.
+ * Only used when bytesWritten === 0 (direct fallback) or for standalone full-file cache rebuilds;
+ * NEVER swaps job.partPath while an active live cursor is reading WebM bytes.
  */
 async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPart: boolean): Promise<void> {
+  if (streamDirectlyToPart && job.bytesWritten > 0) {
+    throw new Error(`Refusing unsafe mid-stream yt-dlp container splice for ${job.videoId}`);
+  }
   const binary = findYtDlpBinary();
   const targetPartPath = streamDirectlyToPart
     ? job.partPath
@@ -823,7 +902,6 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
       });
 
       let writeChain = Promise.resolve();
-      const prevPartPath = job.partPath;
       child.stdout?.on('data', (chunk: Buffer) => {
         if (job.aborted || !fh) return;
         const copy = Buffer.from(chunk);
@@ -839,12 +917,6 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
           ytdlpBytes += copy.length;
           if (streamDirectlyToPart) {
             job.bytesWritten = ytdlpBytes;
-            notifyWaiters(job);
-          } else {
-            if (ytdlpBytes > job.bytesWritten) {
-              job.partPath = targetPartPath;
-              job.bytesWritten = ytdlpBytes;
-            }
             notifyWaiters(job);
           }
         });
@@ -871,10 +943,12 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
       }
 
       await finalizePartFile(targetPartPath, job.finalPath);
-      if (!streamDirectlyToPart && prevPartPath !== targetPartPath) {
-        await fsp.unlink(prevPartPath).catch(() => {});
-      }
 
+      if (!streamDirectlyToPart) {
+        // Bump containerGen so any active live cursor that already read SABR bytes from job.partPath
+        // fails with controller.error instead of splicing rebuilt yt-dlp container bytes mid-stream.
+        job.containerGen = (job.containerGen ?? 0) + 1;
+      }
       job.mimeType = sniffedMime;
       job.bytesWritten = ytdlpBytes;
       job.finalSize = ytdlpBytes;
@@ -982,10 +1056,10 @@ async function startSabrJob(
 ): Promise<ActiveStreamJob> {
   await fsp.mkdir(cacheDir, { recursive: true });
   const visitorData = await fetchFreshVisitorData();
-  const metadata = await fetchPlayerMetadata(videoId, visitorData, 0, options);
+  const initialMetadata = await fetchPlayerMetadata(videoId, visitorData, 0, options);
 
-  const sabrFormats = metadata.adaptiveFormats.map((f) => buildSabrFormat(f));
-  const chosenFormat = selectBestAudioFormat(sabrFormats);
+  const initialSabrFormats = initialMetadata.adaptiveFormats.map((f) => buildSabrFormat(f));
+  const chosenFormat = selectBestAudioFormat(initialSabrFormats);
   if (!chosenFormat) {
     throw new Error(`No audio-only SABR format available for ${videoId}`);
   }
@@ -997,92 +1071,24 @@ async function startSabrJob(
     : path.join(cacheDir, `${videoId}.${ext}.part`);
   const finalPath = isSeekJob ? partPath : path.join(cacheDir, `${videoId}.${ext}`);
   const metaPath = path.join(cacheDir, `${videoId}.json`);
-
-  const clientInfo: ClientInfo = {
-    clientName: metadata.clientProfile.clientNameNum,
-    clientVersion: metadata.clientProfile.clientVersion,
-    osName: metadata.clientProfile.osName,
-    osVersion: metadata.clientProfile.osVersion,
-    deviceMake: metadata.clientProfile.deviceMake,
-    deviceModel: metadata.clientProfile.deviceModel,
-    hl: 'en',
-  };
-
-  let reloadAttempt = 0;
   const resolvedPoToken = options?.poToken || process.env.WAVEFORM_YOUTUBE_POTOKEN || undefined;
 
-  const sabrStream = new SabrStream({
-    videoId,
-    serverAbrStreamingUrl: metadata.serverAbrStreamingUrl,
-    videoPlaybackUstreamerConfig: metadata.videoPlaybackUstreamerConfig,
-    clientInfo,
-    ...(resolvedPoToken ? { poToken: resolvedPoToken } : {}),
-    formats: sabrFormats,
-    callbacks: {
-      onReloadPlayerResponse: async (reloadContext) => {
-        reloadAttempt += 1;
-        const refreshedVisitor = await fetchFreshVisitorData(true);
-        const refreshed = await fetchPlayerMetadata(videoId, refreshedVisitor, reloadAttempt, {
-          ...options,
-          poToken: resolvedPoToken,
-          reloadPlaybackParams: reloadContext?.reloadPlaybackParams,
-        });
-        return {
-          serverAbrStreamingUrl: refreshed.serverAbrStreamingUrl,
-          videoPlaybackUstreamerConfig: refreshed.videoPlaybackUstreamerConfig,
-        };
-      },
-    },
-  });
-
-  // Register error listener immediately before start() so stall/stream errors never crash main process
-  let sabrErrored: Error | null = null;
-  sabrStream.on('error', (err) => {
-    sabrErrored = err instanceof Error ? err : new Error(String(err));
-  });
-
-  if (isSeekJob) {
-    // googlevideo's setupStreaming calls seekTo(trackCollection.buffered, 'client') after the init-only
-    // first response, which resets playerTimeMs back to 0 before the first media segment arrives.
-    const sabrAny = sabrStream as any;
-    const origSeekTo = typeof sabrAny.seekTo === 'function' ? sabrAny.seekTo.bind(sabrStream) : null;
-    if (origSeekTo) {
-      sabrAny.seekTo = (timeMs: number, source: string) => {
-        if (
-          timeMs === 0 &&
-          source === 'client' &&
-          (!sabrAny.trackCollection?.bufferedRanges || sabrAny.trackCollection.bufferedRanges.length === 0)
-        ) {
-          return;
-        }
-        return origSeekTo(timeMs, source);
-      };
-    }
-  }
-
-  const { audioStream, selectedFormats } = sabrStream.start({
-    enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
-    isPostLiveDvr: false,
-    audioFormat: chosenFormat,
-    ...(isSeekJob ? { startTimeMs: startMs } : {}),
-    maxRetries: 6,
-    stallDetectionMs: 18_000,
-  });
-
-  const actualFormat = selectedFormats.audioFormat || chosenFormat;
   const durationSec =
-    metadata.durationSec ||
-    (actualFormat.approxDurationMs ? Math.round(actualFormat.approxDurationMs / 1000) : 0);
-  const bitrateBps = actualFormat.averageBitrate || actualFormat.bitrate || 160_000;
+    initialMetadata.durationSec ||
+    (chosenFormat.approxDurationMs ? Math.round(chosenFormat.approxDurationMs / 1000) : 0);
+  const bitrateBps = chosenFormat.averageBitrate || chosenFormat.bitrate || 160_000;
   const computedEstimatedSize =
     durationSec > 0 ? Math.round((bitrateBps / 8) * durationSec * 1.04) : 4 * 1024 * 1024;
   const baseEstimatedSize =
-    actualFormat.contentLength && actualFormat.contentLength > 0
-      ? actualFormat.contentLength
+    chosenFormat.contentLength && chosenFormat.contentLength > 0
+      ? chosenFormat.contentLength
       : computedEstimatedSize;
   const estimatedSize =
     isSeekJob && durationSec > 0
-      ? Math.max(256 * 1024, Math.round(baseEstimatedSize * Math.max(0.08, (durationSec - startMs / 1000) / durationSec)))
+      ? Math.max(
+          256 * 1024,
+          Math.round(baseEstimatedSize * Math.max(0.08, (durationSec - startMs / 1000) / durationSec))
+        )
       : baseEstimatedSize;
 
   const job: ActiveStreamJob = {
@@ -1093,15 +1099,15 @@ async function startSabrJob(
     metaPath,
     ext,
     mimeType,
-    itag: actualFormat.itag,
+    itag: chosenFormat.itag,
     durationSec,
-    sourceClient: metadata.clientProfile.name,
+    sourceClient: initialMetadata.clientProfile.name,
     estimatedSize,
     bytesWritten: 0,
     finalSize: 0,
     done: false,
     error: null,
-    sabrStream,
+    sabrStream: null,
     childProcess: null,
     fileHandle: null,
     aborted: false,
@@ -1119,63 +1125,303 @@ async function startSabrJob(
   const jobMap = isSeekJob ? activeSeekJobs : activeJobs;
   jobMap.set(jobKey, job);
 
+  const openSabrAttempt = (
+    meta: PlayerMetadata,
+    formats: SabrFormat[],
+    targetFormat: SabrFormat,
+    resumeTimeMs: number,
+    clientIndexOffset: number
+  ) => {
+    const clientInfo: ClientInfo = {
+      clientName: meta.clientProfile.clientNameNum,
+      clientVersion: meta.clientProfile.clientVersion,
+      osName: meta.clientProfile.osName,
+      osVersion: meta.clientProfile.osVersion,
+      deviceMake: meta.clientProfile.deviceMake,
+      deviceModel: meta.clientProfile.deviceModel,
+      hl: 'en',
+    };
+
+    let reloadAttempt = clientIndexOffset;
+    const stream = new SabrStream({
+      videoId,
+      serverAbrStreamingUrl: meta.serverAbrStreamingUrl,
+      videoPlaybackUstreamerConfig: meta.videoPlaybackUstreamerConfig,
+      clientInfo,
+      ...(resolvedPoToken ? { poToken: resolvedPoToken } : {}),
+      formats,
+      callbacks: {
+        onReloadPlayerResponse: async (reloadContext) => {
+          reloadAttempt += 1;
+          const refreshedVisitor = await fetchFreshVisitorData(true);
+          const refreshed = await fetchPlayerMetadata(videoId, refreshedVisitor, reloadAttempt, {
+            ...options,
+            poToken: resolvedPoToken,
+            reloadPlaybackParams: reloadContext?.reloadPlaybackParams,
+          });
+          return {
+            serverAbrStreamingUrl: refreshed.serverAbrStreamingUrl,
+            videoPlaybackUstreamerConfig: refreshed.videoPlaybackUstreamerConfig,
+          };
+        },
+      },
+    });
+
+    if (resumeTimeMs > 0) {
+      // googlevideo's setupStreaming calls seekTo(trackCollection.buffered, 'client') after the init-only
+      // first response, which resets playerTimeMs back to 0 before the first media segment arrives.
+      const sabrAny = stream as any;
+      const origSeekTo = typeof sabrAny.seekTo === 'function' ? sabrAny.seekTo.bind(stream) : null;
+      if (origSeekTo) {
+        sabrAny.seekTo = (timeMs: number, source: string) => {
+          if (
+            timeMs === 0 &&
+            source === 'client' &&
+            (!sabrAny.trackCollection?.bufferedRanges || sabrAny.trackCollection.bufferedRanges.length === 0)
+          ) {
+            return;
+          }
+          return origSeekTo(timeMs, source);
+        };
+      }
+    }
+
+    const started = stream.start({
+      enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
+      isPostLiveDvr: false,
+      audioFormat: targetFormat,
+      ...(resumeTimeMs > 0 ? { startTimeMs: resumeTimeMs } : {}),
+      maxRetries: 6,
+      stallDetectionMs: 18_000,
+    });
+
+    return { stream, audioStream: started.audioStream, selectedFormats: started.selectedFormats };
+  };
+
   job.completionPromise = (async () => {
     let fh: fsp.FileHandle | null = null;
-    const reader = audioStream.getReader();
-    let needsYtDlpContinuation = false;
+    let lastError: Error | null = null;
+    let maxWrittenClusterTcMs = -1;
+    let sabrBufferedEndMs = startMs;
+    let streamReachedInfinity = false;
+    let sabrSucceeded = false;
+    let sabrCanPersistCache = false;
+    let currentMeta = initialMetadata;
+    let currentFormats = initialSabrFormats;
+    let currentTargetFormat = chosenFormat;
 
     try {
       fh = await fsp.open(partPath, 'w');
       job.fileHandle = fh;
 
-      while (true) {
-        if (job.aborted) break;
+      for (let attempt = 1; attempt <= MAX_SABR_PUMP_ATTEMPTS; attempt++) {
+        if (job.aborted) {
+          throw new Error('SABR stream aborted');
+        }
 
-        // Race reader.read() against a stall timer once initial bytes are primed
-        const stallTimeoutMs =
-          job.bytesWritten >= PRIME_MIN_BYTES ? SABR_STALL_HANDOFF_MS : isSeekJob ? 4_500 : 18_000;
-        let stallTimer: ReturnType<typeof setTimeout> | undefined;
-        const readResult = await Promise.race([
-          reader.read().then((res) => ({ timedOut: false as const, res })),
-          new Promise<{ timedOut: true }>((resolve) => {
-            stallTimer = setTimeout(() => resolve({ timedOut: true }), stallTimeoutMs);
-          }),
-        ]);
-        if (stallTimer) clearTimeout(stallTimer);
+        if (attempt > 1) {
+          const prevErrMsg = lastError?.message || '';
+          const backoffMs = prevErrMsg.includes('429') ? 1200 : 400 * (attempt - 1);
+          await sleepMs(backoffMs);
+          if (job.aborted) {
+            throw new Error('SABR stream aborted');
+          }
 
-        if (readResult.timedOut) {
-          needsYtDlpContinuation = true;
+          const refreshedVisitor = await fetchFreshVisitorData(true);
+          const clientIdx = (attempt - 1) % PLAYER_CLIENTS.length;
+          currentMeta = await fetchPlayerMetadata(videoId, refreshedVisitor, clientIdx, options);
+          currentFormats = currentMeta.adaptiveFormats.map((f) => buildSabrFormat(f));
+          const sameItagFormat = currentFormats.find((f) => f.itag === job.itag);
+          if (job.bytesWritten > 0 && !sameItagFormat) {
+            lastError = new Error(
+              `Rotated client ${currentMeta.clientProfile.name} lacks matching itag=${job.itag} for mid-stream resume`
+            );
+            continue;
+          }
+          currentTargetFormat = sameItagFormat || selectBestAudioFormat(currentFormats) || currentTargetFormat;
+          job.sourceClient = currentMeta.clientProfile.name;
+        }
+
+        const resumeTimeMs =
+          job.bytesWritten > 0
+            ? maxWrittenClusterTcMs >= 0
+              ? maxWrittenClusterTcMs + 5_000
+              : Math.max(startMs, Math.floor(sabrBufferedEndMs))
+            : startMs;
+        const { stream: activeSabrStream, audioStream, selectedFormats } = openSabrAttempt(
+          currentMeta,
+          currentFormats,
+          currentTargetFormat,
+          resumeTimeMs,
+          attempt - 1
+        );
+        job.sabrStream = activeSabrStream;
+
+        const actualFormat = selectedFormats.audioFormat || currentTargetFormat;
+        if (attempt === 1) {
+          job.itag = actualFormat.itag;
+          if (actualFormat.contentLength && actualFormat.contentLength > 0 && !isSeekJob) {
+            job.estimatedSize = actualFormat.contentLength;
+            job.reportedTotal = Math.max(job.reportedTotal, actualFormat.contentLength);
+          }
+        }
+
+        let sabrErrored: Error | null = null;
+        activeSabrStream.on('error', (err) => {
+          sabrErrored = err instanceof Error ? err : new Error(String(err));
+        });
+
+        const reader = audioStream.getReader();
+        let attemptTimedOut = false;
+        let emptyChunkError: Error | null = null;
+        let consecutiveEmptyChunks = 0;
+        let strippedInitThisAttempt = job.bytesWritten === 0 || attempt === 1;
+
+        try {
+          while (true) {
+            if (job.aborted) break;
+
+            const stallTimeoutMs =
+              job.bytesWritten >= PRIME_MIN_BYTES
+                ? SABR_STALL_HANDOFF_MS
+                : isSeekJob
+                ? 8_000
+                : 18_000;
+            let stallTimer: ReturnType<typeof setTimeout> | undefined;
+            const readResult = await Promise.race([
+              reader.read().then((res) => ({ timedOut: false as const, res })),
+              new Promise<{ timedOut: true }>((resolve) => {
+                stallTimer = setTimeout(() => resolve({ timedOut: true }), stallTimeoutMs);
+              }),
+            ]);
+            if (stallTimer) clearTimeout(stallTimer);
+
+            if (readResult.timedOut) {
+              attemptTimedOut = true;
+              break;
+            }
+
+            const { done, value } = readResult.res;
+            if (done) break;
+            if (!value || value.byteLength === 0) {
+              consecutiveEmptyChunks += 1;
+              if (consecutiveEmptyChunks >= MAX_EMPTY_CHUNKS_BEFORE_RETRY) {
+                emptyChunkError = new Error(
+                  `SABR stream produced ${consecutiveEmptyChunks} consecutive empty chunks for ${videoId}`
+                );
+                break;
+              }
+              continue;
+            }
+
+            consecutiveEmptyChunks = 0;
+            const bufferedRaw = Number((activeSabrStream as any)?.trackCollection?.buffered);
+            if (bufferedRaw === Infinity) {
+              streamReachedInfinity = true;
+            } else if (Number.isFinite(bufferedRaw) && bufferedRaw > sabrBufferedEndMs) {
+              sabrBufferedEndMs = bufferedRaw;
+            }
+
+            let writeBuf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+            if (!strippedInitThisAttempt) {
+              if (job.ext === 'webm') {
+                const stripped = stripWebmPrefixUpToTimecode(writeBuf, maxWrittenClusterTcMs);
+                if (!stripped || stripped.byteLength === 0) {
+                  continue;
+                }
+                writeBuf = stripped;
+                strippedInitThisAttempt = true;
+              } else {
+                // Non-WebM mid-stream cannot safely strip init headers without muxed offset rewrite
+                emptyChunkError = new Error(`Non-WebM mid-stream resume unsupported for ${videoId}`);
+                break;
+              }
+            }
+
+            if (job.ext === 'webm') {
+              const lastTc = getLastWebmClusterTimecodeMs(writeBuf);
+              if (lastTc !== null && lastTc > maxWrittenClusterTcMs) {
+                maxWrittenClusterTcMs = lastTc;
+              }
+            }
+
+            await fh.write(writeBuf, 0, writeBuf.length, job.bytesWritten);
+            job.bytesWritten += writeBuf.length;
+            notifyWaiters(job);
+          }
+        } catch (readErr) {
+          sabrErrored = readErr instanceof Error ? readErr : new Error(String(readErr));
+        } finally {
+          const finalBufferedRaw = Number((activeSabrStream as any)?.trackCollection?.buffered);
+          if (finalBufferedRaw === Infinity) {
+            streamReachedInfinity = true;
+          } else if (Number.isFinite(finalBufferedRaw) && finalBufferedRaw > sabrBufferedEndMs) {
+            sabrBufferedEndMs = finalBufferedRaw;
+          }
+          await reader.cancel().catch(() => {});
+          try {
+            reader.releaseLock();
+          } catch {
+            // Ignore release lock errors
+          }
+          await activeSabrStream.abort().catch(() => {});
+          if (job.sabrStream === activeSabrStream) {
+            job.sabrStream = null;
+          }
+        }
+
+        if (job.aborted) {
+          throw new Error('SABR stream aborted');
+        }
+
+        const actualWrittenSec =
+          maxWrittenClusterTcMs >= 0
+            ? (maxWrittenClusterTcMs + 10_000) / 1000
+            : sabrBufferedEndMs / 1000;
+        const hasExactContentLength = Boolean(actualFormat.contentLength && actualFormat.contentLength > 0);
+        const durationReachedEof =
+          streamReachedInfinity ||
+          (job.durationSec > 0 && actualWrittenSec >= job.durationSec - 8);
+        const sizeReachedEof = job.estimatedSize <= 0 || job.bytesWritten >= job.estimatedSize * 0.92;
+        const cacheRatioOk = hasExactContentLength
+          ? job.bytesWritten >= job.estimatedSize * 0.9
+          : durationReachedEof || job.estimatedSize <= 0 || job.bytesWritten >= job.estimatedSize * 0.9;
+        const reachedTrueEof =
+          !attemptTimedOut &&
+          !emptyChunkError &&
+          !sabrErrored &&
+          job.bytesWritten > 0 &&
+          (durationReachedEof || sizeReachedEof) &&
+          (isSeekJob || cacheRatioOk);
+
+        if (reachedTrueEof) {
+          sabrSucceeded = true;
+          sabrCanPersistCache = cacheRatioOk;
           break;
         }
 
-        const { done, value } = readResult.res;
-        if (done) break;
-        if (!value || value.byteLength === 0) continue;
-
-        const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-        await fh.write(buf, 0, buf.length, job.bytesWritten);
-        job.bytesWritten += buf.length;
-        notifyWaiters(job);
+        lastError =
+          sabrErrored ||
+          emptyChunkError ||
+          (attemptTimedOut
+            ? new Error(`SABR segment fetch timed out for ${videoId} at ${job.bytesWritten} bytes`)
+            : new Error(
+                `SABR stream ended prematurely for ${videoId} at ${job.bytesWritten}/${job.estimatedSize} bytes`
+              ));
       }
 
-      if (job.aborted) {
-        throw new Error('SABR stream aborted');
-      }
-
-      // Check whether SABR reached true EOF before closing
-      const audioEndSec = sabrStream.audioEndTimeMs > 0 ? sabrStream.audioEndTimeMs / 1000 : 0;
-      const reachedTrueEof =
-        !needsYtDlpContinuation &&
-        !sabrErrored &&
-        job.bytesWritten > 0 &&
-        ((job.durationSec > 0 && audioEndSec >= job.durationSec - 8) ||
-          (!isSeekJob && job.estimatedSize > 0 && job.bytesWritten >= job.estimatedSize * 0.68) ||
-          job.durationSec === 0);
-
-      // Close SABR reader/file handle before either finalizing or handing off
-      if (needsYtDlpContinuation || sabrErrored || !reachedTrueEof) {
-        await reader.cancel().catch(() => {});
-        await sabrStream.abort().catch(() => {});
+      if (!sabrSucceeded) {
+        if (!isSeekJob && !job.aborted) {
+          await fh.close().catch(() => {});
+          fh = null;
+          job.fileHandle = null;
+          await downloadWithYtDlpIntoJob(job, job.bytesWritten === 0);
+          return;
+        }
+        throw (
+          lastError ||
+          new Error(`SABR stream failed after ${MAX_SABR_PUMP_ATTEMPTS} attempts for ${videoId}`)
+        );
       }
 
       await fh.close();
@@ -1183,9 +1429,6 @@ async function startSabrJob(
       job.fileHandle = null;
 
       if (isSeekJob) {
-        if (job.bytesWritten === 0 || (needsYtDlpContinuation && job.bytesWritten < PRIME_MIN_BYTES)) {
-          throw sabrErrored || new Error(`SABR seek stream stalled before priming for ${videoId}`);
-        }
         // Seek sessions stay in their own temp file and never overwrite 0..EOF cache
         job.finalPath = partPath;
         job.finalSize = job.bytesWritten;
@@ -1194,15 +1437,11 @@ async function startSabrJob(
         return;
       }
 
-      // If SABR stalled or stopped before true EOF (e.g., 60s prefix cap), seamlessly
-      // complete the full file with yt-dlp while keeping partPath readable for active playback.
-      if (needsYtDlpContinuation || sabrErrored || job.bytesWritten === 0 || !reachedTrueEof) {
-        if (job.bytesWritten === 0) {
-          throw sabrErrored || new Error(`SABR stream produced 0 bytes for ${videoId}`);
-        }
-        job.sabrStream = null;
-        await downloadWithYtDlpIntoJob(job, false);
-        return;
+      // Never persist truncated < 90% .webm files to permanent cache
+      if (!sabrCanPersistCache) {
+        throw new Error(
+          `Refusing to cache truncated SABR stream for ${videoId}: ${job.bytesWritten} < 90% of ${job.estimatedSize}`
+        );
       }
 
       await finalizePartFile(partPath, finalPath);
@@ -1223,11 +1462,6 @@ async function startSabrJob(
       notifyWaiters(job);
       void pruneCache(cacheDir);
     } catch (err) {
-      try {
-        await reader.cancel();
-      } catch {
-        // Ignore cancel errors
-      }
       if (fh) {
         await fh.close().catch(() => {});
         job.fileHandle = null;
@@ -1239,11 +1473,6 @@ async function startSabrJob(
       }
       notifyWaiters(job);
     } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        // Ignore release errors
-      }
       job.sabrStream = null;
       if (!isSeekJob && activeJobs.get(jobKey) === job) {
         activeJobs.delete(jobKey);
@@ -1787,14 +2016,18 @@ async function serveActiveJobRangeResponse(
   });
 }
 
-function createLiveJobStream(
+export function createLiveJobStream(
   job: ActiveStreamJob,
   startOffset: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  waitTimeoutMs = RANGE_WAIT_TIMEOUT_MS
 ): ReadableStream<Uint8Array> {
   let cursor = startOffset;
   let closed = false;
+  let consecutiveTimeouts = 0;
   let activeWaiter: (() => void) | null = null;
+  const initialContainerGen = job.containerGen ?? 0;
+  let readFromPart = false;
 
   const cleanup = () => {
     closed = true;
@@ -1817,18 +2050,36 @@ function createLiveJobStream(
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       while (!closed) {
+        if ((job.containerGen ?? 0) !== initialContainerGen && (readFromPart || startOffset > 0)) {
+          cleanup();
+          controller.error(
+            new Error(`SABR stream container invalidated for ${job.videoId} after cache rebuild`)
+          );
+          return;
+        }
+
         const available = job.done ? job.finalSize : job.bytesWritten;
         if (cursor < available) {
           const readEnd = Math.min(available - 1, cursor + DEFAULT_OPEN_RANGE_CHUNK - 1);
+          const wasDone = job.done;
+          if (!wasDone) readFromPart = true;
           let slice: Uint8Array;
           try {
-            const readPath = job.done ? job.finalPath : job.partPath;
+            const readPath = wasDone ? job.finalPath : job.partPath;
             slice = await readFileSlice(readPath, cursor, readEnd);
           } catch {
+            if ((job.containerGen ?? 0) !== initialContainerGen && (readFromPart || startOffset > 0)) {
+              cleanup();
+              controller.error(
+                new Error(`SABR stream container invalidated for ${job.videoId} after cache rebuild`)
+              );
+              return;
+            }
             slice = await readFileSlice(job.finalPath, cursor, readEnd);
           }
           if (closed) return;
           if (slice.byteLength > 0) {
+            consecutiveTimeouts = 0;
             cursor += slice.byteLength;
             controller.enqueue(slice);
             if (job.done && cursor >= job.finalSize) {
@@ -1845,19 +2096,20 @@ function createLiveJobStream(
           return;
         }
 
-        if (job.error || job.aborted) {
+        const preWaitErr: unknown = job.error;
+        if (preWaitErr || job.aborted) {
           cleanup();
-          if (cursor > startOffset) {
-            controller.close();
-          } else {
-            controller.error(job.error || new Error('Stream aborted'));
-          }
+          controller.error(
+            preWaitErr instanceof Error
+              ? preWaitErr
+              : new Error(String(preWaitErr || 'SABR stream interrupted'))
+          );
           return;
         }
 
-        await new Promise<void>((resolve) => {
+        const waitTimedOut = await new Promise<boolean>((resolve) => {
           if (closed || job.done || job.error || job.aborted || job.bytesWritten > cursor) {
-            resolve();
+            resolve(false);
             return;
           }
           const timer = setTimeout(() => {
@@ -1865,8 +2117,8 @@ function createLiveJobStream(
               job.waiters.delete(onProgress);
               activeWaiter = null;
             }
-            resolve();
-          }, RANGE_WAIT_TIMEOUT_MS);
+            resolve(true);
+          }, waitTimeoutMs);
           timer.unref?.();
 
           const onProgress = () => {
@@ -1875,11 +2127,37 @@ function createLiveJobStream(
               job.waiters.delete(onProgress);
               activeWaiter = null;
             }
-            resolve();
+            resolve(false);
           };
           activeWaiter = onProgress;
           job.waiters.add(onProgress);
         });
+
+        if (closed) return;
+
+        const postWaitErr: unknown = job.error;
+        if (postWaitErr || job.aborted) {
+          cleanup();
+          controller.error(
+            postWaitErr instanceof Error
+              ? postWaitErr
+              : new Error(String(postWaitErr || 'SABR stream interrupted'))
+          );
+          return;
+        }
+
+        if (waitTimedOut && job.bytesWritten <= cursor) {
+          consecutiveTimeouts += 1;
+          if (consecutiveTimeouts >= 2) {
+            cleanup();
+            controller.error(
+              new Error(`SABR stream timed out with zero progress for ${job.videoId} at offset ${cursor}`)
+            );
+            return;
+          }
+        } else if (job.bytesWritten > cursor) {
+          consecutiveTimeouts = 0;
+        }
       }
     },
     cancel() {
@@ -2099,12 +2377,47 @@ export async function resolveRemoteAudioProxyRequest(
   }
 
   try {
-    const upstreamRes = await fetch(parsedTarget.toString(), {
-      method: request.method === 'HEAD' ? 'HEAD' : 'GET',
-      headers: upstreamHeaders,
-      signal: jobAbortController.signal,
-      redirect: 'follow',
-    });
+    let upstreamRes: Response | null = null;
+    let lastFetchErr: unknown = null;
+    const maxProxyAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxProxyAttempts; attempt++) {
+      try {
+        const res = await fetch(parsedTarget.toString(), {
+          method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+          headers: upstreamHeaders,
+          signal: jobAbortController.signal,
+          redirect: 'follow',
+        });
+
+        if (
+          (res.status === 403 || res.status === 429 || res.status === 502 || res.status === 503) &&
+          attempt < maxProxyAttempts &&
+          !request.signal?.aborted
+        ) {
+          await res.body?.cancel().catch(() => {});
+          const backoffMs = res.status === 429 ? 1200 : 400 * attempt;
+          await sleepMs(backoffMs);
+          if (request.signal?.aborted) {
+            return new Response(null, { status: 499, headers: createCorsHeaders() });
+          }
+          continue;
+        }
+
+        upstreamRes = res;
+        break;
+      } catch (err) {
+        lastFetchErr = err;
+        if (request.signal?.aborted || attempt >= maxProxyAttempts) {
+          throw err;
+        }
+        await sleepMs(400 * attempt);
+      }
+    }
+
+    if (!upstreamRes) {
+      throw lastFetchErr instanceof Error ? lastFetchErr : new Error('Upstream audio proxy fetch failed');
+    }
 
     const rawContentType = upstreamRes.headers.get('content-type') || '';
     const contentType =

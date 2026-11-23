@@ -323,16 +323,16 @@ const LyricLineRow = React.memo<LyricLineRowProps>(({
       )}
 
       {/* Romanization Sub-Text */}
-      {showRomanization && line.romanization && (
+      {showRomanization && (line.romanizedText || line.romanization) && (
         <p className="text-xs text-[var(--color-on-surface-variant)] font-normal pt-1 opacity-80">
-          {line.romanization}
+          {line.romanizedText || line.romanization}
         </p>
       )}
 
       {/* Translation Sub-Text */}
-      {showTranslation && line.translation && (
+      {showTranslation && (line.translatedText || line.translation) && (
         <p className="text-xs text-[var(--color-accent)] font-medium pt-1 opacity-90">
-          {line.translation}
+          {line.translatedText || line.translation}
         </p>
       )}
     </div>
@@ -375,6 +375,13 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const settingsAlignment = useSettingsStore((s) => s.settings?.lyricsAlignment);
+  const settingsScriptMode = useSettingsStore((s) => s.settings?.['lyrics.scriptMode'] ?? 'auto');
+  const settingsRomanizationEnabled = useSettingsStore((s) =>
+    Boolean(s.settings?.['lyrics.romanizationEnabled'])
+  );
+  const settingsTranslationEnabled = useSettingsStore((s) =>
+    Boolean(s.settings?.['lyrics.translationEnabled'])
+  );
   const artworkPalette = useThemeStore((s) => s.artworkPalette);
   const effectiveAlignment: 'left' | 'center' = alignment ?? settingsAlignment ?? 'left';
   const syncTheme = useMemo(
@@ -392,8 +399,22 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     propCurrentPositionMs !== undefined ? propCurrentPositionMs : rafPositionMs;
 
   const [isUserScrolled, setIsUserScrolled] = useState(false);
-  const [showRomanization, setShowRomanization] = useState(false);
-  const [showTranslation, setShowTranslation] = useState(false);
+  const [manualRomanization, setManualRomanization] = useState<boolean | null>(null);
+  const [manualTranslation, setManualTranslation] = useState<boolean | null>(null);
+
+  const defaultShowRomanization =
+    settingsScriptMode === 'romanized' ||
+    settingsScriptMode === 'romanized_translation' ||
+    (settingsScriptMode === 'auto' && settingsRomanizationEnabled);
+  const defaultShowTranslation =
+    settingsScriptMode === 'romanized_translation' ||
+    settingsScriptMode === 'original_translation' ||
+    (settingsScriptMode !== 'original' &&
+      settingsScriptMode !== 'romanized' &&
+      settingsTranslationEnabled);
+
+  const showRomanization = manualRomanization ?? defaultShowRomanization;
+  const showTranslation = manualTranslation ?? defaultShowTranslation;
 
   const isUserScrolledRef = useRef(false);
   const activeLineIndexRef = useRef(-1);
@@ -454,14 +475,38 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
   }, [lyricsData]);
 
   const hasRomanization = useMemo(
-    () => Boolean(lyricsData?.lines?.some((l) => Boolean(l.romanization && l.romanization.trim()))),
+    () =>
+      Boolean(
+        lyricsData?.lines?.some((l) => Boolean((l.romanizedText || l.romanization)?.trim()))
+      ),
     [lyricsData]
   );
 
   const hasTranslation = useMemo(
-    () => Boolean(lyricsData?.lines?.some((l) => Boolean(l.translation && l.translation.trim()))),
+    () =>
+      Boolean(
+        lyricsData?.lines?.some((l) => Boolean((l.translatedText || l.translation)?.trim()))
+      ),
     [lyricsData]
   );
+
+  const lyricsIdentityKey = useMemo(() => {
+    if (!lyricsData || !lyricsData.lines || lyricsData.lines.length === 0) return '';
+    const first = lyricsData.lines[0];
+    const last = lyricsData.lines[lyricsData.lines.length - 1];
+    return `${lyricsData.provider}:${lyricsData.lines.length}:${first?.text ?? ''}:${last?.text ?? ''}`;
+  }, [lyricsData]);
+
+  // Reset manual Rom/Trans pill overrides whenever track or script settings change
+  useEffect(() => {
+    setManualRomanization(null);
+    setManualTranslation(null);
+  }, [
+    lyricsIdentityKey,
+    settingsScriptMode,
+    settingsRomanizationEnabled,
+    settingsTranslationEnabled,
+  ]);
 
   // Reset line/syllable commit caches and user scroll state whenever track lyrics change
   useEffect(() => {
@@ -476,8 +521,6 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
     isProgrammaticScrollRef.current = false;
     isUserScrolledRef.current = false;
     setIsUserScrolled(false);
-    setShowRomanization(false);
-    setShowTranslation(false);
     lastCommittedLineIdxRef.current = -2;
     lastCommittedSyllableIdxRef.current = -2;
     lastCommittedPositionMsRef.current = -1;
@@ -922,7 +965,7 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
         <div className="flex items-center justify-end gap-2 px-6 py-2.5 shrink-0 z-10 border-b border-white/5 bg-transparent">
           {hasRomanization && (
             <button
-              onClick={() => setShowRomanization(!showRomanization)}
+              onClick={() => setManualRomanization(!showRomanization)}
               title="Toggle Romanization (Pronunciation)"
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
                 showRomanization
@@ -937,7 +980,7 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
 
           {hasTranslation && (
             <button
-              onClick={() => setShowTranslation(!showTranslation)}
+              onClick={() => setManualTranslation(!showTranslation)}
               title="Toggle English Translation"
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
                 showTranslation

@@ -43,8 +43,9 @@ function attachVisualizerSubscription(vizStore: typeof UseLyricVisualizerStoreTy
     const layoutChanged = cfg.nowPlayingLayout !== prevCfg.nowPlayingLayout;
     const hideCoverChanged = cfg.hideAlbumCover !== prevCfg.hideAlbumCover;
     const alignChanged = cfg.textAlign !== prevCfg.textAlign;
+    const scriptModeChanged = cfg.scriptMode !== prevCfg.scriptMode;
 
-    if (!layoutChanged && !hideCoverChanged && !alignChanged) return;
+    if (!layoutChanged && !hideCoverChanged && !alignChanged && !scriptModeChanged) return;
 
     const currentSettings = useSettingsStore.getState().settings;
     const delta: Partial<AppSettings> = {};
@@ -68,6 +69,13 @@ function attachVisualizerSubscription(vizStore: typeof UseLyricVisualizerStoreTy
     if (alignChanged && cfg.textAlign && currentSettings.lyricsAlignment !== cfg.textAlign) {
       delta.lyricsAlignment = cfg.textAlign;
       delta['lyrics.alignment'] = cfg.textAlign;
+    }
+    if (
+      scriptModeChanged &&
+      cfg.scriptMode &&
+      currentSettings['lyrics.scriptMode'] !== cfg.scriptMode
+    ) {
+      delta['lyrics.scriptMode'] = cfg.scriptMode;
     }
 
     if (Object.keys(delta).length > 0) {
@@ -97,6 +105,38 @@ async function ensureVizStore(): Promise<typeof UseLyricVisualizerStoreType | nu
   return null;
 }
 
+function pushDiscordRpcConfig(updated: AppSettings): void {
+  try {
+    const api =
+      typeof window !== 'undefined'
+        ? (window as any).electronAPI
+        : (globalThis as any).window?.electronAPI;
+    if (typeof api?.discordRpcConfigure !== 'function') return;
+
+    const rawClientId =
+      typeof updated['scrobble.discordClientId'] === 'string'
+        ? updated['scrobble.discordClientId'].trim()
+        : '';
+    const showQualityAndButtons = Boolean(updated['scrobble.discordShowQualityAndButtons']);
+
+    Promise.resolve(
+      api.discordRpcConfigure({
+        enabled: Boolean(updated['scrobble.discordRpcEnabled']),
+        clientId: rawClientId || defaultAppSettings['scrobble.discordClientId'],
+        displayFormat:
+          updated['scrobble.discordDisplayFormat'] ||
+          defaultAppSettings['scrobble.discordDisplayFormat'],
+        showTimeRemaining: Boolean(updated['scrobble.discordShowTimeRemaining']),
+        showAlbumArt: Boolean(updated['scrobble.discordShowAlbumArt']),
+        showQualityAndButtons,
+        showButtons: showQualityAndButtons,
+      })
+    ).catch(() => {});
+  } catch {
+    // Non-fatal in isolated test environments
+  }
+}
+
 function pushSettingsToVisualizer(
   updated: AppSettings,
   delta?: Partial<AppSettings>,
@@ -115,6 +155,11 @@ function pushSettingsToVisualizer(
       (delta
         ? 'lyricsAlignment' in delta || 'lyrics.alignment' in delta
         : updated.lyricsAlignment !== defaultAppSettings.lyricsAlignment);
+    const shouldSyncScriptMode =
+      isReset ||
+      (delta
+        ? 'lyrics.scriptMode' in delta
+        : updated['lyrics.scriptMode'] !== defaultAppSettings['lyrics.scriptMode']);
 
     if (shouldSyncLayout && viz.config.nowPlayingLayout !== updated.nowPlayingLayout) {
       viz.setNowPlayingLayout?.(updated.nowPlayingLayout);
@@ -124,6 +169,9 @@ function pushSettingsToVisualizer(
     }
     if (shouldSyncAlign && viz.config.textAlign !== updated.lyricsAlignment) {
       viz.setTextAlign?.(updated.lyricsAlignment);
+    }
+    if (shouldSyncScriptMode && viz.config.scriptMode !== updated['lyrics.scriptMode']) {
+      viz.setScriptMode?.(updated['lyrics.scriptMode']);
     }
   } catch {
     // Ignore in isolated mock tests
@@ -168,6 +216,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         ) {
           vizDelta.hideAlbumCover = vizCfg.hideAlbumCover;
         }
+        if (
+          merged['lyrics.scriptMode'] === defaultAppSettings['lyrics.scriptMode'] &&
+          vizCfg.scriptMode &&
+          vizCfg.scriptMode !== merged['lyrics.scriptMode']
+        ) {
+          vizDelta['lyrics.scriptMode'] = vizCfg.scriptMode;
+        }
         if (Object.keys(vizDelta).length > 0) {
           merged = mergeSettings(merged, vizDelta);
         }
@@ -176,10 +231,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       set({ settings: merged, isLoaded: true, isLoading: false });
       applyThemeSettings(merged);
       pushSettingsToVisualizer(merged);
+      pushDiscordRpcConfig(merged);
     } catch (err) {
       console.warn('[settingsStore] initSettings error, using defaults:', err);
       set({ settings: { ...defaultAppSettings }, isLoaded: true, isLoading: false });
       applyThemeSettings(defaultAppSettings);
+      pushDiscordRpcConfig(defaultAppSettings);
     }
   },
 
@@ -194,6 +251,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       pushSettingsToVisualizer(updated, delta);
     } else {
       ensureVizStore().then(() => pushSettingsToVisualizer(updated, delta));
+    }
+    if (Object.keys(delta).some((key) => key.startsWith('scrobble.discord'))) {
+      pushDiscordRpcConfig(updated);
     }
 
     if (storageService) {
@@ -218,6 +278,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     const defaults = { ...defaultAppSettings };
     set({ settings: defaults });
     applyThemeSettings(defaults);
+    pushDiscordRpcConfig(defaults);
     if (cachedVizStore) {
       pushSettingsToVisualizer(defaults, undefined, true);
     } else {

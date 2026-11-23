@@ -7,11 +7,13 @@ import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawEmptyState,
+  drawInstrumentalIndicator,
   drawRoundedRectPath,
   easeOutBack,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -23,22 +25,26 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
 
   private scrollY = 0;
   private initialized = false;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 {
     return variationId === 'club-neon' ? 1 : 0;
   }
 
-  getMeasurementSpec(): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     return {
       fontWeight: 800,
       fontSizeMultiplier: 1.12,
       maxLineWidthRatio: 0.82,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
   reset(): void {
     this.scrollY = 0;
     this.initialized = false;
+    this.lastKnownActiveIdx = -1;
   }
 
   render(
@@ -122,12 +128,30 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
-      drawEmptyState(ctx, frame, width, height, 'Ready for stage cue');
+      if (frame.isInstrumentalGap) {
+        drawInstrumentalIndicator(ctx, frame, width, height, fillAccent);
+      } else {
+        drawEmptyState(ctx, frame, width, height, 'Ready for stage cue');
+      }
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
+    const hasActiveLine =
+      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -145,6 +169,11 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
     const effectiveScrollY = this.scrollY + manualScroll;
     const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
 
+    if (frame.isInstrumentalGap && !isBrowsing && !hasActiveLine) {
+      drawInstrumentalIndicator(ctx, frame, width, height, fillAccent);
+      return;
+    }
+
     const focal = getFocalRect(frame, width);
     const focalWidth = focal.width;
     const cx = focalWidth * 0.5;
@@ -156,11 +185,6 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
     const hoveredIdx = typeof frame.hoveredLineIndex === 'number' ? frame.hoveredLineIndex : -1;
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -171,6 +195,11 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
     const overallLineProgress = clamp01(
       (Math.max(0, frame.activeWordIndex) + clamp01(frame.wordProgress)) / totalWords
     );
+    const activeRawLine = frame.lyrics?.lines[scrollIdx];
+    const activeResolved = activeRawLine
+      ? resolveDisplayLine(activeRawLine, frame.scriptMode, this.id)
+      : null;
+    const activeSecText = activeLine.secondaryText ?? activeResolved?.secondaryText ?? null;
 
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
@@ -178,11 +207,14 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
       const startY = cy + lineCenterOffset - line.height * 0.5;
 
       if (startY + line.height < -60 || startY > height + 60) continue;
-      if (!isBrowsing && i !== activeIdx && i !== activeIdx + 1) continue;
+      if (!isBrowsing && i !== scrollIdx && i !== scrollIdx + 1) continue;
 
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
       const lineBaseX = isLeftAlign ? leftPad : line.x;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
 
       if (isActive) {
         const hitLocalX = Math.max(8, lineBaseX - 18);
@@ -246,11 +278,27 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
           }
         }
 
+        if (secondaryText) {
+          const secFont = Math.max(12, Math.round(fontSize * 0.38));
+          ctx.save();
+          ctx.font = `500 ${secFont}px ${frame.fontFamily}`;
+          ctx.fillStyle = frame.palette.textUpcoming;
+          ctx.globalAlpha = 0.76 * frame.lineFadeAlpha;
+          ctx.textAlign = isLeftAlign ? 'left' : 'center';
+          ctx.fillText(
+            secondaryText,
+            isLeftAlign ? leftPad : cx,
+            startY + line.height + 4
+          );
+          ctx.restore();
+        }
+
         // Crisp horizontal line progress bar
+        const secBarOffset = secondaryText ? 22 : 0;
         const barW = Math.min(focalWidth * 0.56, Math.max(180, line.width));
         const barH = 5;
         const barX = isLeftAlign ? leftPad : cx - barW * 0.5;
-        const barY = startY + line.height + 20;
+        const barY = startY + line.height + 20 + secBarOffset;
 
         drawRoundedRectPath(ctx, barX, barY, barW, barH, 3);
         ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
@@ -259,11 +307,11 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
         drawRoundedRectPath(ctx, barX, barY, Math.max(6, barW * overallLineProgress), barH, 3);
         ctx.fillStyle = fillAccent;
         ctx.fill();
-      } else if (!isBrowsing && i === activeIdx + 1) {
+      } else if (!isBrowsing && i === scrollIdx + 1) {
         // Upcoming line preview pill
         const pillFont = Math.max(13, Math.round(fontSize * 0.44));
         ctx.font = `600 ${pillFont}px ${frame.fontFamily}`;
-        const label = `NEXT  ${line.text}`;
+        const label = `NEXT  ${line.text || resolved?.primaryText || ''}`;
         const labelW = Math.min(
           focalWidth * 0.78,
           (ctx.measureText(label).width || label.length * pillFont * 0.55) + 34
@@ -272,7 +320,7 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
         const pillX = isLeftAlign ? leftPad : cx - labelW * 0.5;
         const activeStartY =
           cy + (activeLine.y + activeLine.height * 0.5 - effectiveScrollY) - activeLine.height * 0.5;
-        const pillY = activeStartY + activeLine.height + 46;
+        const pillY = activeStartY + activeLine.height + 46 + (activeSecText ? 22 : 0);
 
         frame.recordHitRect?.(i, focal.left + pillX, pillY, labelW, pillH);
 
@@ -327,5 +375,9 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
     }
 
     ctx.restore();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      drawInstrumentalIndicator(ctx, frame, width, height, fillAccent);
+    }
   }
 }

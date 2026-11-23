@@ -1,18 +1,18 @@
 // Style: StarfieldShip3D
 // Variations:
-//  0: 'deep-space' (default) - deep cosmos starfield + multi-part 3D starfighter & faceted asteroids
+//  0: 'deep-space' (default) - deep cosmos starfield + multi-part Three.js 3D starfighter & cratered asteroids
 //  1: 'nebula-run'           - album-tinted cosmic nebula clouds + avoidance AI flight
 //  2: 'retro-wireframe'      - vector wireframe starfighter, asteroids, and perspective grid
 
 import type { StyleFrameContext } from '../../core/models';
 import {
   clamp01,
-  drawEmptyState,
   drawRoundedRectPath,
   formatTimestamp,
   getFocalRect,
   isTransparentStage,
   isUnsyncedLyrics,
+  resolveDisplayLine,
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
@@ -21,11 +21,12 @@ import { setShip3DSceneHint } from '../ship3dScene';
 export class StarfieldShip3DStyle implements ILyricVisualStyle {
   readonly id = 'StarfieldShip3D' as const;
   readonly name = 'Starfield Ship 3D';
-  readonly webGlEffect = 'none' as const;
+  readonly webGlEffect = 'starfield' as const;
   readonly usesShip3D = true;
 
   private scrollY = 0;
   private initialized = false;
+  private lastKnownActiveIdx = -1;
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'nebula-run') return 1;
@@ -33,7 +34,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     return 0;
   }
 
-  getMeasurementSpec(frame: StyleFrameContext): StyleMeasurementSpec {
+  getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     // Synchronize variation & backdrop settings before Ship3DScene.render() runs in LyricStageRenderer
     setShip3DSceneHint(
       frame?.variationId,
@@ -42,14 +43,115 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     );
     return {
       fontWeight: 700,
-      fontSizeMultiplier: 1.02,
-      maxLineWidthRatio: 0.78,
+      fontSizeMultiplier: 0.96,
+      maxLineWidthRatio: 0.72,
+      scriptMode: frame?.scriptMode ?? 'auto',
+      styleId: this.id,
     };
   }
 
   reset(): void {
     this.scrollY = 0;
     this.initialized = false;
+    this.lastKnownActiveIdx = -1;
+  }
+
+  private drawSignalInstrumentalWaveform(
+    ctx: CanvasRenderingContext2D,
+    frame: StyleFrameContext,
+    hudX: number,
+    hudW: number,
+    lyricTop: number,
+    lyricBottom: number,
+    isTransparent: boolean
+  ): void {
+    const areaH = Math.max(48, lyricBottom - lyricTop);
+    const cx = hudX + hudW * 0.5;
+    const waveCenterY = lyricTop + areaH * 0.42;
+    const motion = frame.reduceMotion ? 0 : 1;
+    const t = frame.timeSeconds || 0;
+    const bass = frame.audio?.bassEnergy ?? 0;
+    const mid = frame.audio?.midEnergy ?? 0;
+    const treble = frame.audio?.trebleEnergy ?? 0;
+    const rms = frame.audio?.rmsLevel ?? 0;
+    const beatBoost = motion > 0 && frame.audio?.beatDetected ? 0.25 : 0;
+
+    ctx.save();
+
+    // Subtle baseline across HUD interior
+    ctx.strokeStyle = frame.palette.accentPrimary;
+    ctx.globalAlpha = isTransparent ? 0.25 : 0.22;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(hudX + 24, waveCenterY);
+    ctx.lineTo(hudX + hudW - 24, waveCenterY);
+    ctx.stroke();
+
+    // 18-bar beat-reactive telemetry waveform centered safely below lyricTop
+    const barCount = 18;
+    const barW = 5;
+    const barGap = 7;
+    const totalW = barCount * barW + (barCount - 1) * barGap;
+    const startX = cx - totalW * 0.5;
+    const maxBarH = Math.max(18, Math.min(44, areaH * 0.46));
+
+    for (let i = 0; i < barCount; i++) {
+      const band = i < 6 ? bass : i < 12 ? mid : treble;
+      const env = Math.sin(((i + 0.5) / barCount) * Math.PI);
+      const wave =
+        motion === 0
+          ? 0.45
+          : 0.25 + 0.75 * Math.abs(Math.sin(t * 5.6 + i * 0.72));
+      const amp = clamp01(0.18 + env * wave * (0.4 + band * 0.8 + rms * 0.35 + beatBoost));
+      const bh = Math.max(4, Math.round(maxBarH * amp));
+      const bx = startX + i * (barW + barGap);
+      const by = waveCenterY - bh * 0.5;
+      ctx.fillStyle = i % 2 === 0 ? frame.palette.accentPrimary : frame.palette.accentSecondary;
+      ctx.globalAlpha = 0.74 + amp * 0.26;
+      drawRoundedRectPath(ctx, bx, by, barW, bh, 2.5);
+      ctx.fill();
+    }
+
+    const countdown =
+      typeof frame.timeUntilNextLine === 'number' &&
+      Number.isFinite(frame.timeUntilNextLine) &&
+      frame.timeUntilNextLine > 0 &&
+      frame.timeUntilNextLine <= 3
+        ? `  //  NEXT IN ${Math.ceil(frame.timeUntilNextLine)}S`
+        : '';
+    const labelY = Math.min(lyricBottom - 20, Math.max(lyricTop + 4, waveCenterY + maxBarH * 0.5 + 14));
+    ctx.font = `700 12px "JetBrains Mono", monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = frame.palette.textActive;
+    ctx.globalAlpha = motion === 0 ? 0.84 : 0.72 + 0.28 * Math.sin(t * 3.0);
+    ctx.fillText(`SIGNAL // INSTRUMENTAL${countdown}`, cx, labelY);
+
+    const progress =
+      typeof frame.gapProgress === 'number' && Number.isFinite(frame.gapProgress)
+        ? clamp01(frame.gapProgress)
+        : 0;
+    if (
+      progress > 0 &&
+      progress < 1 &&
+      typeof frame.timeUntilNextLine === 'number' &&
+      Number.isFinite(frame.timeUntilNextLine)
+    ) {
+      const trackW = Math.min(320, hudW - 80);
+      const trackX = cx - trackW * 0.5;
+      const trackY = lyricBottom - 6;
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = '#ffffff';
+      drawRoundedRectPath(ctx, trackX, trackY, trackW, 2.5, 1.25);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.92;
+      ctx.fillStyle = frame.palette.accentPrimary;
+      drawRoundedRectPath(ctx, trackX, trackY, Math.max(6, trackW * progress), 2.5, 1.25);
+      ctx.fill();
+    }
+
+    ctx.restore();
   }
 
   render(
@@ -68,12 +170,17 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     const focal = getFocalRect(frame, width);
     const focalWidth = focal.width;
 
-    // Cockpit HUD framing brackets in upper lyric zone
+    // Cockpit HUD framing brackets in upper lyric zone with generous padded interior
     const hudW = Math.min(focalWidth * 0.86, 900);
-    const hudH = Math.max(128, Math.min(height * 0.38, 236));
+    const hudH = Math.max(176, Math.min(height * 0.44, 268));
     const hudX = (focalWidth - hudW) * 0.5;
-    const hudY = Math.max(22, height * 0.12);
+    const hudY = Math.max(20, height * 0.1);
     const corner = 18;
+    const lyricTop = hudY + 62; // >= 36px clearance below top HUD header bar (hudY + 10..24)
+    const lyricBottom = hudY + hudH - 14;
+    const lyricAreaH = Math.max(72, lyricBottom - lyricTop);
+    const lyricCenterY = lyricTop + lyricAreaH * 0.5;
+
     const bpmVal = Math.round(frame.trackMetadata?.bpm || frame.audio.estimatedBpm || 120);
     const warpVal = (
       (bpmVal / 120) *
@@ -81,11 +188,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     ).toFixed(2);
 
     ctx.save();
-    if (focal.left > 2) {
-      ctx.beginPath();
-      ctx.rect(focal.left, 0, Math.max(1, width - focal.left), height);
-      ctx.clip();
-    }
+    // WS2: no full-height focal.left clip; translate smoothly into focal stage
     if (focal.left > 0) {
       ctx.translate(focal.left, 0);
     }
@@ -94,7 +197,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     if (!isTransparent) {
       ctx.save();
       drawRoundedRectPath(ctx, hudX, hudY, hudW, hudH, 12);
-      ctx.fillStyle = varIdx === 2 ? 'rgba(6, 4, 16, 0.58)' : 'rgba(4, 7, 15, 0.42)';
+      ctx.fillStyle = varIdx === 2 ? 'rgba(6, 4, 16, 0.58)' : 'rgba(4, 7, 15, 0.46)';
       ctx.fill();
       ctx.restore();
     }
@@ -121,7 +224,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     ctx.lineTo(hudX + hudW, hudY + hudH - corner);
     ctx.stroke();
 
-    // Cockpit telemetry bar
+    // Cockpit telemetry bar (strictly inside top HUD header above lyricTop)
     if (!isTransparent) {
       const modeTag =
         varIdx === 0 ? 'DEEP-SPACE' : varIdx === 1 ? 'NEBULA-RUN' : 'VECTOR-WIRE';
@@ -129,7 +232,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.fillStyle = frame.palette.accentSecondary;
-      ctx.globalAlpha = 0.72;
+      ctx.globalAlpha = 0.78;
       ctx.fillText(
         `HUD [${modeTag}] // WARP ${warpVal}C // ${bpmVal} BPM`,
         hudX + 14,
@@ -141,18 +244,53 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
         hudX + hudW - 14,
         hudY + 10
       );
+
+      // Subtle header divider rule well above lyricTop
+      ctx.strokeStyle = frame.palette.accentPrimary;
+      ctx.globalAlpha = 0.2;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(hudX + 14, hudY + 34);
+      ctx.lineTo(hudX + hudW - 14, hudY + 34);
+      ctx.stroke();
     }
+
+    const manualScroll =
+      typeof frame.manualScrollY === 'number' && Number.isFinite(frame.manualScrollY)
+        ? frame.manualScrollY
+        : 0;
+    const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
 
     const layout = frame.layout;
     if (!layout || layout.lines.length === 0) {
+      // Strictly clip interior HUD area for empty / instrumental signal
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(hudX + 10, lyricTop, Math.max(1, hudW - 20), lyricAreaH);
+      ctx.clip();
+      this.drawSignalInstrumentalWaveform(ctx, frame, hudX, hudW, lyricTop, lyricBottom, isTransparent);
       ctx.restore();
-      drawEmptyState(ctx, frame, width, hudY + hudH * 1.1, 'Autopilot Engaged');
+      ctx.restore();
       return;
     }
 
-    const activeIdx = Math.max(0, Math.min(layout.lines.length - 1, frame.activeLineIndex));
-    const activeLine = layout.lines[activeIdx];
-    const targetScrollY = activeLine.y + activeLine.height * 0.5;
+    // WS6: preserve lastActiveLineIndex instead of clamping -1 -> 0
+    const hasActiveLine = frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+    if (hasActiveLine) {
+      this.lastKnownActiveIdx = frame.activeLineIndex;
+    }
+    const fallbackIdx =
+      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+        ? frame.lastActiveLineIndex
+        : this.lastKnownActiveIdx >= 0
+        ? this.lastKnownActiveIdx
+        : 0;
+    const scrollIdx = Math.max(
+      0,
+      Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
+    );
+    const anchorLine = layout.lines[scrollIdx];
+    const targetScrollY = anchorLine.y + anchorLine.height * 0.5;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
       this.scrollY = targetScrollY;
@@ -162,19 +300,35 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       this.scrollY += (targetScrollY - this.scrollY) * rate;
     }
 
-    const manualScroll =
-      typeof frame.manualScrollY === 'number' && Number.isFinite(frame.manualScrollY)
-        ? frame.manualScrollY
-        : 0;
     const effectiveScrollY = this.scrollY + manualScroll;
-    const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
+
+    // Strictly clip all HUD lyric lines and waveforms to padded cockpit HUD interior below header
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(hudX + 10, lyricTop, Math.max(1, hudW - 20), lyricAreaH);
+    ctx.clip();
+
+    if (frame.isInstrumentalGap && !isBrowsing) {
+      this.drawSignalInstrumentalWaveform(ctx, frame, hudX, hudW, lyricTop, lyricBottom, isTransparent);
+      ctx.restore();
+      ctx.restore();
+      return;
+    }
 
     const fontSize = layout.fontSizePx;
-    const hudCenterY = hudY + hudH * 0.54;
     const unsyncedOrLineLevel = isUnsyncedLyrics(frame) || frame.activeWordIndex < 0;
     const isLeftAlign = frame.textAlign === 'left';
     const leftPad = hudX + 24;
     const hoveredIdx = typeof frame.hoveredLineIndex === 'number' ? frame.hoveredLineIndex : -1;
+
+    // Ensure tall wrapped active line never starts above lyricTop during normal playback
+    let centerAnchorY = lyricCenterY;
+    if (!isBrowsing && hasActiveLine) {
+      const activeRawY = lyricCenterY + (anchorLine.y + anchorLine.height * 0.5 - effectiveScrollY) - anchorLine.height * 0.5;
+      if (activeRawY < lyricTop + 4) {
+        centerAnchorY += lyricTop + 4 - activeRawY;
+      }
+    }
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
@@ -182,23 +336,32 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
       const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
-      const screenY = hudCenterY + lineCenterOffset - line.height * 0.5;
+      const screenY = centerAnchorY + lineCenterOffset - line.height * 0.5;
 
-      if (screenY + line.height < hudY - 24 || screenY > hudY + hudH + 44) continue;
-      if (!isBrowsing && i !== activeIdx && i !== activeIdx + 1) continue;
+      // Strict HUD interior vertical bounds guard (ensures zero text collides with HUD header even in headless mocks)
+      if (screenY + line.height < lyricTop || screenY > lyricBottom) continue;
+      if (!isBrowsing && Math.abs(i - scrollIdx) > 1) continue;
 
-      const isActive = i === activeIdx;
+      const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
-      const lineBaseX = isLeftAlign ? leftPad : line.x;
+      const rawLine = frame.lyrics?.lines[i];
+      const resolved = rawLine ? resolveDisplayLine(rawLine, frame.scriptMode, this.id) : null;
+      const secondaryText = line.secondaryText ?? resolved?.secondaryText ?? null;
 
-      if (isActive || isBrowsing) {
-        const hitLocalX = Math.max(hudX + 8, lineBaseX - 14);
-        const hitW = Math.min(hudW - 16, Math.max(line.width + 28, 160));
-        frame.recordHitRect?.(i, focal.left + hitLocalX, screenY - 5, hitW, line.height + 10);
+      const lineBaseX = isLeftAlign
+        ? leftPad
+        : Math.max(hudX + 20, hudX + (hudW - line.width) * 0.5);
+
+      const hitTop = Math.max(lyricTop, screenY - 4);
+      const hitBottom = Math.min(lyricBottom, screenY + line.height + 4);
+      if (hitBottom > hitTop + 4) {
+        const hitLocalX = Math.max(hudX + 12, lineBaseX - 12);
+        const hitW = Math.min(hudW - 24, Math.max(line.width + 24, 150));
+        frame.recordHitRect?.(i, focal.left + hitLocalX, hitTop, hitW, hitBottom - hitTop);
 
         if (isHovered) {
           ctx.save();
-          drawRoundedRectPath(ctx, hitLocalX, screenY - 5, hitW, line.height + 10, 8);
+          drawRoundedRectPath(ctx, hitLocalX, hitTop, hitW, hitBottom - hitTop, 8);
           ctx.fillStyle = 'rgba(94, 234, 212, 0.12)';
           ctx.fill();
           ctx.strokeStyle = frame.palette.accentPrimary;
@@ -215,6 +378,8 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
           const word = line.words[w];
           const wx = lineBaseX + word.x;
           const wy = screenY + word.y;
+          if (wy < lyricTop || wy + fontSize > lyricBottom + 4) continue;
+
           const isCurrent = unsyncedOrLineLevel ? true : w === frame.activeWordIndex;
           const isPast = !unsyncedOrLineLevel && w < frame.activeWordIndex;
 
@@ -228,37 +393,45 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
           ctx.shadowBlur = isCurrent ? 20 + frame.audio.bassEnergy * 12 : isPast ? 8 : 0;
           ctx.fillText(word.text, wx, wy);
         }
-      } else if (!isBrowsing && i === activeIdx + 1) {
-        // Next HUD line cue below HUD bracket
-        const nextY = hudY + hudH + 10;
-        const hitLocalX = Math.max(hudX + 16, (focalWidth - line.width * 0.55) * 0.5 - 12);
-        const hitW = Math.min(hudW - 32, Math.max(line.width * 0.55 + 24, 140));
-        frame.recordHitRect?.(i, focal.left + hitLocalX, nextY - 4, hitW, 26);
 
-        ctx.save();
-        ctx.textAlign = isLeftAlign ? 'left' : 'center';
-        ctx.font = `500 ${Math.max(13, Math.round(fontSize * 0.48))}px ${frame.fontFamily}`;
-        ctx.fillStyle = isHovered ? frame.palette.textActive : frame.palette.textUpcoming;
-        ctx.globalAlpha = isHovered ? 0.82 : 0.48;
-        ctx.shadowBlur = 0;
-        ctx.fillText(line.text, isLeftAlign ? leftPad : focalWidth * 0.5, nextY);
-        ctx.restore();
+        // Secondary translation / original subtitle line inside HUD interior
+        if (secondaryText) {
+          const secFont = Math.max(11, Math.round(fontSize * 0.42));
+          const secY = screenY + line.height + 4;
+          if (secY >= lyricTop && secY + secFont <= lyricBottom) {
+            ctx.save();
+            ctx.font = `500 ${secFont}px ${frame.fontFamily}`;
+            ctx.textAlign = isLeftAlign ? 'left' : 'center';
+            ctx.fillStyle = frame.palette.textUpcoming;
+            ctx.globalAlpha = 0.72 * frame.lineFadeAlpha;
+            ctx.shadowBlur = 0;
+            ctx.fillText(secondaryText, isLeftAlign ? leftPad : hudX + hudW * 0.5, secY);
+            ctx.restore();
+          }
+        }
       } else {
-        const subScale = 0.76;
-        const subFont = Math.max(13, Math.round(fontSize * subScale));
+        const subScale = isBrowsing ? 0.76 : 0.62;
+        const subFont = Math.max(12, Math.round(fontSize * subScale));
+        const subLineBaseX = isLeftAlign
+          ? leftPad
+          : Math.max(hudX + 20, hudX + (hudW - line.width * subScale) * 0.5);
         ctx.save();
         ctx.font = `500 ${subFont}px ${frame.fontFamily}`;
-        ctx.fillStyle = frame.palette.textUpcoming;
-        ctx.globalAlpha = isHovered ? 0.78 : 0.44;
+        ctx.fillStyle = isHovered ? frame.palette.textActive : frame.palette.textUpcoming;
+        ctx.globalAlpha = isHovered ? 0.8 : 0.46;
         ctx.shadowBlur = 0;
         for (let w = 0; w < line.words.length; w++) {
           const word = line.words[w];
-          ctx.fillText(word.text, lineBaseX + word.x * subScale, screenY + word.y * subScale);
+          const wx = subLineBaseX + word.x * subScale;
+          const wy = screenY + word.y * subScale;
+          if (wy < lyricTop || wy + subFont > lyricBottom + 2) continue;
+          ctx.fillText(word.text, wx, wy);
         }
         ctx.restore();
       }
     }
 
-    ctx.restore();
+    ctx.restore(); // end HUD interior clip
+    ctx.restore(); // end focal translate
   }
 }

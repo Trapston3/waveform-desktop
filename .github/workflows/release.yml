@@ -24,8 +24,17 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Build Rust native core
+        run: npm run build:rust
+
+      - name: Run Rust native core unit tests
+        run: cargo test --manifest-path native/waveform-core/Cargo.toml
 
       - name: Run TypeScript typecheck
         run: npm run typecheck

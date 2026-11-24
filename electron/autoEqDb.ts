@@ -1,6 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { NativeAutoEqStatus, NativeCoreBindings } from './nativeCore.js';
+
+let nativeCoreModule: { getNativeCore: () => NativeCoreBindings | null } | null = null;
+try {
+  nativeCoreModule = await import('./nativeCore.js');
+} catch {
+  try {
+    nativeCoreModule = await import(new URL('./nativeCore.ts', import.meta.url).href);
+  } catch {
+    nativeCoreModule = null;
+  }
+}
+
+function getNativeCoreSafe(): NativeCoreBindings | null {
+  return nativeCoreModule ? nativeCoreModule.getNativeCore() : null;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +61,8 @@ export interface AutoEqStatus {
   count: number;
   totalRows: number;
   parametricRows: number;
+  totalCount: number;
+  parametricCount: number;
   dbPath: string | null;
   loadTimeMs: number;
   error: string | null;
@@ -798,6 +816,8 @@ class AutoEqDatabaseEngine {
       count: this.entries.length,
       totalRows: this.totalRows,
       parametricRows: this.parametricRows,
+      totalCount: this.totalRows,
+      parametricCount: this.parametricRows,
       dbPath: this.dbPath,
       loadTimeMs: this.loadTimeMs,
       error: this.error,
@@ -1043,11 +1063,52 @@ class AutoEqDatabaseEngine {
 
 const sharedEngine = new AutoEqDatabaseEngine();
 
+function toAutoEqStatus(native: NativeAutoEqStatus): AutoEqStatus {
+  const total = native.totalRows ?? native.totalCount ?? native.count ?? 0;
+  const parametric = native.parametricRows ?? native.parametricCount ?? 0;
+  return {
+    ready: Boolean(native.ready),
+    count: native.count ?? total,
+    totalRows: total,
+    parametricRows: parametric,
+    totalCount: total,
+    parametricCount: parametric,
+    dbPath: native.dbPath ?? null,
+    loadTimeMs: native.loadTimeMs ?? 0,
+    error: native.error ?? null,
+  };
+}
+
+function ensureNativeAutoEqReady(candidatePaths?: string[]) {
+  const core = getNativeCoreSafe();
+  if (!core) return null;
+  try {
+    let status = core.autoeqStatus();
+    if (!status.ready || (candidatePaths && candidatePaths.length > 0)) {
+      status = core.autoeqInit(resolveAutoEqDbCandidatePaths(candidatePaths));
+    }
+    if (status.ready) {
+      return { core, status: toAutoEqStatus(status) };
+    }
+  } catch {
+    // Fallback to pure-TS engine
+  }
+  return null;
+}
+
 export function prewarmAutoEqDb(candidatePaths?: string[]): Promise<AutoEqStatus> {
+  const native = ensureNativeAutoEqReady(candidatePaths);
+  if (native) {
+    return Promise.resolve(native.status);
+  }
   return sharedEngine.init(candidatePaths);
 }
 
 export function getAutoEqStatus(candidatePaths?: string[]): AutoEqStatus {
+  const native = ensureNativeAutoEqReady(candidatePaths);
+  if (native) {
+    return native.status;
+  }
   sharedEngine.ensureLoadedSync(candidatePaths);
   return sharedEngine.getStatus();
 }
@@ -1057,6 +1118,50 @@ export function searchAutoEqDb(
   limit = 20,
   candidatePaths?: string[]
 ): AutoEqSearchResult[] {
+  const cleaned = sanitizeQuery(query);
+  if (!cleaned) return [];
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
+
+  const native = ensureNativeAutoEqReady(candidatePaths);
+  if (native) {
+    try {
+      const results: AutoEqSearchResult[] = native.core
+        .autoeqSearch(cleaned, safeLimit)
+        .map((r) => ({
+          id: r.id,
+          name: r.name,
+          meta: r.meta,
+          parametric: r.parametric,
+          rig: r.rig,
+        }));
+
+      if (results.length < safeLimit) {
+        const qLower = cleaned.toLowerCase();
+        const qCompact = normalizeAutoEqCompact(qLower);
+        const seenNames = new Set(results.map((r) => r.name.toLowerCase()));
+        for (const c of CURATED_AUTOEQ_PROFILES) {
+          const cLower = c.name.toLowerCase();
+          const cCompact = normalizeAutoEqCompact(cLower);
+          if (seenNames.has(cLower)) continue;
+          if (cLower.includes(qLower) || cCompact.includes(qCompact) || c.id.includes(qLower)) {
+            seenNames.add(cLower);
+            results.push({
+              id: c.id,
+              name: c.name,
+              meta: c.source,
+              parametric: true,
+              rig: c.source,
+            });
+            if (results.length >= safeLimit) break;
+          }
+        }
+      }
+      return results.slice(0, safeLimit);
+    } catch {
+      // Fallback to pure-TS engine
+    }
+  }
+
   sharedEngine.ensureLoadedSync(candidatePaths);
   return sharedEngine.search(query, limit);
 }
@@ -1065,6 +1170,42 @@ export function getAutoEqProfile(
   nameOrId: string | number,
   candidatePaths?: string[]
 ): AutoEqProfile | null {
+  if (typeof nameOrId === 'string') {
+    const cleaned = sanitizeQuery(nameOrId);
+    if (!cleaned) return null;
+    const lower = cleaned.toLowerCase();
+    for (const curated of CURATED_AUTOEQ_PROFILES) {
+      if (curated.id.toLowerCase() === lower || curated.name.toLowerCase() === lower) {
+        return {
+          ...curated,
+          filters: curated.filters.map((f) => ({ ...f })),
+        };
+      }
+    }
+  }
+
+  const native = ensureNativeAutoEqReady(candidatePaths);
+  if (native) {
+    try {
+      const profile = native.core.autoeqFindProfile(nameOrId);
+      if (profile) {
+        return {
+          id: profile.id,
+          dbId: profile.dbId,
+          name: profile.name,
+          source: profile.source,
+          meta: profile.meta,
+          parametric: profile.parametric,
+          preampGainDb: profile.preampGainDb,
+          filters: profile.filters.map((f) => ({ ...f })),
+        };
+      }
+      return null;
+    } catch {
+      // Fallback to pure-TS engine
+    }
+  }
+
   sharedEngine.ensureLoadedSync(candidatePaths);
   return sharedEngine.getProfile(nameOrId);
 }

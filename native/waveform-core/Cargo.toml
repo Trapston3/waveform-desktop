@@ -1,0 +1,30 @@
+[package]
+name = "waveform-core"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { version = "2.16.17", features = ["napi8", "async"] }
+napi-derive = "2.16.13"
+rusqlite = { version = "0.32", features = ["bundled"] }
+lofty = "0.22"
+rayon = "1.10"
+walkdir = "2.5"
+sha2 = "0.10"
+sha1 = "0.10"
+realfft = "3.4"
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["load-dynamic", "std"] }
+once_cell = "1.20"
+unicode-normalization = "0.1"
+
+[build-dependencies]
+napi-build = "2.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

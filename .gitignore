@@ -30,3 +30,7 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Rust native core build artifacts
+native/waveform-core/target/
+native/waveform-core/*.node

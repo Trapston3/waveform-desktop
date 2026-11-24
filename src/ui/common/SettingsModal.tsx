@@ -18,8 +18,12 @@ import {
   FolderOpen,
   Sparkles,
   Trash2,
+  Download,
+  RefreshCw,
+  ExternalLink,
+  Loader2,
 } from 'lucide-react';
-import { useSettingsStore } from '../../state/settingsStore';
+import { useSettingsStore, useUpdateStore } from '../../state/settingsStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
 import {
@@ -61,7 +65,8 @@ type SettingsTab =
   | 'storage'
   | 'accounts'
   | 'integrations'
-  | 'ergonomics';
+  | 'ergonomics'
+  | 'updates';
 
 interface SettingEntry {
   id: string;
@@ -89,6 +94,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   } | null>(null);
 
   const { settings, updateSettings, resetToDefaults } = useSettingsStore();
+  const updateState = useUpdateStore((s) => s.state);
+  const checkForUpdates = useUpdateStore((s) => s.checkForUpdates);
+  const downloadAndInstallUpdate = useUpdateStore((s) => s.downloadAndInstall);
+  const openUpdateModal = useUpdateStore((s) => s.openModal);
+  const openReleasePage = useUpdateStore((s) => s.openReleasePage);
   const resetListeningData = useLibraryStore((s) => s.resetListeningData);
   const startLocalMediaScan = useLibraryStore((s) => s.startLocalMediaScan);
 
@@ -243,6 +253,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     { id: 'accounts', label: 'Accounts', icon: <User size={16} /> },
     { id: 'integrations', label: 'Scrobble & Discord', icon: <Radio size={16} /> },
     { id: 'ergonomics', label: 'Desktop Ergonomics', icon: <Monitor size={16} /> },
+    { id: 'updates', label: 'App Updates', icon: <Download size={16} /> },
   ];
 
   const isDynamicAccent =
@@ -1417,6 +1428,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         />
       ),
     },
+
+    // App Updates
+    {
+      id: 'appUpdates',
+      tab: 'updates',
+      title: 'WaveForm Desktop Updates',
+      description: `Current version v${updateState.currentVersion} • Verify and install GitHub releases in one click`,
+      keywords: 'update version release check download installer sha256',
+      control: (
+        <button
+          type="button"
+          disabled={
+            updateState.status === 'checking' ||
+            updateState.status === 'downloading' ||
+            updateState.status === 'verifying' ||
+            updateState.status === 'installing'
+          }
+          onClick={() => void checkForUpdates()}
+          className="spring-press liquid-glass-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold text-[var(--color-primary)] hover:text-white disabled:opacity-50 disabled:pointer-events-none transition-colors cursor-pointer"
+        >
+          {updateState.status === 'checking' ? (
+            <Loader2 size={13} className="animate-spin text-[var(--color-accent)]" />
+          ) : (
+            <RefreshCw size={13} className="text-[var(--color-accent)]" />
+          )}
+          <span>{updateState.status === 'checking' ? 'Checking...' : 'Check for Updates'}</span>
+        </button>
+      ),
+    },
   ];
 
   const trimmedQuery = searchQuery.trim().toLowerCase();
@@ -1568,6 +1608,103 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                         ))}
                       </div>
                     )}
+
+                  {entry.id === 'appUpdates' && (
+                    <div className="p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-outline)] space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="space-y-0.5">
+                          <div className="font-semibold text-[var(--color-primary)]">
+                            {updateState.status === 'available'
+                              ? `Update Available: v${updateState.latestVersion}`
+                              : updateState.status === 'up-to-date'
+                                ? `You are up to date (v${updateState.currentVersion})`
+                                : updateState.status === 'checking'
+                                  ? 'Checking GitHub Releases...'
+                                  : updateState.status === 'downloading'
+                                    ? `Downloading v${updateState.latestVersion || ''}...`
+                                    : updateState.status === 'verifying'
+                                      ? 'Verifying SHA-256 signature...'
+                                      : updateState.status === 'installing'
+                                        ? 'Installing update and relaunching...'
+                                        : updateState.status === 'error'
+                                          ? 'Update check encountered an error'
+                                          : `Installed Version: v${updateState.currentVersion}`}
+                          </div>
+                          <div className="text-[11px] text-[var(--color-on-surface-variant)]">
+                            {updateState.error
+                              ? updateState.error
+                              : updateState.lastCheckedAt
+                                ? `Last checked ${new Date(updateState.lastCheckedAt).toLocaleTimeString()}`
+                                : 'Automatic cold-boot update checks run on launch'}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {updateState.releaseUrl && (
+                            <button
+                              type="button"
+                              onClick={() => void openReleasePage()}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] transition-colors cursor-pointer"
+                            >
+                              <ExternalLink size={11} />
+                              <span>Release Notes</span>
+                            </button>
+                          )}
+
+                          {(updateState.status === 'available' ||
+                            updateState.status === 'downloading' ||
+                            updateState.status === 'verifying' ||
+                            updateState.status === 'installing') && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={openUpdateModal}
+                                className="px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/15 text-[11px] font-semibold text-[var(--color-primary)] transition-colors cursor-pointer"
+                              >
+                                Details
+                              </button>
+                              <button
+                                type="button"
+                                disabled={updateState.status !== 'available'}
+                                onClick={() => void downloadAndInstallUpdate()}
+                                className="spring-press inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-[var(--color-accent)] hover:brightness-110 disabled:opacity-50 disabled:pointer-events-none text-[11px] font-semibold text-white transition-all cursor-pointer"
+                              >
+                                <Download size={12} />
+                                <span>One-Click Update Now</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {updateState.status === 'downloading' && updateState.progress && (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-[11px] font-mono text-[var(--color-on-surface-variant)]">
+                            <span>
+                              {(updateState.progress.bytesDownloaded / (1024 * 1024)).toFixed(1)} MB /{' '}
+                              {(
+                                (updateState.progress.totalBytes || updateState.assetSize || 0) /
+                                (1024 * 1024)
+                              ).toFixed(1)}{' '}
+                              MB
+                            </span>
+                            <span>
+                              {updateState.progress.percent.toFixed(0)}% •{' '}
+                              {(updateState.progress.bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s
+                            </span>
+                          </div>
+                          <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-150 ease-out"
+                              style={{
+                                width: `${Math.max(0, Math.min(100, updateState.progress.percent))}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))
             )}

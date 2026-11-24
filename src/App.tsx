@@ -11,7 +11,7 @@ import { BottomPlayerBar } from './ui/layout/BottomPlayerBar';
 import { usePlayerStore } from './state/playerStore';
 import { useQueueStore } from './state/queueStore';
 import { useLibraryStore } from './state/libraryStore';
-import { useSettingsStore } from './state/settingsStore';
+import { useSettingsStore, useUpdateStore } from './state/settingsStore';
 import { useNavigationStore } from './state/navigationStore';
 
 import { useAudioController } from './ui/hooks/useAudioController';
@@ -20,6 +20,7 @@ import { useWindowDimensions } from './ui/hooks/useWindowDimensions';
 import { useContextMenu } from './ui/hooks/useContextMenu';
 
 import { SettingsModal } from './ui/common/SettingsModal';
+import { UpdatePromptModal } from './ui/common/UpdatePromptModal';
 import { CreatePlaylistModal } from './ui/common/CreatePlaylistModal';
 import { ErrorBoundary } from './ui/common/ErrorBoundary';
 import { NowPlayingScreen } from './ui/player/NowPlayingScreen';
@@ -35,6 +36,7 @@ export const App: React.FC = () => {
     usePlayerStore.getState().initEngine();
     useLibraryStore.getState().initLibrary();
     useSettingsStore.getState().initSettings();
+    void useUpdateStore.getState().initUpdater();
   }, []);
 
   // 2. Wire desktop hooks
@@ -198,6 +200,8 @@ export const App: React.FC = () => {
         isOpen={isEqualizerOpen}
         onClose={() => setEqualizerOpen(false)}
       />
+
+      <UpdatePromptModal />
 
       <ContextMenu
         isOpen={menuState.isOpen}

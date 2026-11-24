@@ -11,9 +11,12 @@ import {
   Moon,
   ChevronLeft,
   ChevronRight,
+  ArrowUpCircle,
+  Loader2,
 } from 'lucide-react';
 import { useThemeStore } from '../theme/Theme';
 import { useNavigationStore } from '../../state/navigationStore';
+import { useUpdateStore } from '../../state/settingsStore';
 
 declare global {
   interface Window {
@@ -32,6 +35,25 @@ export const DesktopTitleBar: React.FC = () => {
   const [isMaximized, setIsMaximized] = useState(false);
   const { mode, toggleMode } = useThemeStore();
   const { goBack, goForward, canGoBack, canGoForward } = useNavigationStore();
+  const updateState = useUpdateStore((s) => s.state);
+  const isUpdateModalOpen = useUpdateStore((s) => s.isModalOpen);
+  const openUpdateModal = useUpdateStore((s) => s.openModal);
+
+  const showUpdatePill =
+    !isUpdateModalOpen &&
+    (updateState.status === 'available' ||
+      updateState.status === 'downloading' ||
+      updateState.status === 'verifying' ||
+      updateState.status === 'installing');
+
+  const updatePillLabel =
+    updateState.status === 'downloading'
+      ? `${Math.round(updateState.progress?.percent ?? 0)}%`
+      : updateState.status === 'verifying'
+        ? 'Verifying'
+        : updateState.status === 'installing'
+          ? 'Installing'
+          : `Update v${updateState.latestVersion || ''}`;
 
   useEffect(() => {
     if (window.electronAPI?.isMaximized) {
@@ -122,8 +144,24 @@ export const DesktopTitleBar: React.FC = () => {
       {/* 2. Center Drag Spacer (Ctrl+K Quick Search consolidated into LeftSidebar) */}
       <div className="flex-1" />
 
-      {/* 3. Right Cluster: Theme Switcher & Windows 11 Native Caption Controls */}
+      {/* 3. Right Cluster: Update Pill, Theme Switcher & Windows 11 Native Caption Controls */}
       <div className="app-no-drag flex items-center h-full">
+        {showUpdatePill && (
+          <button
+            type="button"
+            onClick={openUpdateModal}
+            title="Open WaveForm Updater"
+            className="spring-press liquid-glass-pill h-7 px-2.5 mr-2 rounded-full flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-accent)] border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/12 hover:bg-[var(--color-accent)]/20 transition-all cursor-pointer"
+          >
+            {updateState.status === 'available' ? (
+              <ArrowUpCircle size={13} />
+            ) : (
+              <Loader2 size={13} className="animate-spin" />
+            )}
+            <span>{updatePillLabel}</span>
+          </button>
+        )}
+
         <button
           onClick={toggleMode}
           title={`Switch to ${mode === 'dark' ? 'Light' : 'Dark'} mode`}

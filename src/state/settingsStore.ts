@@ -1,7 +1,8 @@
 // src/state/settingsStore.ts
 // Reactive bidirectional synchronization of over 70 user settings with StorageService
 
-import { create } from 'zustand';
+import { create, useStore } from 'zustand';
+import { createStore } from 'zustand/vanilla';
 import type { AppSettings } from '../models/Settings';
 import { defaultAppSettings, mergeSettings } from '../models/Settings';
 import { StorageService } from '../services/StorageService';
@@ -103,6 +104,25 @@ async function ensureVizStore(): Promise<typeof UseLyricVisualizerStoreType | nu
     // Ignore in isolated mock environments
   }
   return null;
+}
+
+function pushTrayBehavior(updated: AppSettings): void {
+  try {
+    const api =
+      typeof window !== 'undefined'
+        ? (window as any).electronAPI
+        : (globalThis as any).window?.electronAPI;
+    if (typeof api?.setTrayBehavior !== 'function') return;
+
+    Promise.resolve(
+      api.setTrayBehavior({
+        minimizeToTray: Boolean(updated['ui.minimizeToTray']),
+        closeToTray: Boolean(updated['ui.closeToTray']),
+      })
+    ).catch(() => {});
+  } catch {
+    // Non-fatal in isolated test environments
+  }
 }
 
 function pushDiscordRpcConfig(updated: AppSettings): void {
@@ -232,11 +252,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       applyThemeSettings(merged);
       pushSettingsToVisualizer(merged);
       pushDiscordRpcConfig(merged);
+      pushTrayBehavior(merged);
     } catch (err) {
       console.warn('[settingsStore] initSettings error, using defaults:', err);
       set({ settings: { ...defaultAppSettings }, isLoaded: true, isLoading: false });
       applyThemeSettings(defaultAppSettings);
       pushDiscordRpcConfig(defaultAppSettings);
+      pushTrayBehavior(defaultAppSettings);
     }
   },
 
@@ -254,6 +276,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
     if (Object.keys(delta).some((key) => key.startsWith('scrobble.discord'))) {
       pushDiscordRpcConfig(updated);
+    }
+    if ('ui.minimizeToTray' in delta || 'ui.closeToTray' in delta) {
+      pushTrayBehavior(updated);
     }
 
     if (storageService) {
@@ -279,6 +304,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ settings: defaults });
     applyThemeSettings(defaults);
     pushDiscordRpcConfig(defaults);
+    pushTrayBehavior(defaults);
     if (cachedVizStore) {
       pushSettingsToVisualizer(defaults, undefined, true);
     } else {
@@ -300,3 +326,223 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
 // Eagerly resolve visualizer store after module evaluation completes (avoids circular static import)
 void ensureVizStore();
+
+export type AppUpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'up-to-date'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'error';
+
+export interface AppUpdateProgress {
+  bytesDownloaded: number;
+  totalBytes: number;
+  percent: number;
+  bytesPerSecond: number;
+}
+
+export interface AppUpdateState {
+  status: AppUpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseName: string | null;
+  releaseNotes: string | null;
+  releaseUrl: string | null;
+  publishedAt: string | null;
+  assetName: string | null;
+  assetSize: number | null;
+  dismissedThisSession: boolean;
+  progress: AppUpdateProgress | null;
+  error: string | null;
+  lastCheckedAt: number | null;
+}
+
+export interface UpdateStore {
+  state: AppUpdateState;
+  isModalOpen: boolean;
+  initUpdater: () => Promise<void>;
+  checkForUpdates: () => Promise<void>;
+  downloadAndInstall: () => Promise<void>;
+  dismissForSession: () => Promise<void>;
+  openModal: () => void;
+  closeModal: () => void;
+  openReleasePage: () => Promise<void>;
+}
+
+const DEFAULT_UPDATE_STATE: AppUpdateState = {
+  status: 'idle',
+  currentVersion: '1.2.0',
+  latestVersion: null,
+  releaseName: null,
+  releaseNotes: null,
+  releaseUrl: null,
+  publishedAt: null,
+  assetName: null,
+  assetSize: null,
+  dismissedThisSession: false,
+  progress: null,
+  error: null,
+  lastCheckedAt: null,
+};
+
+function getElectronApi(): any {
+  return typeof window !== 'undefined'
+    ? (window as any).electronAPI
+    : (globalThis as any).window?.electronAPI;
+}
+
+let updaterInitialized = false;
+let updaterUnsubscribe: (() => void) | null = null;
+let autoOpenedThisSession = false;
+
+const updateStoreApi = createStore<UpdateStore>((set, get) => {
+  const applyIncomingState = (next: AppUpdateState | null | undefined) => {
+    if (!next || typeof next !== 'object') return;
+    const shouldAutoOpen =
+      next.status === 'available' &&
+      !next.dismissedThisSession &&
+      !autoOpenedThisSession;
+    if (shouldAutoOpen) {
+      autoOpenedThisSession = true;
+    }
+    set((prev) => ({
+      state: { ...DEFAULT_UPDATE_STATE, ...next },
+      isModalOpen: shouldAutoOpen ? true : prev.isModalOpen,
+    }));
+  };
+
+  return {
+    state: { ...DEFAULT_UPDATE_STATE },
+    isModalOpen: false,
+
+    initUpdater: async () => {
+      if (updaterInitialized) return;
+      const api = getElectronApi();
+      if (!api) return;
+      updaterInitialized = true;
+
+      const subscribe = api.onUpdaterStateChanged ?? api.onUpdaterStateChange;
+      if (typeof subscribe === 'function') {
+        updaterUnsubscribe = subscribe((nextState: AppUpdateState) => {
+          applyIncomingState(nextState);
+        });
+      }
+
+      if (typeof api.updaterGetState === 'function') {
+        try {
+          const initial = await api.updaterGetState();
+          applyIncomingState(initial);
+        } catch {
+          // Non-fatal in browser or partial preload environments
+        }
+      }
+    },
+
+    checkForUpdates: async () => {
+      const api = getElectronApi();
+      if (typeof api?.updaterCheck !== 'function') return;
+      set((prev) => ({
+        state: { ...prev.state, status: 'checking', error: null },
+      }));
+      try {
+        const next = await api.updaterCheck();
+        applyIncomingState(next);
+      } catch (err: any) {
+        set((prev) => ({
+          state: {
+            ...prev.state,
+            status: 'error',
+            error: err?.message || 'Failed to check for updates.',
+          },
+        }));
+      }
+    },
+
+    downloadAndInstall: async () => {
+      const api = getElectronApi();
+      if (typeof api?.updaterDownloadAndInstall !== 'function') return;
+      try {
+        const next = await api.updaterDownloadAndInstall();
+        applyIncomingState(next);
+      } catch (err: any) {
+        set((prev) => ({
+          state: {
+            ...prev.state,
+            status: 'error',
+            error: err?.message || 'Update installation failed.',
+          },
+        }));
+      }
+    },
+
+    dismissForSession: async () => {
+      const api = getElectronApi();
+      set((prev) => ({
+        isModalOpen: false,
+        state: { ...prev.state, dismissedThisSession: true },
+      }));
+      if (typeof api?.updaterDismissForSession === 'function') {
+        try {
+          const next = await api.updaterDismissForSession();
+          if (next && typeof next === 'object') {
+            set({ state: { ...DEFAULT_UPDATE_STATE, ...next } });
+          }
+        } catch {
+          // Keep in-memory dismissal even if IPC fails
+        }
+      }
+    },
+
+    openModal: () => set({ isModalOpen: true }),
+
+    closeModal: () => {
+      const currentStatus = get().state.status;
+      if (currentStatus === 'verifying' || currentStatus === 'installing') return;
+      set({ isModalOpen: false });
+    },
+
+    openReleasePage: async () => {
+      const api = getElectronApi();
+      if (typeof api?.updaterOpenReleasePage === 'function') {
+        await api.updaterOpenReleasePage().catch(() => {});
+        return;
+      }
+      const url =
+        get().state.releaseUrl ||
+        'https://github.com/Trapston3/waveform-desktop/releases/latest';
+      if (typeof window !== 'undefined' && typeof window.open === 'function') {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+    },
+  };
+});
+
+// Allow SSR unit tests (renderToStaticMarkup) to observe live in-memory store updates
+if (typeof document === 'undefined' || typeof (document as any).createElement !== 'function') {
+  updateStoreApi.getInitialState = updateStoreApi.getState;
+}
+
+type UseUpdateStoreHook = {
+  (): UpdateStore;
+  <T>(selector: (state: UpdateStore) => T): T;
+} & typeof updateStoreApi;
+
+export const useUpdateStore: UseUpdateStoreHook = Object.assign(
+  ((selector?: (state: UpdateStore) => any) =>
+    useStore(updateStoreApi, selector ?? ((s) => s))) as UseUpdateStoreHook,
+  updateStoreApi
+);
+
+export function _resetUpdateStoreForTests(): void {
+  updaterUnsubscribe?.();
+  updaterUnsubscribe = null;
+  updaterInitialized = false;
+  autoOpenedThisSession = false;
+  useUpdateStore.setState({
+    state: { ...DEFAULT_UPDATE_STATE },
+    isModalOpen: false,
+  });
+}

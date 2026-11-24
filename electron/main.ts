@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, session } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, session, shell } from 'electron';
 import * as electronNs from 'electron';
 const protocol = (electronNs as any).protocol as Electron.Protocol | undefined;
 const dialog = (electronNs as any).dialog as Electron.Dialog;
@@ -53,6 +53,8 @@ import {
   type DiscordPlaybackInput,
   type DiscordRpcConfig,
 } from './discordRpc.js';
+import { initAppUpdaterIpc } from './appUpdater.js';
+import { getNativeCore, getNativeCoreInfo } from './nativeCore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1240,6 +1242,51 @@ if (!gotTheLock) {
     getSharedDiscordRpc().configure({ userDataDir: app.getPath('userData') });
     mainWindow = createWindow();
     tray = createTray();
+    initAppUpdaterIpc({ ipcMain, app: app as any, shell, getMainWindow: () => mainWindow as any });
+
+    ipcMain.handle('nativeCore:status', () => {
+      const info = getNativeCoreInfo();
+      let onnx = null;
+      if (info.loaded) {
+        try {
+          onnx = getNativeCore()?.onnxStatus() ?? null;
+        } catch {
+          onnx = null;
+        }
+      }
+      return { ...info, onnx };
+    });
+
+    ipcMain.handle('nativeCore:onnxInit', () => {
+      const core = getNativeCore();
+      if (!core) {
+        return { ok: false, info: getNativeCoreInfo(), onnx: null };
+      }
+      const modelPath =
+        resolvePackagedDataAssetPath('beat_this_final0_q8.onnx') ??
+        resolvePackagedDataAssetPath('vocals_umxhq_int8.onnx');
+      if (!modelPath) {
+        return { ok: false, info: getNativeCoreInfo(), onnx: core.onnxStatus() };
+      }
+      const modelsDir = path.dirname(modelPath);
+      try {
+        void Promise.resolve(core.onnxInitModels(modelsDir)).catch(() => {});
+      } catch {
+        // Non-fatal
+      }
+      return { ok: true, modelsDir, info: getNativeCoreInfo(), onnx: core.onnxStatus() };
+    });
+
+    try {
+      const beatModelPath = resolvePackagedDataAssetPath('beat_this_final0_q8.onnx');
+      if (beatModelPath) {
+        void Promise.resolve(getNativeCore()?.onnxInitModels(path.dirname(beatModelPath))).catch(
+          () => {}
+        );
+      }
+    } catch {
+      // Non-fatal background ONNX pre-init
+    }
 
     lyricVisualizerPlatform = createLyricVisualizerPlatformController({
       app,

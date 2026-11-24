@@ -374,7 +374,7 @@ export interface UpdateStore {
 
 const DEFAULT_UPDATE_STATE: AppUpdateState = {
   status: 'idle',
-  currentVersion: '1.2.0',
+  currentVersion: '1.2.5',
   latestVersion: null,
   releaseName: null,
   releaseNotes: null,

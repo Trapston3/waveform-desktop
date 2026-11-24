@@ -202,16 +202,36 @@ async function runElectronScreenshotHarness() {
   const showcaseLrc = buildShowcaseLrc();
   const showcaseParsedLyrics = buildParsedLyricsFromLrc(showcaseLrc);
 
-  // Serve local WAV audio cleanly via waveform-local:// protocol
+  // Serve local WAV audio cleanly with HTTP 206 Range support via waveform-local:// protocol
   protocol?.handle?.('waveform-local', async (request) => {
     const parsedUrl = new URL(request.url);
     const filePath = parsedUrl.searchParams.get('path') || showcaseWavPath;
     const buf = fs.readFileSync(fs.existsSync(filePath) ? filePath : showcaseWavPath);
+    const totalLen = buf.byteLength;
+    const rangeHeader = request.headers.get('range');
+    if (rangeHeader) {
+      const m = /^bytes=(\d+)-(\d*)$/i.exec(rangeHeader.trim());
+      if (m) {
+        const start = Math.min(totalLen - 1, parseInt(m[1], 10));
+        const end = m[2] ? Math.min(totalLen - 1, parseInt(m[2], 10)) : totalLen - 1;
+        const slice = buf.subarray(start, end + 1);
+        return new Response(slice, {
+          status: 206,
+          headers: {
+            'Content-Type': 'audio/wav',
+            'Content-Length': String(slice.byteLength),
+            'Content-Range': `bytes ${start}-${end}/${totalLen}`,
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+    }
     return new Response(buf, {
       status: 200,
       headers: {
         'Content-Type': 'audio/wav',
-        'Content-Length': String(buf.byteLength),
+        'Content-Length': String(totalLen),
         'Accept-Ranges': 'bytes',
         'Access-Control-Allow-Origin': '*',
       },
@@ -227,12 +247,63 @@ async function runElectronScreenshotHarness() {
   ipcMain.handle('window-is-maximized', () => false);
   ipcMain.handle('window-set-fullscreen', () => false);
   ipcMain.handle('window-is-fullscreen', () => false);
+  ipcMain.handle('ui:setTrayBehavior', () => {});
+  const idleUpdaterState = {
+    status: 'idle',
+    currentVersion: '1.2.5',
+    latestVersion: null,
+    releaseName: null,
+    releaseNotes: null,
+    releaseUrl: null,
+    publishedAt: null,
+    assetName: null,
+    assetSize: null,
+    dismissedThisSession: true,
+    progress: null,
+    error: null,
+    lastCheckedAt: null,
+  };
+  ipcMain.handle('updater:check', async () => idleUpdaterState);
+  ipcMain.handle('updater:downloadAndInstall', async () => idleUpdaterState);
+  ipcMain.handle('updater:dismissForSession', async () => idleUpdaterState);
+  ipcMain.handle('updater:getState', async () => idleUpdaterState);
+  ipcMain.handle('updater:openReleasePage', async () => false);
+  ipcMain.handle('nativeCore:status', async () => ({
+    loaded: false,
+    path: null,
+    version: null,
+    error: null,
+    onnx: null,
+  }));
+  ipcMain.handle('nativeCore:onnxInit', async () => ({
+    ok: false,
+    info: { loaded: false, path: null, version: null, error: null },
+    onnx: null,
+  }));
   ipcMain.handle('network-fetch', async () => ({
     ok: true,
     status: 200,
     statusText: 'OK',
     text: JSON.stringify({ contents: {} }),
   }));
+  ipcMain.handle('autoeq:status', async () => ({
+    ready: true,
+    count: 0,
+    totalRows: 0,
+    parametricRows: 0,
+    totalCount: 0,
+    parametricCount: 0,
+    dbPath: null,
+    loadTimeMs: 0,
+    error: null,
+  }));
+  ipcMain.handle('party:startLanHost', async () => null);
+  ipcMain.handle('party:stopLanHost', async () => true);
+  ipcMain.handle('party:getLanInfo', async () => null);
+  ipcMain.handle('discordRpc:update', async () => false);
+  ipcMain.handle('discordRpc:clear', async () => true);
+  ipcMain.handle('discordRpc:getStatus', async () => ({ connected: false, enabled: false }));
+  ipcMain.handle('discordRpc:configure', async () => ({ connected: false, enabled: false }));
   ipcMain.handle('autoeq-search', async () => [
     { id: 'sennheiser_hd600', name: 'Sennheiser HD 600', meta: 'Crinacle', parametric: true },
     { id: 'sony_wh1000xm4', name: 'Sony WH-1000XM4', meta: 'Oratory1990', parametric: true },
@@ -673,11 +744,12 @@ async function runElectronScreenshotHarness() {
     };
 
     const appSettingsObj = {
-      'ui.themeMode': 'dark',
-      'ui.dynamicAccentColor': true,
-      'ui.nowPlayingLayout': nowPlayingLayout,
-      'ui.hideAlbumCover': hideAlbumCover,
-      'ui.lyricsAlignment': textAlign,
+      'appearance.themeMode': 'dark',
+      'appearance.dynamicArtworkColor': true,
+      'appearance.nowPlayingLayout': nowPlayingLayout,
+      'appearance.hideAlbumCover': hideAlbumCover,
+      'lyrics.alignment': textAlign,
+      'scrobble.discordRpcEnabled': false,
       nowPlayingLayout,
       hideAlbumCover,
       lyricsAlignment: textAlign,
@@ -737,37 +809,44 @@ async function runElectronScreenshotHarness() {
           if (document.querySelector('[data-fullscreen]')) break;
           await new Promise((r) => setTimeout(r, 100));
         }
-        // Start playback via 'Space' shortcut so visualizers & fluid mesh animate live
+        // Start playback via 'Space' shortcut so AudioEngine loads showcase.wav
         window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true }));
+        // Wait for <audio> src + metadata so duration & seek take effect cleanly
+        for (let i = 0; i < 30; i++) {
+          const aud = Array.from(document.querySelectorAll('audio')).find((a) => a.src);
+          if (aud && aud.readyState >= 1 && Number.isFinite(aud.duration) && aud.duration > 5) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
         return Boolean(document.querySelector('[data-fullscreen]'));
       })()
     `);
     if (!opened) {
       throw new Error('NowPlayingScreen ([data-fullscreen]) failed to open! Cannot capture Now Playing screenshot.');
     }
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 300));
 
-    // Apply deterministic relative seek keystrokes + sync <audio> currentTime directly
+    // Apply deterministic seek directly on active <audio> and re-verify it latched past loadAndPlay
     await win.webContents.executeJavaScript(`
-      (() => {
-        const steps = ${JSON.stringify(seekClicks)};
-        for (const step of steps) {
-          window.dispatchEvent(new KeyboardEvent('keydown', {
-            key: step.key,
-            code: step.code,
-            shiftKey: Boolean(step.shiftKey),
-            bubbles: true,
-          }));
-        }
+      (async () => {
         const target = ${Number(targetSec)};
-        for (const a of document.querySelectorAll('audio')) {
-          try {
-            a.currentTime = target;
-            a.dispatchEvent(new Event('timeupdate'));
-            a.dispatchEvent(new Event('seeked'));
-          } catch {}
+        const applySeek = async () => {
+          for (const a of document.querySelectorAll('audio')) {
+            if (!a.src) continue;
+            try {
+              a.muted = true;
+              if (a.paused) await a.play().catch(() => {});
+              a.currentTime = target;
+              a.dispatchEvent(new Event('timeupdate'));
+              a.dispatchEvent(new Event('seeked'));
+            } catch {}
+          }
+        };
+        await applySeek();
+        await new Promise((r) => setTimeout(r, 180));
+        const activeAud = Array.from(document.querySelectorAll('audio')).find((a) => a.src);
+        if (activeAud && Math.abs(activeAud.currentTime - target) > 2.5) {
+          await applySeek();
         }
-        // Nudge mouse slightly to keep minimal Now Playing chrome visible when desired
         window.dispatchEvent(new MouseEvent('mousemove', { clientX: 800, clientY: 480, bubbles: true }));
       })()
     `);
@@ -916,7 +995,7 @@ async function runElectronScreenshotHarness() {
   // 4. 04-visualizer-spaceship-3d.png (Spaceship 3D starfighter + asteroids)
   await configureSceneAndReload({
     trackIndex: 3,
-    positionMs: 45000,
+    positionMs: 45200,
     nowPlayingLyricsMode: 'visualizer',
     styleId: 'StarfieldShip3D',
     variationByStyle: { StarfieldShip3D: 'deep-space' },
@@ -924,7 +1003,7 @@ async function runElectronScreenshotHarness() {
     hideAlbumCover: false,
     textAlign: 'center',
   });
-  await openNowPlayingAndSeek(45.0, [
+  await openNowPlayingAndSeek(45.2, [
     { key: 'ArrowRight', code: 'ArrowRight', shiftKey: true },
     { key: 'ArrowRight', code: 'ArrowRight', shiftKey: true },
     { key: 'ArrowRight', code: 'ArrowRight', shiftKey: true },
@@ -958,13 +1037,29 @@ async function runElectronScreenshotHarness() {
     textAlign: 'left',
   });
   await win.webContents.executeJavaScript(`
-    (() => {
+    (async () => {
       const btn = document.querySelector('button[title="Albums (3D Flow)"]');
       if (btn) btn.click();
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      // Disable CSS transition delays/durations in hidden capture window so 3D card transforms snap immediately
+      if (!document.getElementById('wf-instant-coverflow')) {
+        const st = document.createElement('style');
+        st.id = 'wf-instant-coverflow';
+        st.textContent = '*, *::before, *::after { transition-duration: 0s !important; transition-delay: 0s !important; animation-duration: 0s !important; }';
+        document.head.appendChild(st);
+      }
+      // Advance Cover Flow to a middle album and flush animations/layout cleanly
+      for (let i = 0; i < 3; i++) {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true }));
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      document.getAnimations({ subtree: true }).forEach((a) => { try { a.finish(); } catch {} });
+      void document.body.offsetHeight;
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await new Promise((r) => setTimeout(r, 200));
     })()
   `);
-  await new Promise((r) => setTimeout(r, 950));
+  await new Promise((r) => setTimeout(r, 300));
   await capturePng('06-cover-flow-library.png', '06-cover-flow-library');
 
   win.destroy();

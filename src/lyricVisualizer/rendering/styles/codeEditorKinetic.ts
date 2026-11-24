@@ -1303,9 +1303,11 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     ctx.lineTo(fullWidth, totalTopH);
     ctx.stroke();
 
-    // 3. Dark-glass telemetry pills on right side of chrome
+    // 3. Dark-glass telemetry pills on right side of chrome (clear of split-view top-right controls)
     if (focalWidth >= 420) {
-      let pillRightX = fullWidth - 12;
+      const controlsReserve =
+        focalLeft > 0 && !frame.isOverlayMode && !frame.isEmbeddedTransparent ? 132 : 12;
+      let pillRightX = fullWidth - controlsReserve;
       const pillY = 6;
       const pillH = 19;
 
@@ -1739,8 +1741,8 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         : isHovered
         ? 0.92
         : isPast
-        ? Math.max(0.32, 0.72 - dist * 0.12)
-        : Math.max(0.22, 0.48 - dist * 0.08);
+        ? Math.max(0.48, 0.78 - dist * 0.1)
+        : Math.max(0.38, 0.62 - dist * 0.08);
 
       if (isActive && this.whipChromatic > 0.08 && motionScale > 0) {
         const shift = this.whipChromatic * 2.4 * Math.min(1.3, motionScale);
@@ -1902,10 +1904,14 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
 
       ctx.save();
       ctx.shadowColor = cursorColor;
-      ctx.shadowBlur = 16 + frame.audio.bassEnergy * 8;
+      ctx.shadowBlur = 14 + frame.audio.bassEnergy * 8;
       ctx.fillStyle = cursorColor;
-      ctx.globalAlpha = isSecondary ? 0.92 : 0.84;
-      drawRoundedRectPath(ctx, curScreenX, curScreenY - 1, cursorW, cursorH, 2);
+      ctx.globalAlpha = isSecondary ? 0.28 : 0.22;
+      drawRoundedRectPath(ctx, curScreenX - 2, curScreenY - 1, Math.max(4, cursorW + 4), cursorH, 3);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.96;
+      drawRoundedRectPath(ctx, curScreenX - 3, curScreenY - 1, 2.5, cursorH, 1.25);
       ctx.fill();
 
       ctx.shadowBlur = 0;

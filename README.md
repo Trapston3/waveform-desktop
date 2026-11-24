@@ -1,28 +1,29 @@
 <div align="center">
   <img src="build/icon.png" alt="WaveForm Desktop Logo" width="96" height="96" />
   <h1>WaveForm Desktop</h1>
-  <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, Web Audio DSP, local metadata extraction, and personalized streaming.</strong></p>
+  <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, a Rust <code>napi-rs</code> Native Performance Core, Web Audio DSP, and 12 hardware-accelerated lyric visualizers.</strong></p>
 
   <p>
-    <img src="https://img.shields.io/badge/Electron-30.5.1-47848F?logo=electron&logoColor=white" alt="Electron" />
-    <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" alt="React 19" />
-    <img src="https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-    <img src="https://img.shields.io/badge/Vite-6-646CFF?logo=vite&logoColor=white" alt="Vite 6" />
-    <img src="https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS" />
+    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.2.5"><img src="https://img.shields.io/badge/Release-v1.2.5-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.2.5" /></a>
+    <img src="https://img.shields.io/badge/Rust-napi--rs_Native_Core-DEA584?style=flat-square&logo=rust&logoColor=black" alt="Rust napi-rs Native Core" />
+    <img src="https://img.shields.io/badge/Electron-30.5.1-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
+    <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React 19" />
+    <img src="https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
+    <img src="https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind CSS" />
   </p>
 </div>
 
 ---
 
-## Screenshots
+## Screenshots (`v1.2.5`)
 
 | Now Playing & Apple Music Fluid Mesh | iOS Messages Tapback & Magic Word Lyrics |
 | :---: | :---: |
 | ![Now Playing & Apple Music Fluid Mesh](docs/screenshots/01-now-playing-apple-mesh.png) | ![iOS Messages Tapback & Magic Word Lyrics](docs/screenshots/02-visualizer-ios-chat.png) |
 
-| Code Editor Kinetic Visualizer | 3D Spaceship & Beat-Synced Asteroid Run |
+| Code Editor Kinetic Visualizer | 3D Spaceship — Night-Sky Weave & Lyric Merge |
 | :---: | :---: |
-| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship & Beat-Synced Asteroid Run](docs/screenshots/04-visualizer-spaceship-3d.png) |
+| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship — Night-Sky Weave & Lyric Merge](docs/screenshots/04-visualizer-spaceship-3d.png) |
 
 | Centered Lyric Mode (Minimal Controls) | 3D Cover Flow & Library |
 | :---: | :---: |
@@ -30,11 +31,11 @@
 
 ---
 
-## Install (Windows x64)
+## Install & Auto-Update (Windows x64)
 
 ### One-Line PowerShell CLI Installer (Recommended)
 
-Downloads the latest Windows `.exe` from [GitHub Releases](https://github.com/Trapston3/waveform-desktop/releases/latest), verifies its SHA-256 checksum against `SHA256SUMS.txt`, and installs WaveForm Desktop:
+Downloads the latest Windows `.exe` from [GitHub Releases](https://github.com/Trapston3/waveform-desktop/releases/latest), verifies its SHA-256 checksum against `SHA256SUMS.txt`, and installs or updates WaveForm Desktop:
 
 ```powershell
 irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1 | iex
@@ -53,44 +54,46 @@ irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/in
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Fresh -Force
 
 # Pin a specific release tag
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.2.0 -Portable
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.2.5 -Portable
 ```
 
-### Direct `.exe` Download
+### Direct `.exe` Download & Smart NSIS Updater
 
-Grab `WaveForm-Setup-1.2.0.exe` (NSIS installer with smart changed-files-only Update mode) or `WaveForm-Portable-1.2.0.exe` (standalone executable) directly from the [Releases page](https://github.com/Trapston3/waveform-desktop/releases/latest).
+Grab [`WaveForm-Setup-1.2.5.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.2.5/WaveForm-Setup-1.2.5.exe) (NSIS installer with SemVer-aware changed-files-only diff-sync, repair/verify mode, and downgrade protection) or [`WaveForm-Portable-1.2.5.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.2.5/WaveForm-Portable-1.2.5.exe) (standalone executable) from the [v1.2.5 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.2.5).
+
+### One-Click In-App Auto-Updater (`electron/appUpdater.ts`, `UpdatePromptModal.tsx`)
+
+- **Cold-Boot Update Reminder**: Automatically checks GitHub Releases ~2.5s after launch (silent on offline/network errors). Choosing **Remind Me Next Launch** dismisses the prompt only for the active session and keeps a subtle **Update Available** pill in the title bar—reminding again on the next cold start until updated.
+- **Cryptographically Verified Silent Install**: Clicking **One-Click Update Now** (from the Liquid Glass prompt or **Settings → App Updates**) streams `WaveForm-Setup-*.exe` and `SHA256SUMS.txt` into `%TEMP%\WaveForm-Update\`, verifies the exact SHA-256 digest before execution, runs `Setup.exe /S` detached using changed-files-only diff-sync, and relaunches WaveForm automatically.
+
+---
+
+## Native Rust Performance Core (`native/waveform-core`)
+
+WaveForm v1.2.5 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
+
+- **SQLite AutoEQ Engine (`src/autoeq.rs`, `rusqlite` bundled)**: Indexes all 17,703 rows (8,850 parametric `PaP\x01` profiles) into a normalized accent/punctuation-stripped 36-bit bitmask + trigram index for sub-millisecond fuzzy search (`sony whch-720n` → `Sony WH-CH720N`) and Boundary-07 parametric filter decoding.
+- **Multi-Core Parallel Media Scanner (`src/scanner.rs`, `lofty` + `rayon` + `walkdir` + `sha2`)**: Scans local folders incrementally against cached `(path, mtimeMs, size)` diffs across all CPU cores, extracts tags, synced/unsynced lyrics (`USLT`/`SYLT`/`©lyr`/`LYRICS`), and writes content-addressed deduplicated cover art into `userData/artwork-cache/`.
+- **Real-Time DSP, FFT & Native ONNX Runtime (`src/dsp.rs`, `src/onnx_engine.rs`, `realfft` + `ort`)**: Computes exact f64 RBJ biquad and 10-band trapezoidal SVF EQ magnitude curves, Hann-windowed `realfft` 32-band spectra / spectral-flux beat & BPM onset tracking, and non-blocking background-thread `ort` inference hooks for `beat_this_final0_q8.onnx` and `vocals_umxhq_int8.onnx`.
 
 ---
 
 ## Features
 
 ### Dual-Deck Audio Engine & DSP (`src/audio/`)
-- **CORS-Resilient Dual-Deck Playback (`AudioEngine.ts`)**: Dual deck architecture (`deckA` / `deckB`) with constant-power crossfading, `waveform-local://` HTTP Range (`206 Partial Content`) local streaming, and automatic lazy unbound `<audio>` direct fallback if an external media CDN fails CORS or `MediaElementAudioSourceNode` routing—preventing silent playback across local and web transitions.
-- **Real Media Clock Accuracy (`useAudioController.ts`)**: Synchronizes playback position and paused/stalled recovery directly from the active `<audio>` element without synthetic progress fabrication.
-- **10-Band Equalizer & AutoEQ (`DspChain.ts`, `AutoEqLoader.ts`)**: Live Web Audio `BiquadFilterNode` chain paired with an embedded SQLite AutoEQ headphone database (`src/assets/data/auto_eq.db`), spatial stereo width processing, ReplayGain normalization, and a lookahead peak limiter.
+- **CORS-Resilient Dual-Deck Playback (`AudioEngine.ts`)**: Dual deck architecture (`deckA` / `deckB`) with constant-power crossfading, `waveform-local://` HTTP Range (`206 Partial Content`) local streaming, and automatic lazy unbound `<audio>` direct fallback if an external media CDN fails CORS or `MediaElementAudioSourceNode` routing.
+- **10-Band Equalizer & Interactive AutoEQ Graph (`DspChain.ts`, `AutoEqLoader.ts`, `InteractiveEqGraph.tsx`)**: Live Web Audio `BiquadFilterNode` chain paired with the native Rust SQLite AutoEQ database (`src/assets/data/auto_eq.db`), spatial stereo width processing, ReplayGain normalization, and a lookahead peak limiter.
 - **68-Bar Waveform & Live PCM Visualizer (`WaveformExtractor.ts`, `LiveVisualizer.ts`, `WaveformCanvasSeekbar.tsx`)**: Hardware-accelerated High-DPI canvas seekbar with optimistic seek latching.
 
-### Local Media, Embedded Tags & Disk Cache (`electron/localMetadata.ts`)
-- **Deep Audio Tag Extraction (`music-metadata`)**: Recursively scans `.mp3`, `.flac`, `.wav`, `.m4a`, `.aac`, `.ogg`, `.opus`, `.mp4`, and `.webm` folders to extract title, artist, album, year, bitrate, quality badge, real `durationSec`, embedded cover art (`waveform-local://art?key=...`), and embedded synced/unsynced lyrics (`USLT`, `SYLT`, `©lyr`, `LYRICS`).
-- **Non-Blocking Web Enrichment & Disk Cache (`LocalMetadataEnricher.ts`, `lyricsStore.ts`)**: Falls back to iTunes Search / YouTube Music for cover art and LRCLIB / Musixmatch / InnerTube for lyrics without blocking playback, caching results to disk in Electron `userData` by normalized `artist + title + duration`.
-
-### Personalized Streaming & Account Connections (`electron/accountAuth.ts`, `electron/youtubeSabrStream.ts`)
-- **Full-Track YouTube & Lostwave SABR Streaming (`youtubeSabrStream.ts`)**: Consumes server-driven ABR (`SabrStream` via `googlevideo`) with fresh InnerTube `visitorData`, restricts `SAPISIDHASH` auth injection strictly to `music.youtube.com` so `/youtubei/v1/player` never receives conflicting credentials, serves progressive HTTP `206 Partial Content` byte ranges over `waveform-stream://yt?v=...` past YouTube's 1 MB prefix cutoff, and includes automatic `yt-dlp --js-runtimes node` fallback.
-- **Authenticated YouTube Music (`SAPISIDHASH`)**: Supports persistent sign-in via Electron session cookies, injecting `Cookie`, `Authorization: SAPISIDHASH`, `X-Origin`, and `X-Goog-AuthUser: 0` on Music endpoints and automatically refreshing personalized Home recommendations on sign-in or sign-out.
-- **Spotify Library Playlists Shelf (`SpotifyPlaylistService.ts`)**: Connecting Spotify reveals a dedicated **Spotify Playlists** shelf inside **Library → Playlists**, mapping tracks into WaveForm's stream resolver for seamless playback.
-- **Accurate Track Matching & Artist Detail**: Match scoring (`TrackMatcher.ts`), clickable singer/producer credits (`ArtistCredits`), and iOS-inspired `ArtistDetailView` with stylized artist signatures (`AppleArtistArtService.ts`).
-
 ### LyricVisualizer Subsystem (`src/lyricVisualizer/`, `electron/lyricVisualizerPlatform.ts`)
-- **12 Hardware-Accelerated Visual Styles (with Variations)**: `AppleMusicFlow`, `TypewriterEditorial`, `MinimalSwiss`, `LiquidMetal`, `KaraokeStage`, `BrutalistZine`, `GenerativeParticleInk`, `Spatial3DDepth`, `CRTScanline`, `StarfieldShip3D`, `iOSTextingMotion`, and `CodeEditorKinetic` powered by Canvas2D + a `WebGlEffectLayer` (with automatic Canvas2D fallback).
-- **Millisecond Word-Level Sync & Album-Art OKLCH Matching**: Monotonic `SyncEngine` with per-song `±2000ms` timing nudges, weighted syllable/punctuation `WordSynthesizer`, ELRC/LRC parser, real-time FFT/RMS `AudioEngine.sampleAudioMetrics()`, and WCAG AA (`>= 4.5:1`) OKLCH color matching.
-- **Three Rendering Surfaces & Windows Guards**: Embeds directly in `NowPlayingScreen`, pops out to multi-monitor click-through Desktop Overlays (`#/overlay`), and launches Fullscreen Ambient Mode (`#/ambient`) with idle trigger, `KeepAwake`, Windows `SHQueryUserNotificationState` fullscreen game suppression, lock-screen `0%` GPU suspend, 7 offline `@fontsource/*` OFL fonts, and an original public-domain `"Starlight Harbor"` sandbox harness. See [DECISIONS.md](DECISIONS.md) for engineering tradeoffs.
+- **12 Hardware-Accelerated Visual Styles (with Variations)**: `AppleMusicFlow`, `TypewriterEditorial`, `MinimalSwiss`, `LiquidMetal`, `KaraokeStage`, `BrutalistZine`, `GenerativeParticleInk`, `Spatial3DDepth`, `CRTScanline`, `StarfieldShip3D`, `iOSTextingMotion`, and `CodeEditorKinetic` powered by Canvas2D + WebGL2.
+- **Reworked 3D Spaceship (`ship3dScene.ts`, `starfieldShip3d.ts`)**: Deterministic wide-weaving C∞ S-curve spline synced to BPM with analytical derivative banking and cubic ease-in-out barrel rolls, hard asteroid exclusion cylinder along both the flight corridor and upcoming lyric anchors, serene 2,400-star twinkling night sky, and direct nose-to-lyric energy splashes.
+- **Polished iOS Messages (`iosTextingMotion.ts`, `lrcParser.ts`, `lyricsPipeline.ts`)**: Single unified dark iOS voice-note waveform pill, reserved vertical thread spacing with zero overlap, compact beat-bobbing musical note bubbles for `< 4s` pauses, `• • •` typing indicators before upcoming lines, and zero blank empty bubbles across the entire lyrics pipeline.
+- **Multi-Surface Windows Guards**: Embeds in `NowPlayingScreen`, multi-monitor click-through Desktop Overlays (`#/overlay`), and Fullscreen Ambient Mode (`#/ambient`) with `KeepAwake`, Windows fullscreen game suppression, and lock-screen `0%` GPU suspend. See [DECISIONS.md](DECISIONS.md).
 
-### Liquid Glass Desktop UX (`src/ui/`)
-- **Unified Top-Left Search (`LeftSidebar.tsx`)**: Single search bar in the top-left sidebar with autocomplete suggestions, `Ctrl+K` quick focus, and filterable results (`All`, `Songs`, `Videos`, `Albums`, `Artists`, `Playlists`).
-- **Collapsible Apple Music Sidebar**: Slim icon rail (`64px`) with hover-to-expand, collapsible **Library** and **Playlists** accordions, and automatic distraction-free rail cleanup when collapsed.
-- **60fps Smooth Lyrics Engine (`SyllableLyricsEngine.tsx`)**: Driven by a `requestAnimationFrame` loop interpolating directly from the active audio element's `currentTime`, scrolled with a damped harmonic spring (`SpringScroller`) and GPU-composited `transform`/`opacity` row transitions.
-- **Dynamic Album-Cover Accent Color, Now Playing Fullscreen & 2026 Replay**: Extracts vibrant cover art palettes for dynamic theming, retains window controls inside `NowPlayingScreen` alongside `Escape`-dismissible fullscreen mode, and tracks Replay stats (`ReplayStoriesModal.tsx`) with full reset support.
-- **Custom Windows / Electron Branding (`electron/appIcon.ts`, `scripts/generate-icon.mjs`)**: Multi-resolution `build/icon.ico` (`16`–`256px`) and `build/icon.png` wired into `BrowserWindow`, Windows AppUserModelId, and the system tray.
+### Streaming, Local Library & Desktop UX
+- **YouTube SABR & Account Connections (`youtubeSabrStream.ts`, `accountAuth.ts`)**: Server-driven ABR (`SabrStream`) with `SAPISIDHASH` auth isolation, progressive HTTP `206` streaming, `yt-dlp` fallback, Spotify Playlists shelf, Discord Rich Presence (`discordRpc.ts`), and Party LAN/WebRTC sync (`PartySyncClient.ts`).
+- **Liquid Glass Desktop UX (`src/ui/`)**: Unified top-left sidebar search (`Ctrl+K`), collapsible icon rail (`64px`), dynamic album-cover OKLCH accent extraction, tray minimize/close controls, and `2026 Replay`.
 
 ---
 
@@ -98,34 +101,35 @@ Grab `WaveForm-Setup-1.2.0.exe` (NSIS installer with smart changed-files-only Up
 
 ```text
 waveform-desktop/
-├── build/                      # Generated app branding icons (icon.ico, icon.png)
+├── build/                      # App icons (icon.ico, icon.png), NSIS installer.nsh & diff-sync.ps1
 ├── DECISIONS.md                # LyricVisualizer Electron-native & Windows architecture decisions
 ├── electron/
 │   ├── main.ts                 # Electron main process, protocol handlers, window & tray, IPC
 │   ├── preload.cts             # Context-isolated electronAPI bridge
+│   ├── nativeCore.ts           # Rust napi-rs addon loader with graceful pure-JS fallback
+│   ├── appUpdater.ts           # Cold-boot update checker, SHA-256 verifier, silent NSIS launcher
+│   ├── autoEqDb.ts             # Native/JS AutoEQ SQLite search & PaP parametric decoder
+│   ├── localMetadata.ts        # Native/JS parallel folder scanner, artwork cache & tag extractor
 │   ├── youtubeSabrStream.ts    # SABR streaming client, visitorData cache, progressive HTTP 206 server
 │   ├── lyricVisualizerPlatform.ts # Multi-monitor overlays, Ambient window, game guard, cache store
-│   ├── localMetadata.ts        # music-metadata scanner, art/lyrics extraction & disk cache
+│   ├── discordRpc.ts           # Rich Presence IPC client with backoff & LRU art cache
 │   ├── accountAuth.ts          # YouTube Music SAPISIDHASH & Spotify playlist API helpers
 │   └── appIcon.ts              # Cross-platform BrowserWindow & tray icon resolution
+├── native/
+│   └── waveform-core/          # Rust napi-rs crate (autoeq, scanner, dsp, onnx_engine)
 ├── scripts/
 │   ├── dev.mjs                 # Vite + Electron development launcher
 │   ├── start.mjs               # Production launcher
-│   └── generate-icon.mjs       # Multi-resolution .ico & .png generator from Logo.svg
+│   ├── after-pack-manifest.mjs # Deterministic SHA-256 install-manifest.tsv generator
+│   ├── generate-checksums.mjs  # Release SHA256SUMS.txt, latest.yml & Scoop sync
+│   └── capture-readme-screenshots.mjs # Automated Electron showcase capture harness
 ├── src/
 │   ├── audio/                  # Dual-deck AudioEngine, DSP chain, AutoEQ, visualizer & FFT/RMS metrics
-│   ├── lyricVisualizer/        # Core sync/OKLCH/pipeline, 13 WebGL2/Canvas2D styles, bridge & UIs
-│   ├── models/                 # Normalized Song, Playlist, Navigation models
-│   ├── services/               # InnerTube, StreamResolver, LyricsService, AccountAuth, Spotify
-│   ├── state/                  # Zustand stores (player, queue, library, lyrics, nav, settings)
-│   ├── ui/
-│   │   ├── common/             # LiquidGlass, ContextMenu, ArtistCredits, Settings & modals
-│   │   ├── components/         # DesktopTrackTable, RightSidecar/Inspector helpers
-│   │   ├── hooks/              # useAudioController, useKeyboardShortcuts, useWindowDimensions
-│   │   ├── layout/             # DesktopTitleBar, LeftSidebar, MainViewport, RightSidecar, BottomPlayerBar
-│   │   ├── player/             # NowPlayingScreen, SyllableLyricsEngine, WaveformCanvasSeekbar, CoverFlow
-│   │   └── views/              # Home, Explore, Search, Library, LocalMedia, Artist, Release, Equalizer
-│   └── utils/                  # Session persistence & utilities
+│   ├── lyricVisualizer/        # Core sync/OKLCH/pipeline, 12 WebGL2/Canvas2D styles, bridge & UIs
+│   ├── models/                 # Normalized Song, Playlist, Navigation, Settings models
+│   ├── services/               # InnerTube, StreamResolver, LyricsService, PartySyncClient, Spotify
+│   ├── state/                  # Zustand stores (player, queue, library, lyrics, nav, settings, updater)
+│   └── ui/                     # Liquid Glass layout, common modals (UpdatePromptModal), views & player
 └── tests/                      # 4-tier E2E runner, acceptance suite & targeted unit tests
 ```
 
@@ -135,42 +139,40 @@ waveform-desktop/
 
 ### Prerequisites
 - **Node.js 20+** (tested on Node v25.6.1 / Windows x64)
-- **npm**
+- **Rust stable toolchain (`x86_64-pc-windows-msvc`)** + MSVC Build Tools (optional for JS-fallback dev; required for `build:rust` & `dist:win`)
 
 ### Install & Run in Development
 
 ```bash
 npm install
+npm run build:rust
 npm run dev
 ```
 
-### Production Build & Launch
+### Production Build & Windows Packaging
 
 ```bash
 npm run build
 npm start
-```
 
-### Regenerate Branding Icons (`build/icon.ico` & `build/icon.png`)
-
-```bash
-node scripts/generate-icon.mjs
+# Build Windows x64 NSIS Setup & Portable installers + SHA256SUMS.txt
+npm run dist:win
 ```
 
 ### Verification & Tests
 
 ```bash
+# Rust native core unit tests (AutoEQ, parallel scanner, DSP/FFT, ONNX)
+npm run test:rust
+
 # TypeScript checks (renderer, Electron main, preload)
 npm run typecheck
 
 # 4-tier test suite (311 tests)
 npm test
 
-# Targeted unit tests (audio CORS/switching, local metadata/cache, auth/Spotify, UI/lyrics, icon)
+# Targeted unit tests (Rust core, updater, visualizers, audio, metadata, SABR, RPC, installer)
 node --test tests/unit/*.test.mjs
-
-# 109-check E2E acceptance suite
-node tests/verify_acceptance_criteria_e2e.mjs
 ```
 
 ---

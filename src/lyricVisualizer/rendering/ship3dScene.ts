@@ -1338,6 +1338,7 @@ export class Ship3DScene {
     const astRad = this.asteroids[idx + 6] * 3.2;
     const exclR = SHIP_WIDTH * 1.8 + astRad;
     const padExclR = exclR + 0.08;
+    const maxSkyY = 0.56 - astRad * 1.25;
 
     const astWorldSpeed = Math.max(2.0, this.lastAstWorldSpeed);
     const tAtZ = timeSeconds + (SHIP_WORLD_Z - astWZ) / astWorldSpeed;
@@ -1347,6 +1348,12 @@ export class Ship3DScene {
     let pushVy = 0;
 
     for (let pass = 0; pass < 2; pass++) {
+      if (astWY > maxSkyY) {
+        astWY = maxSkyY;
+        pushVy = Math.min(pushVy, 0);
+        pushed = true;
+      }
+
       for (let s = 0; s < 4; s++) {
         if (s === 3 && Math.abs(astWZ - SHIP_WORLD_Z) >= 4.5) continue;
         const ts = s === 0 ? tAtZ - 0.35 : s === 1 ? tAtZ : s === 2 ? tAtZ + 0.35 : timeSeconds;
@@ -1367,6 +1374,14 @@ export class Ship3DScene {
           }
           astWX = fp.x + nx * padExclR;
           astWY = fp.y + ny * padExclR;
+          if (astWY > maxSkyY) {
+            // Keep upper lyric ribbon sky unobstructed by deflecting laterally outside exclR
+            const side = astWX >= fp.x ? 1 : -1;
+            astWY = maxSkyY;
+            const dyC = astWY - fp.y;
+            const reqDx = Math.sqrt(Math.max(0.01, padExclR * padExclR - dyC * dyC));
+            astWX = fp.x + side * Math.max(Math.abs(astWX - fp.x), reqDx);
+          }
           pushVx += nx * 1.6;
           pushVy += ny * 1.1;
           pushed = true;
@@ -1393,6 +1408,13 @@ export class Ship3DScene {
             }
             astWX = gp.worldX + nx * padExclR;
             astWY = gp.worldY + ny * padExclR;
+            if (astWY > maxSkyY) {
+              const side = astWX >= gp.worldX ? 1 : -1;
+              astWY = maxSkyY;
+              const dyC = astWY - gp.worldY;
+              const reqDx = Math.sqrt(Math.max(0.01, padExclR * padExclR - dyC * dyC));
+              astWX = gp.worldX + side * Math.max(Math.abs(astWX - gp.worldX), reqDx);
+            }
             pushVx += nx * 1.6;
             pushVy += ny * 1.1;
             pushed = true;
@@ -1406,6 +1428,9 @@ export class Ship3DScene {
       this.asteroids[idx + 1] = (astWY + 0.25) / 3.4;
       this.asteroids[idx + 9] = this.asteroids[idx + 9] * 0.5 + pushVx;
       this.asteroids[idx + 10] = this.asteroids[idx + 10] * 0.5 + pushVy;
+      if (astWY >= maxSkyY - 0.02 && this.asteroids[idx + 10] > 0) {
+        this.asteroids[idx + 10] = 0;
+      }
     }
   }
 
@@ -1427,7 +1452,8 @@ export class Ship3DScene {
     for (let attempt = 0; attempt < 16; attempt++) {
       const lane = ((index + attempt) % 7) - 3;
       const candX = Math.max(-1.65, Math.min(1.65, lane * 0.42 + (this.nextRand() - 0.5) * 0.42));
-      const candY = (this.nextRand() - 0.44) * 1.2;
+      const maxCandY = Math.min(0.05, (0.56 - myRadius * 1.25 + 0.25) / 3.4);
+      const candY = -0.68 + this.nextRand() * Math.max(0.15, maxCandY + 0.68);
       const candZ = zOverride !== undefined ? zOverride + attempt * 0.12 : 5.8 + this.nextRand() * 3.2;
 
       const wx = candX * 5.2;
@@ -2001,8 +2027,8 @@ export class Ship3DScene {
     scene.add(stbdTrailMesh);
     disposables.push(portTrailGeom, stbdTrailGeom, trailMat);
 
-    // Pre-allocated Expanding Additive Shockwave Rings
-    const shockGeom = new THREE.RingGeometry(0.76, 1.0, 32);
+    // Pre-allocated Expanding Additive Shockwave Rings (razor-thin luminous ripple)
+    const shockGeom = new THREE.RingGeometry(0.955, 1.0, 48);
     const shockwaveMeshes: THREE.Mesh[] = [];
     const shockwaveMats: THREE.MeshBasicMaterial[] = [];
     const shockwaveState = new Float32Array(SHOCKWAVE_POOL * 6);
@@ -2038,6 +2064,9 @@ export class Ship3DScene {
     scene.add(splashPoints);
     disposables.push(splashGeom, splashMat);
 
+    // Nebula Run Volumetric Translucent Additive Clouds (and soft circular sprite texture)
+    const nebulaTex = createNebulaCloudTexture();
+
     // Pooled Absorption / Frost / Starlight Sparks (Points)
     const sparkPositions = new Float32Array(SPARK_POOL * 3);
     const sparkVelocities = new Float32Array(SPARK_POOL * 3);
@@ -2047,7 +2076,8 @@ export class Ship3DScene {
     sparkGeom.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
     sparkGeom.setAttribute('color', new THREE.BufferAttribute(sparkColors, 3));
     const sparkMat = new THREE.PointsMaterial({
-      size: 0.14,
+      map: nebulaTex,
+      size: 0.18,
       vertexColors: true,
       transparent: true,
       opacity: 0.95,
@@ -2226,8 +2256,9 @@ export class Ship3DScene {
     const debrisGeom = new THREE.BufferGeometry();
     debrisGeom.setAttribute('position', new THREE.BufferAttribute(debrisPositions, 3));
     const debrisMat = new THREE.PointsMaterial({
+      map: nebulaTex,
       color: 0xdbeafe,
-      size: 0.055,
+      size: 0.075,
       transparent: true,
       opacity: 0.55,
       blending: THREE.AdditiveBlending,
@@ -2238,8 +2269,6 @@ export class Ship3DScene {
     scene.add(debrisPoints);
     disposables.push(debrisGeom, debrisMat);
 
-    // Nebula Run Volumetric Translucent Additive Clouds
-    const nebulaTex = createNebulaCloudTexture();
     const nebulaGeom = new THREE.PlaneGeometry(18, 12);
     const nebulaMeshes: THREE.Mesh[] = [];
     const nebulaMats: THREE.MeshBasicMaterial[] = [];
@@ -2664,8 +2693,7 @@ export class Ship3DScene {
 
     const pos = this.getFlightPosition(wordGate.startSeconds, this.tmpFlightPos);
     const gateWorldX = pos.x;
-    const gateWorldY = pos.y;
-    this.emitShockwave(gateWorldX, gateWorldY, wordZ);
+    const gateWorldY = pos.y + 0.36;
 
     parseColorToRgbInto(palette.accentPrimary, this.tmpRgbA);
     parseColorToRgbInto(palette.accentSecondary, this.tmpRgbB);
@@ -3074,23 +3102,23 @@ export class Ship3DScene {
       const mesh = st.shockwaveMeshes[i];
       const mat = st.shockwaveMats[i];
       if (st.shockwaveState[base] > 0.5 && !reduceMotion) {
-        st.shockwaveState[base + 1] += dt * 1.95;
+        st.shockwaveState[base + 1] += dt * 3.4;
         const p = st.shockwaveState[base + 1];
         if (p >= 1.0) {
           st.shockwaveState[base] = 0;
           mesh.visible = false;
         } else {
           mesh.visible = true;
-          const sc = 0.45 + p * 2.8;
+          const sc = 0.22 + p * 1.05;
           mesh.position.set(
             st.shockwaveState[base + 2],
             st.shockwaveState[base + 3],
             st.shockwaveState[base + 4] + p * 1.4
           );
-          mesh.scale.set(sc, sc * 0.68, 1);
+          mesh.scale.set(sc, sc, 1);
           mesh.rotation.set(0.12, 0, -this.rollAngle * 0.45);
           mat.color.copy(this.tmpColorA);
-          mat.opacity = (1 - p) * (1 - p) * (isOverlayMode ? 0.5 : 0.82);
+          mat.opacity = (1 - p) * (1 - p) * (isOverlayMode ? 0.2 : 0.28);
         }
       } else {
         mesh.visible = false;
@@ -3605,8 +3633,6 @@ export class Ship3DScene {
       this.chromaticPulse = Math.max(this.chromaticPulse, beatStrength > 0.85 ? 0.75 : 0.35);
       this.cameraSpringVel += 1.1;
 
-      this.emitShockwave(this.shipX, this.shipY, SHIP_WORLD_Z + 1.2);
-
       if (beatStrength > 0.78 && this.maneuverKind === 0 && this.maneuverCooldown <= 0) {
         const dir = this.shipVx >= 0 ? 1 : -1;
         this.startChoreographedManeuver(beatStrength > 0.9 ? 1 : 3, beatStrength > 0.9 ? 0.62 : 0.52, dir);
@@ -3697,7 +3723,7 @@ export class Ship3DScene {
           const mergeFlash = this.getWordMergeFlash(w.key);
           gp.text = w.text;
           gp.worldX = anchor.x;
-          gp.worldY = anchor.y;
+          gp.worldY = anchor.y + 0.36;
           gp.worldZ = wordZ;
           gp.isActive = w.lineIndex === this.currentActiveLine && w.wordIndex === this.currentActiveWord;
           gp.semanticMask = w.semanticMask;
@@ -3705,7 +3731,7 @@ export class Ship3DScene {
           if (wordZ >= 4.9) {
             gp.alpha = 0;
           } else if (dtToWord < 0) {
-            gp.alpha = Math.max(0, Math.min(1, 1.0 + dtToWord / 0.45));
+            gp.alpha = Math.max(0, Math.min(1, 1.0 + dtToWord / 0.16));
           } else {
             gp.alpha = Math.max(0, Math.min(1, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.7));
           }

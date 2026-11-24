@@ -1,6 +1,6 @@
 {
   "name": "waveform-desktop",
-  "version": "1.2.0",
+  "version": "1.2.5",
   "description": "WaveForm Windows Desktop Client",
   "private": true,
   "type": "module",
@@ -15,7 +15,9 @@
     "electron:compile": "tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.preload.json",
     "electron:dev": "node scripts/dev.mjs",
     "electron:build": "npm run build",
-    "dist:win": "npm run build && electron-builder --win nsis portable --publish never && node scripts/generate-checksums.mjs"
+    "build:rust": "cargo build --release --manifest-path native/waveform-core/Cargo.toml && node -e \"const fs=require('fs'); fs.copyFileSync('native/waveform-core/target/release/waveform_core.dll','native/waveform-core/waveform-core.win32-x64-msvc.node');\"",
+    "test:rust": "cargo test --manifest-path native/waveform-core/Cargo.toml",
+    "dist:win": "npm run build:rust && npm run build && electron-builder --win nsis portable --publish never && node scripts/generate-checksums.mjs"
   },
   "dependencies": {
     "@fontsource/fraunces": "^5.3.0",

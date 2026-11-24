@@ -61,6 +61,14 @@ export interface ElectronAPI {
   lvBroadcastState: (payload: any) => void;
   onLvStateBroadcast: (callback: (payload: any) => void) => () => void;
   onLvPlatformEvent: (callback: (evt: { type: string; data?: any }) => void) => () => void;
+  updaterCheck: () => Promise<any>;
+  updaterDownloadAndInstall: () => Promise<any>;
+  updaterDismissForSession: () => Promise<any>;
+  updaterGetState: () => Promise<any>;
+  updaterOpenReleasePage: () => Promise<any>;
+  onUpdaterStateChanged: (callback: (state: any) => void) => () => void;
+  getNativeCoreStatus: () => Promise<any>;
+  initNativeOnnxModels: () => Promise<any>;
   platform: string;
 }
 
@@ -168,6 +176,20 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.removeListener('lv-platform-event', handler);
     };
   },
+  updaterCheck: () => ipcRenderer.invoke('updater:check'),
+  updaterDownloadAndInstall: () => ipcRenderer.invoke('updater:downloadAndInstall'),
+  updaterDismissForSession: () => ipcRenderer.invoke('updater:dismissForSession'),
+  updaterGetState: () => ipcRenderer.invoke('updater:getState'),
+  updaterOpenReleasePage: () => ipcRenderer.invoke('updater:openReleasePage'),
+  onUpdaterStateChanged: (callback: (state: any) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: any) => callback(state);
+    ipcRenderer.on('updater:state-changed', handler);
+    return () => {
+      ipcRenderer.removeListener('updater:state-changed', handler);
+    };
+  },
+  getNativeCoreStatus: () => ipcRenderer.invoke('nativeCore:status'),
+  initNativeOnnxModels: () => ipcRenderer.invoke('nativeCore:onnxInit'),
   platform: process.platform,
 };
 

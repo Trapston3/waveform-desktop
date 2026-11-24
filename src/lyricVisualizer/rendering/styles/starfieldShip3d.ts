@@ -49,6 +49,8 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
   private scrollY = 0;
   private initialized = false;
   private lastKnownActiveIdx = -1;
+  // Pre-allocated AABB scratch for up to 3 non-overlapping 3D projected words (zero GC)
+  private readonly drawnWordRects = new Float32Array(12);
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'nebula-run') return 1;
@@ -188,12 +190,14 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    for (let g = gateCount - 1; g >= 0; g--) {
+    // Draw closest-first, capped at 3 non-overlapping projected words so words never pile up
+    let drawnCount = 0;
+    for (let g = 0; g < gateCount && drawnCount < 3; g++) {
       const gp = activeScene.getProjectedWordGate(g);
       if (!gp.text || gp.alpha <= 0.03) continue;
 
-      const rawPx = 42 * gp.scale * fontSizeScale * (1 + gp.mergeFlash * 0.22);
-      const wordFontPx = Math.max(28, Math.min(64, Math.round(rawPx)));
+      const rawPx = 36 * gp.scale * fontSizeScale * (1 + gp.mergeFlash * 0.18);
+      const wordFontPx = Math.max(28, Math.min(52, Math.round(rawPx)));
       ctx.font = `800 ${wordFontPx}px ${frame.fontFamily}`;
 
       const textW = ctx.measureText(gp.text).width;
@@ -202,9 +206,37 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       const maxX = Math.max(minX, focalLeft + focalWidth - marginX);
       const drawX = Math.max(minX, Math.min(maxX, gp.screenX));
 
-      const minY = Math.min(height - wordFontPx * 0.65 - 16, ribbonBottom + wordFontPx * 0.55);
-      const maxY = Math.max(minY, height - wordFontPx * 0.65 - 16);
+      const minY = Math.min(height * 0.38, ribbonBottom + 16);
+      const maxY = Math.max(minY, Math.min(height * 0.40, height - wordFontPx * 0.7 - 16));
       const drawY = Math.max(minY, Math.min(maxY, gp.screenY));
+
+      const pad = 14;
+      const rx0 = drawX - textW * 0.5 - pad;
+      const ry0 = drawY - wordFontPx * 0.55 - pad;
+      const rx1 = drawX + textW * 0.5 + pad;
+      const ry1 = drawY + wordFontPx * 0.55 + pad;
+
+      let overlaps = false;
+      for (let d = 0; d < drawnCount; d++) {
+        const o = d * 4;
+        if (
+          rx0 < this.drawnWordRects[o + 2] &&
+          rx1 > this.drawnWordRects[o] &&
+          ry0 < this.drawnWordRects[o + 3] &&
+          ry1 > this.drawnWordRects[o + 1]
+        ) {
+          overlaps = true;
+          break;
+        }
+      }
+      if (overlaps) continue;
+
+      const o = drawnCount * 4;
+      this.drawnWordRects[o] = rx0;
+      this.drawnWordRects[o + 1] = ry0;
+      this.drawnWordRects[o + 2] = rx1;
+      this.drawnWordRects[o + 3] = ry1;
+      drawnCount++;
 
       const glowColor = resolveWordGlowColor(
         gp.semanticMask,
@@ -213,33 +245,16 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
         frame.palette.accentSecondary
       );
 
-      // Liquid-starlight mergeFlash ripple & radial luminous droplets at word coords
+      // Liquid-starlight radial luminous droplets at word coords (zero thick concentric rings)
       if (gp.mergeFlash > 0.01 && !frame.reduceMotion) {
         const p = 1.0 - gp.mergeFlash;
-        const outerR = (14 + p * 72) * gp.scale;
-        const innerR = (8 + p * 42) * gp.scale;
-
         ctx.save();
-        ctx.strokeStyle = glowColor;
         ctx.shadowColor = glowColor;
-        ctx.shadowBlur = 16;
-        ctx.lineWidth = Math.max(1.4, 4.0 * gp.mergeFlash);
-        ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.85;
-        ctx.beginPath();
-        ctx.arc(drawX, drawY, outerR, 0, Math.PI * 2);
-        ctx.stroke();
-
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = Math.max(1.0, 2.2 * gp.mergeFlash);
-        ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.9;
-        ctx.beginPath();
-        ctx.arc(drawX, drawY, innerR, 0, Math.PI * 2);
-        ctx.stroke();
-
-        const dropletCount = 10;
+        ctx.shadowBlur = 14;
+        const dropletCount = 12;
         for (let d = 0; d < dropletCount; d++) {
           const ang = (d / dropletCount) * Math.PI * 2 + p * 0.55;
-          const dist = (10 + p * (48 + (d % 3) * 14)) * gp.scale;
+          const dist = (10 + p * (52 + (d % 3) * 14)) * gp.scale;
           const dx = drawX + Math.cos(ang) * dist;
           const dy = drawY + Math.sin(ang) * dist * 0.78;
           const dr = Math.max(1.4, (3.4 - p * 2.2) * gp.scale);
@@ -433,21 +448,21 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
           const isPast = !unsyncedOrLineLevel && w < frame.activeWordIndex;
 
           ctx.globalAlpha =
-            (isCurrent ? 1.0 : isPast ? 0.92 : isHovered ? 0.72 : 0.48) * frame.lineFadeAlpha;
+            (isCurrent ? 1.0 : isPast ? 0.94 : isHovered ? 0.86 : 0.78) * frame.lineFadeAlpha;
           ctx.fillStyle = isCurrent
             ? '#ffffff'
             : isPast
             ? frame.palette.textActive
             : frame.palette.textUpcoming;
-          ctx.shadowColor = isCurrent ? frame.palette.accentPrimary : 'rgba(2, 6, 18, 0.85)';
+          ctx.shadowColor = isCurrent ? frame.palette.accentPrimary : 'rgba(2, 6, 18, 0.9)';
           ctx.shadowBlur = isCurrent
             ? 20 + frame.audio.bassEnergy * 10 + wordPop * 8
             : isPast
             ? 8
-            : 4;
+            : 6;
 
           if (isCurrent && (wordPop > 0.04 || chromaPulse > 0.15)) {
-            const popScale = 1.0 + wordPop * 0.14;
+            const popScale = 1.0 + wordPop * 0.04;
             const halfW = word.width * 0.5;
             const halfH = fontSize * 0.5;
             ctx.save();

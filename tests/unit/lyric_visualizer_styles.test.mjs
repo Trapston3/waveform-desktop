@@ -28,7 +28,7 @@ export async function resolve(specifier, context, nextResolve) {
 `;
 register(`data:text/javascript,${encodeURIComponent(resolverHook)}`, import.meta.url);
 
-const { VISUAL_STYLE_DEFINITIONS } = await import('../../src/lyricVisualizer/core/index.ts');
+const { VISUAL_STYLE_DEFINITIONS, parseLrc } = await import('../../src/lyricVisualizer/core/index.ts');
 const {
   ALL_VISUAL_STYLE_IDS,
   StyleRegistry,
@@ -995,18 +995,19 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     }
   });
 
-  test('StarfieldShip3D enforces >=36px HUD top clearance across wrapped lines & browse mode and renders SIGNAL // INSTRUMENTAL on gaps', () => {
+  test('StarfieldShip3D renders large bold projected lyric words, browse-mode scrolling, INSTRUMENTAL + ♪ during gaps, and zero opaque fills in overlay/transparent modes', async () => {
+    const { getActiveShip3DScene } = await import('../../src/lyricVisualizer/rendering/ship3dScene.ts');
     const canvas = createMockCanvas();
     const renderer = new LyricStageRenderer({
       canvas,
       styleId: 'StarfieldShip3D',
       palette: SAMPLE_PALETTE,
-      reduceMotion: true,
+      reduceMotion: false,
     });
     renderer.resize(960, 540, 1);
 
     const wrappedLyrics = {
-      providerName: 'HUD Clearance Test',
+      providerName: 'Starfield Projection Test',
       sourceKind: 'WordSynced',
       lines: [
         {
@@ -1044,39 +1045,59 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     };
     renderer.setLyrics(wrappedLyrics);
 
-    const checkClearance = (label) => {
-      const textOps = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText');
-      const hudHeaders = textOps.filter((op) => String(op[1]).startsWith('HUD ['));
-      assert.equal(hudHeaders.length, 1, `${label}: expected HUD header`);
-      const headerY = hudHeaders[0][3];
-      const headerBottom = headerY + 14;
-      const lyricDraws = textOps.filter(
-        (op) => !String(op[1]).startsWith('HUD [') && !String(op[1]).startsWith('NAV:')
-      );
-      assert.ok(lyricDraws.length > 0, `${label}: expected lyric or signal fillText calls`);
-      for (const op of lyricDraws) {
-        assert.ok(
-          op[3] - headerBottom >= 36,
-          `${label}: "${op[1]}" at y=${op[3]} collided with HUD header bottom ${headerBottom} (clearance=${op[3] - headerBottom})`
-        );
-      }
+    // Track font used on each fillText to verify large bold projected lyric words (>=28px, weight 800)
+    const drawnFonts = [];
+    const origFillText = canvas.ctx2d.fillText.bind(canvas.ctx2d);
+    canvas.ctx2d.fillText = (text, x, y) => {
+      drawnFonts.push({ text: String(text), font: canvas.ctx2d.font, x, y });
+      origFillText(text, x, y);
     };
 
-    // Normal active wrapped line
+    // Active playback renders projected words along the flight path
     canvas.ctx2d.ops.length = 0;
-    renderer.setSyncState({ timeSeconds: 2.5, activeLineIndex: 0, activeWordIndex: 3, wordProgress: 0.5 });
-    renderer.renderFrame(1000);
-    checkClearance('normal-wrapped');
+    drawnFonts.length = 0;
+    renderer.setSyncState({ timeSeconds: 1.3, activeLineIndex: 0, activeWordIndex: 0, wordProgress: 0.5 });
+    assert.equal(renderer.renderFrame(1000), true);
 
-    // Manual browse mode scrolled aggressively upward
+    const activeScene = getActiveShip3DScene();
+    assert.ok(activeScene, 'Expected active Ship3DScene');
+    assert.ok(activeScene.getProjectedWordGateCount() >= 2, 'Expected projected words along flight path');
+
+    const projectedWordDraws = drawnFonts.filter((d) =>
+      ['Constellations', 'chart', 'the', 'open', 'endless'].includes(d.text)
+    );
+    assert.ok(projectedWordDraws.length >= 2, 'StarfieldShip3D must draw projected words via fillText');
+    assert.ok(
+      projectedWordDraws.some((d) => {
+        const m = /\b800\s+(\d+)px\b/.exec(d.font);
+        return m !== null && Number(m[1]) >= 28;
+      }),
+      'Projected flight-path lyric words must render as large bold >=28px typography'
+    );
+    assert.equal(
+      drawnFonts.some((d) => d.text.startsWith('HUD [') || d.text.includes('SCORE ')),
+      false,
+      'Obsolete cramped HUD header / SCORE bar must not be drawn'
+    );
+
+    // Manual browse-mode scrolling shifts lyric ribbon and suppresses flight-path projected gates
     renderer.scrollBy(-90);
+    assert.equal(renderer.isFollowing(), false);
     canvas.ctx2d.ops.length = 0;
-    renderer.renderFrame(1016);
-    checkClearance('browse-mode');
+    drawnFonts.length = 0;
+    assert.equal(renderer.renderFrame(1016), true);
+    assert.ok(
+      drawnFonts.some((d) => d.text === 'Lanterns' || d.text === 'Constellations'),
+      'Browse mode must still render scrolled lyric ribbon'
+    );
 
-    // Instrumental gap inside StarfieldShip3D renders SIGNAL // INSTRUMENTAL cleanly below HUD header
+    // Instrumental gap renders INSTRUMENTAL + ♪ cleanly once scroll spring settles
     renderer.resumeFollowPlayback();
+    for (let f = 0; f < 45; f++) {
+      renderer.renderFrame(1030 + f * 16);
+    }
     canvas.ctx2d.ops.length = 0;
+    drawnFonts.length = 0;
     renderer.setSyncState({
       timeSeconds: 10.0,
       activeLineIndex: -1,
@@ -1089,15 +1110,32 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
       lastActiveLineIndex: 0,
       nextLineIndex: 1,
     });
-    renderer.renderFrame(1032);
-    checkClearance('instrumental-gap');
-    const gapTexts = canvas.ctx2d.ops
-      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
-      .map((op) => String(op[1]));
-    assert.ok(
-      gapTexts.some((t) => t.includes('SIGNAL // INSTRUMENTAL')),
-      'StarfieldShip3D must render SIGNAL // INSTRUMENTAL during instrumental gap'
-    );
+    assert.equal(renderer.renderFrame(1800), true);
+    const gapTexts = drawnFonts.map((d) => d.text);
+    assert.ok(gapTexts.includes('INSTRUMENTAL'), 'StarfieldShip3D must render INSTRUMENTAL during gap');
+    assert.ok(gapTexts.includes('♪'), 'StarfieldShip3D must render ♪ during gap');
+
+    // Overlay and embeddedTransparent modes must emit zero opaque full-viewport fillRect(0,0,960,540)
+    for (const modePatch of [
+      { isOverlayMode: true, isEmbeddedTransparent: false },
+      { isOverlayMode: false, isEmbeddedTransparent: true },
+    ]) {
+      renderer.setModes(modePatch);
+      renderer.setSyncState({ timeSeconds: 2.0, activeLineIndex: 0, activeWordIndex: 1, wordProgress: 0.5 });
+      canvas.ctx2d.ops.length = 0;
+      assert.equal(renderer.renderFrame(1048), true);
+      const hasFullBg = canvas.ctx2d.ops.some(
+        (op) =>
+          Array.isArray(op) &&
+          op[0] === 'fillRect' &&
+          op[1] === 0 &&
+          op[2] === 0 &&
+          op[3] === 960 &&
+          op[4] === 540
+      );
+      assert.equal(hasFullBg, false, 'Overlay/transparent mode must emit zero opaque full-viewport fillRect');
+    }
+
     renderer.dispose();
   });
 
@@ -1262,7 +1300,7 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     renderer.dispose();
   });
 
-  test('Ship3DScene maintains zero asteroid-to-asteroid collisions across 120 frames and unifies Retro Wireframe hidden-line rendering', async () => {
+  test('Ship3DScene sweeps wide flight spline, maintains zero asteroid/spline/lyric collisions, and unifies Retro Wireframe hidden-line rendering', async () => {
     const { Ship3DScene } = await import('../../src/lyricVisualizer/rendering/ship3dScene.ts');
     const canvas = createMockCanvas();
     const scene = new Ship3DScene(null);
@@ -1276,14 +1314,28 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
       estimatedBpm: 128,
     };
 
+    // Wide multi-harmonic flight spline sweep across [-3.5, +3.5]
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (let t = 0; t <= 20; t += 0.1) {
+      const fp = scene.getFlightPosition(t);
+      if (fp.x < minX) minX = fp.x;
+      if (fp.x > maxX) maxX = fp.x;
+    }
+    assert.ok(minX < -2.0, `Expected getFlightPosition(t) minX < -2.0, got ${minX}`);
+    assert.ok(maxX > 2.0, `Expected getFlightPosition(t) maxX > 2.0, got ${maxX}`);
+
     for (const variationId of ['deep-space', 'nebula-run', 'retro-wireframe']) {
       scene.reset();
+      scene.syncLyricsState(SYNCED_LYRICS, 1.0, 0, 0, false, false);
       for (let f = 0; f < 40; f++) {
+        const t = 1.0 + f * 0.05;
+        scene.syncLyricsState(SYNCED_LYRICS, t, 0, 0, false, false);
         scene.render(
           canvas.ctx2d,
           1280,
           720,
-          f * 0.05,
+          t,
           0.05,
           audio,
           SAMPLE_PALETTE,
@@ -1298,6 +1350,16 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
         assert.ok(
           minClearance >= 0.4,
           `Expected positive pairwise asteroid clearance in ${variationId} at frame ${f}, got ${minClearance}`
+        );
+        const minSplineClearance = scene.getMinSplineAsteroidClearance();
+        assert.ok(
+          minSplineClearance >= 0,
+          `Expected non-negative spline-to-asteroid clearance in ${variationId} at frame ${f}, got ${minSplineClearance}`
+        );
+        const minLyricClearance = scene.getMinLyricAsteroidClearance();
+        assert.ok(
+          minLyricClearance >= 0,
+          `Expected non-negative lyric-to-asteroid clearance in ${variationId} at frame ${f}, got ${minLyricClearance}`
         );
       }
     }
@@ -1317,7 +1379,7 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     scene.dispose();
   });
 
-  test('StarfieldShip3D collects 3D Lyric Gates on beat, triggers semantic effects, resets on seek, and enters Asteroid Gauntlet on instrumental gaps', async () => {
+  test('StarfieldShip3D triggers direct lyric-merge splashes (mergeFlash > 0), semantic triggers (fire, rainbow, ice, slow, electric), and resets on seek', async () => {
     const { getActiveShip3DScene } = await import('../../src/lyricVisualizer/rendering/ship3dScene.ts');
     const canvas = createMockCanvas();
     const renderer = new LyricStageRenderer({
@@ -1328,42 +1390,43 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     });
     renderer.resize(1280, 720, 1);
 
-    const arcadeLyrics = {
-      providerName: 'Arcade Test',
+    const semanticLyrics = {
+      providerName: 'Semantic Flight Test',
       sourceKind: 'WordSynced',
       lines: [
         {
           startSeconds: 1.0,
           endSeconds: 4.5,
-          text: 'Fire rainbow ice slow glitch',
+          text: 'Fire rainbow ice slow electric',
           isSynthesizedWords: false,
           words: [
             { text: 'Fire', startSeconds: 1.0, endSeconds: 1.6 },
             { text: 'rainbow', startSeconds: 1.6, endSeconds: 2.3 },
             { text: 'ice', startSeconds: 2.3, endSeconds: 3.0 },
             { text: 'slow', startSeconds: 3.0, endSeconds: 3.7 },
-            { text: 'glitch', startSeconds: 3.7, endSeconds: 4.5 },
+            { text: 'electric', startSeconds: 3.7, endSeconds: 4.5 },
           ],
         },
       ],
     };
-    renderer.setLyrics(arcadeLyrics);
+    renderer.setLyrics(semanticLyrics);
 
-    // Lookahead spawns upcoming 3D Lyric Gates before t=1.0
+    // Lookahead anchors upcoming projected words before t=1.0
     renderer.setSyncState({ timeSeconds: 0.4, activeLineIndex: 0, activeWordIndex: 0, wordProgress: 0 });
     renderer.renderFrame(1000);
     const scene = getActiveShip3DScene();
     assert.ok(scene, 'Expected active Ship3DScene');
-    assert.ok(scene.getProjectedWordGateCount() >= 3, 'Expected upcoming Lyric Gates within 2.8s lookahead');
+    assert.ok(scene.getProjectedWordGateCount() >= 3, 'Expected upcoming projected words within 2.8s lookahead');
 
-    // Collect words across 1.0 -> 3.8s and verify score, combo, and semantic triggers
+    // Collect words across 1.0 -> 3.72s and verify mergeFlash + each semantic trigger
     const wordSteps = [
-      { t: 1.02, w: 0 },
-      { t: 1.62, w: 1 },
-      { t: 2.32, w: 2 },
-      { t: 3.02, w: 3 },
-      { t: 3.72, w: 4 },
+      { t: 1.02, w: 0, expectedToast: 'PLASMA STRIKE!' },
+      { t: 1.62, w: 1, expectedToast: 'PRISM OVERDRIVE' },
+      { t: 2.32, w: 2, expectedToast: 'CRYO THRUST' },
+      { t: 3.02, w: 3, expectedToast: 'BULLET-TIME' },
+      { t: 3.72, w: 4, expectedToast: 'ARC DISCHARGE' },
     ];
+    let sawMergeFlash = false;
     for (let i = 0; i < wordSteps.length; i++) {
       canvas.ctx2d.ops.length = 0;
       renderer.setSyncState({
@@ -1373,31 +1436,33 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
         wordProgress: 0.1,
       });
       renderer.renderFrame(1050 + i * 32);
+
+      const telStep = scene.getHudTelemetry();
+      assert.equal(
+        telStep.toastText,
+        wordSteps[i].expectedToast,
+        `Expected semantic trigger toast "${wordSteps[i].expectedToast}"`
+      );
+      for (let g = 0; g < scene.getProjectedWordGateCount(); g++) {
+        if (scene.getProjectedWordGate(g).mergeFlash > 0) {
+          sawMergeFlash = true;
+        }
+      }
     }
+    assert.equal(sawMergeFlash, true, 'Expected direct lyric-merge splash (mergeFlash > 0) on word slice');
 
     const telemetry = scene.getHudTelemetry();
-    assert.ok(telemetry.score >= 500, `Expected score >= 500 after collecting 5 words, got ${telemetry.score}`);
-    assert.equal(telemetry.combo, 5, 'Expected combo x5 after 5 collected words');
     assert.equal(telemetry.rainbowActive, true, 'Expected rainbow semantic timer active');
     assert.ok(telemetry.icePulse > 0, 'Expected cryo ice semantic pulse active');
     assert.equal(telemetry.bulletTimeActive, true, 'Expected slow bullet-time semantic timer active');
-    assert.ok(telemetry.glitchPulse > 0, 'Expected glitch semantic pulse active');
-
-    const hudTexts = canvas.ctx2d.ops
-      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
-      .map((op) => String(op[1]));
-    assert.ok(
-      hudTexts.some((t) => t.includes('SCORE ') && t.includes('COMBO x5')),
-      'Expected arcade SCORE and COMBO x5 in HUD header'
-    );
 
     // Seek reset clears transient semantic timers cleanly
-    scene.syncLyricsState(arcadeLyrics, 0.2, 0, 0, false, true);
+    scene.syncLyricsState(semanticLyrics, 0.2, 0, 0, false, true);
     const resetTel = scene.getHudTelemetry();
     assert.equal(resetTel.bulletTimeActive, false, 'Seek must reset bulletTimeActive');
     assert.equal(resetTel.rainbowActive, false, 'Seek must reset rainbowActive');
 
-    // Instrumental gap activates AUTOPILOT // ASTEROID GAUNTLET
+    // Instrumental gap renders INSTRUMENTAL + ♪ cleanly (no obsolete AUTOPILOT // ASTEROID GAUNTLET)
     canvas.ctx2d.ops.length = 0;
     renderer.setSyncState({
       timeSeconds: 6.0,
@@ -1415,10 +1480,248 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     const gapTexts = canvas.ctx2d.ops
       .filter((op) => Array.isArray(op) && op[0] === 'fillText')
       .map((op) => String(op[1]));
-    assert.ok(
+    assert.ok(gapTexts.includes('INSTRUMENTAL'), 'Expected INSTRUMENTAL during instrumental gap');
+    assert.ok(gapTexts.includes('♪'), 'Expected ♪ during instrumental gap');
+    assert.equal(
       gapTexts.some((t) => t.includes('AUTOPILOT // ASTEROID GAUNTLET')),
-      'Expected AUTOPILOT // ASTEROID GAUNTLET badge during instrumental gap'
+      false,
+      'Obsolete AUTOPILOT // ASTEROID GAUNTLET badge must not render'
     );
+
+    renderer.dispose();
+  });
+
+  test('Empty LRC timestamps and [Instrumental] markers never produce empty bubbles in IosTextingMotion or empty boxes across other styles', () => {
+    const rawLrc = [
+      '[00:01.00] First glowing lyric line',
+      '[02:04.00] ',
+      '[02:08.00] [Instrumental]',
+      '[02:12.00] Second glowing lyric line',
+    ].join('\n');
+    const parsed = parseLrc(rawLrc);
+    assert.ok(parsed);
+    assert.equal(parsed.lines.length, 2, 'parseLrc must strip empty timestamps and [Instrumental] markers');
+    assert.deepEqual(
+      parsed.lines.map((l) => l.text),
+      ['First glowing lyric line', 'Second glowing lyric line']
+    );
+
+    // Even if unfiltered lines with empty / [Instrumental] markers reach the renderer, styles must never draw empty bubbles/boxes
+    const unfilteredLyrics = {
+      providerName: 'Unfiltered Blank Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 1.0,
+          endSeconds: 4.0,
+          text: 'First glowing lyric line',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'First', startSeconds: 1.0, endSeconds: 2.0 },
+            { text: 'glowing', startSeconds: 2.0, endSeconds: 3.0 },
+            { text: 'lyric', startSeconds: 3.0, endSeconds: 3.5 },
+            { text: 'line', startSeconds: 3.5, endSeconds: 4.0 },
+          ],
+        },
+        {
+          startSeconds: 4.2,
+          endSeconds: 6.0,
+          text: '   ',
+          isSynthesizedWords: false,
+          words: [],
+        },
+        {
+          startSeconds: 6.0,
+          endSeconds: 9.0,
+          text: '[Instrumental]',
+          isSynthesizedWords: false,
+          words: [{ text: '[Instrumental]', startSeconds: 6.0, endSeconds: 9.0 }],
+        },
+        {
+          startSeconds: 9.5,
+          endSeconds: 13.0,
+          text: 'Second glowing lyric line',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Second', startSeconds: 9.5, endSeconds: 10.5 },
+            { text: 'glowing', startSeconds: 10.5, endSeconds: 11.5 },
+            { text: 'lyric', startSeconds: 11.5, endSeconds: 12.2 },
+            { text: 'line', startSeconds: 12.2, endSeconds: 13.0 },
+          ],
+        },
+      ],
+    };
+
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'IosTextingMotion',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: true,
+    });
+    renderer.resize(900, 620, 1);
+    renderer.setLyrics(unfilteredLyrics);
+    canvas.ctx2d.ops.length = 0;
+    renderer.setSyncState({ timeSeconds: 10.0, activeLineIndex: 3, activeWordIndex: 0, wordProgress: 0.5 });
+    assert.equal(renderer.renderFrame(1000), true);
+    const iosTexts = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+      .map((op) => String(op[1]));
+    assert.equal(
+      iosTexts.some((t) => t.includes('[Instrumental]') || t.trim() === ''),
+      false,
+      'IosTextingMotion must never draw [Instrumental] or empty text bubbles'
+    );
+
+    // Check remaining styles never draw [Instrumental] or blank text boxes when given unfiltered lines
+    for (const styleId of EXPECTED_12_STYLES) {
+      if (styleId === 'IosTextingMotion') continue;
+      renderer.setStyle(styleId);
+      renderer.setLyrics(unfilteredLyrics);
+      canvas.ctx2d.ops.length = 0;
+      renderer.setSyncState({ timeSeconds: 6.5, activeLineIndex: 2, activeWordIndex: 0, wordProgress: 0.2 });
+      assert.equal(renderer.renderFrame(1020), true, `${styleId} should render cleanly during blank/[Instrumental] slot`);
+      const drawn = canvas.ctx2d.ops
+        .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+        .map((op) => String(op[1]));
+      assert.equal(
+        drawn.some((t) => t.trim() === ''),
+        false,
+        `${styleId} must never emit empty fillText`
+      );
+      assert.equal(
+        drawn.some((t) => t.includes('[Instrumental]')),
+        false,
+        `${styleId} must never render raw [Instrumental] marker text`
+      );
+    }
+
+    renderer.dispose();
+  });
+
+  test('IosTextingMotion renders single unified voice-note waveform pill (zero voiceMemo embed overlap, zero 1.5s overlap, >=3 typing dots at 1.0s) and compact glowing note bubble for <4s pauses', () => {
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'IosTextingMotion',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: true,
+    });
+    renderer.resize(900, 620, 1);
+
+    const lyricsWithLongAndShortGaps = {
+      providerName: 'Gap Morph Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 1.0,
+          endSeconds: 3.0,
+          text: 'Listen to the voice on the radio',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Listen', startSeconds: 1.0, endSeconds: 1.5 },
+            { text: 'to', startSeconds: 1.5, endSeconds: 1.8 },
+            { text: 'the', startSeconds: 1.8, endSeconds: 2.1 },
+            { text: 'voice', startSeconds: 2.1, endSeconds: 2.5 },
+            { text: 'radio', startSeconds: 2.5, endSeconds: 3.0 },
+          ],
+        },
+        {
+          // 6.0s gap (>= 4.0s -> voice-note waveform pill, morphing to typing dots)
+          startSeconds: 9.0,
+          endSeconds: 11.0,
+          text: 'Echoes fade across the harbor',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Echoes', startSeconds: 9.0, endSeconds: 9.7 },
+            { text: 'fade', startSeconds: 9.7, endSeconds: 10.3 },
+            { text: 'harbor', startSeconds: 10.3, endSeconds: 11.0 },
+          ],
+        },
+        {
+          // 2.5s short pause (< 4.0s -> compact glowing note bubble)
+          startSeconds: 13.5,
+          endSeconds: 16.0,
+          text: 'Midnight static clears away',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Midnight', startSeconds: 13.5, endSeconds: 14.3 },
+            { text: 'static', startSeconds: 14.3, endSeconds: 15.1 },
+            { text: 'away', startSeconds: 15.1, endSeconds: 16.0 },
+          ],
+        },
+      ],
+    };
+    renderer.setLyrics(lyricsWithLongAndShortGaps);
+
+    const arcCalls = [];
+    const origArc = canvas.ctx2d.arc.bind(canvas.ctx2d);
+    canvas.ctx2d.arc = (x, y, r, s, e) => {
+      arcCalls.push({ x, y, r });
+      origArc(x, y, r, s, e);
+    };
+
+    const inspectGapFrame = (timeSeconds, timeUntilNextLine, gapProgress) => {
+      canvas.ctx2d.ops.length = 0;
+      arcCalls.length = 0;
+      renderer.setSyncState({
+        timeSeconds,
+        activeLineIndex: -1,
+        activeWordIndex: -1,
+        wordProgress: 0,
+        isInstrumentalGap: true,
+        gapProgress,
+        timeUntilNextLine,
+        hasLyrics: true,
+      });
+      assert.equal(renderer.renderFrame(1000 + timeSeconds * 16), true);
+      const fillTexts = canvas.ctx2d.ops
+        .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+        .map((op) => String(op[1]));
+      // Typing indicator emits 3 consecutive arcs of r=3.6 at identical y spaced 14px apart
+      let typingDotCount = 0;
+      for (let i = 0; i <= arcCalls.length - 3; i++) {
+        const a = arcCalls[i];
+        const b = arcCalls[i + 1];
+        const c = arcCalls[i + 2];
+        if (
+          Math.abs(a.r - 3.6) < 0.01 &&
+          Math.abs(b.r - 3.6) < 0.01 &&
+          Math.abs(c.r - 3.6) < 0.01 &&
+          Math.abs(a.y - b.y) < 0.1 &&
+          Math.abs(b.y - c.y) < 0.1 &&
+          Math.abs(b.x - a.x - 14) < 0.1 &&
+          Math.abs(c.x - b.x - 14) < 0.1
+        ) {
+          typingDotCount = 3;
+          break;
+        }
+      }
+      const hasShortPauseGlowArc = arcCalls.some((a) => Math.abs(a.r - 16) < 0.01);
+      return { fillTexts, typingDotCount, hasShortPauseGlowArc };
+    };
+
+    // 1. Long >=4s gap at t=6.0s (timeUntilNextLine=3.0s): single unified dark voice-note pill, zero voiceMemo embed card
+    const longMid = inspectGapFrame(6.0, 3.0, 0.5);
+    assert.ok(longMid.fillTexts.includes('♪') && longMid.fillTexts.includes('♫'), 'Expected voice-note waveform pill (♪ + ♫)');
+    assert.equal(longMid.fillTexts.includes('0:18'), false, 'Voice-note gap must suppress duplicate voiceMemo embed card');
+    assert.equal(longMid.typingDotCount, 0, 'Voice-note pill must not overlap with typing dots');
+
+    // 2. Morph boundary at timeUntilNextLine = 1.5s (t=7.5s): zero simultaneous waveform + typing overlap
+    const morph15 = inspectGapFrame(7.5, 1.5, 0.75);
+    assert.ok(morph15.fillTexts.includes('♪') && morph15.fillTexts.includes('♫'), 'At 1.5s before next line, voice-note pill renders cleanly');
+    assert.equal(morph15.typingDotCount, 0, 'Zero simultaneous waveform + typing dot overlap allowed at 1.5s morph');
+
+    // 3. Typing window at timeUntilNextLine = 1.0s (t=8.0s): >=3 typing dots, zero waveform pill
+    const typing10 = inspectGapFrame(8.0, 1.0, 0.83);
+    assert.ok(typing10.typingDotCount >= 3, `Expected >=3 typing indicator dots at timeUntilNextLine=1.0s, got ${typing10.typingDotCount}`);
+    assert.equal(typing10.fillTexts.includes('♫'), false, 'Waveform pill must be gone when typing indicator is active at 1.0s');
+
+    // 4. Short <4s pause (11.0s -> 13.5s, t=11.6s, timeUntilNextLine=1.9s): compact glowing note bubble (no 14-bar waveform ♫, no 3 typing dots)
+    const shortPause = inspectGapFrame(11.6, 1.9, 0.24);
+    assert.equal(shortPause.fillTexts.includes('♫'), false, 'Short <4s pause must not render full voice-note waveform pill');
+    assert.equal(shortPause.typingDotCount, 0, 'Short <4s pause must not draw typing dots');
+    assert.equal(shortPause.hasShortPauseGlowArc, true, 'Short <4s pause must render compact glowing note bubble');
 
     renderer.dispose();
   });

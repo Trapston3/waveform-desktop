@@ -165,11 +165,10 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
           // Only render visible neighborhood cards to optimize performance
           if (Math.abs(offset) > 5) return null;
 
-          const rotationY = offset === 0 ? 0 : offset < 0 ? 55 : -55;
-          const scale = 1.0 - 0.28 * absOffset;
-          const translateX = offset === 0 ? 0 : offset * 140 + (offset > 0 ? 60 : -60);
-          const translateZ = -150 * absOffset;
-          const opacity = 1.0 - 0.45 * absOffset;
+          const rotationY = offset === 0 ? 0 : offset < 0 ? 52 : -52;
+          const scale = 1.0 - 0.24 * absOffset;
+          const translateX = offset === 0 ? 0 : offset * 145 + (offset > 0 ? 55 : -55);
+          const translateZ = offset === 0 ? 0 : -140 - Math.abs(offset) * 45;
           const zIndex = 100 - Math.abs(offset) * 10;
 
           const resolvedCover =
@@ -191,9 +190,10 @@ export const AlbumCoverFlow: React.FC<AlbumCoverFlowProps> = ({
               style={{
                 transform: `translateX(${translateX}px) translateZ(${translateZ}px) rotateY(${rotationY}deg) scale(${scale})`,
                 zIndex,
-                opacity,
-                transition: 'transform 380ms cubic-bezier(0.2, 0.9, 0.3, 1), opacity 380ms ease',
-                transformOrigin: offset > 0 ? '0% 50%' : offset < 0 ? '100% 50%' : '50% 50%',
+                opacity: 1,
+                filter: offset === 0 ? 'none' : `brightness(${Math.max(0.45, 0.78 - Math.abs(offset) * 0.08)})`,
+                transition: 'transform 380ms cubic-bezier(0.2, 0.9, 0.3, 1), filter 380ms ease',
+                transformOrigin: '50% 50%',
               }}
               className="absolute w-56 h-56 cursor-pointer group rounded-2xl"
             >

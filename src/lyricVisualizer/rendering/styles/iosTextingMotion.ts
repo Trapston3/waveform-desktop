@@ -871,16 +871,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.shadowBlur = 10;
       ctx.fillStyle = grad;
       ctx.fillText(text, wx, wy);
-      const handAng = motionScale === 0 ? 0 : t * Math.PI * 2;
-      const clockCx = wx + safeW + 5;
-      const clockCy = wy + safeH * 0.45;
-      ctx.strokeStyle = '#fde68a';
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.arc(clockCx, clockCy, 4, 0, Math.PI * 2);
-      ctx.moveTo(clockCx, clockCy);
-      ctx.lineTo(clockCx + Math.cos(handAng) * 3, clockCy + Math.sin(handAng) * 3);
-      ctx.stroke();
     } else {
       // whisper / ghost: translucent ethereal alpha/glow shimmer
       const ghostAlpha =
@@ -1522,9 +1512,18 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.restore();
     }
 
-    const minY = showHeader ? 48 : -40;
+    // Keep thread clear of header bar and top-right NowPlaying window controls
+    const topClipY = showHeader ? 49 : isTransparent ? 0 : 62;
+    const minY = topClipY;
     const maxY = height + 60;
     const hoveredIdx = frame.hoveredLineIndex ?? -1;
+
+    ctx.save();
+    if (topClipY > 0) {
+      ctx.beginPath();
+      ctx.rect(0, topClipY, focalWidth, Math.max(1, height - topClipY));
+      ctx.clip();
+    }
 
     for (let i = 0; i < this.bubbles.length; i++) {
       const b = this.bubbles[i];
@@ -1884,9 +1883,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
     }
 
+    ctx.restore(); // end topClipY region
     ctx.restore();
-
-    // WS2: Cinema-Edit letterbox bars & edge vignette across FULL (0, 0, width, height)
     if (!isTransparent) {
       if (variationIdx === 2) {
         const barH = Math.round(height * 0.058);

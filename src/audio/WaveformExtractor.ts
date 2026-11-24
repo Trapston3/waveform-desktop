@@ -81,14 +81,15 @@ export class WaveformExtractor {
       for (let b = 0; b < WaveformExtractor.BUCKET_COUNT; b++) {
         const start = b * bucketSize;
         const end = Math.min(start + bucketSize, len);
+        const count = end - start;
         let sumSq = 0;
-        let count = 0;
 
         for (let i = start; i < end; i++) {
           const val = buffer[i];
-          const s = Number.isFinite(val) ? val : 0.0;
-          sumSq += s * s;
-          count++;
+          const sq = val * val;
+          if (sq < Infinity) {
+            sumSq += sq;
+          }
         }
 
         buckets[b] = count > 0 ? Math.sqrt(sumSq / count) : 0;

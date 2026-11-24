@@ -1,14 +1,22 @@
 appId: com.waveform.desktop
 productName: WaveForm
+afterPack: scripts/after-pack-manifest.mjs
 directories:
   output: release
   buildResources: build
 files:
   - dist/**/*
+  - "!dist/assets/data/**"
   - dist-electron/**/*
   - build/icon.ico
   - build/icon.png
   - package.json
+asarUnpack:
+  - "dist/assets/*.otf"
+  - "dist/assets/*.ttf"
+  - "dist/assets/*.woff2"
+  - "dist/assets/*.woff"
+  - "dist/assets/*.png"
 extraResources:
   - from: src/assets/data
     to: assets/data
@@ -31,8 +39,11 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-  createDesktopShortcut: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: always
   createStartMenuShortcut: true
+  differentialPackage: true
+  include: build/installer.nsh
   shortcutName: WaveForm
   artifactName: WaveForm-Setup-${version}.exe
 portable:

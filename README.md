@@ -46,16 +46,19 @@ irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/in
 # Portable mode (no installer wizard, installs to %LOCALAPPDATA%\Programs\WaveForm + Start Menu shortcut)
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Portable
 
-# Silent NSIS setup
+# Silent NSIS setup (automatically performs a fast changed-files-only update if already installed)
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Silent
 
+# Force a clean reinstall (passes /FRESH to Setup.exe)
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Fresh -Force
+
 # Pin a specific release tag
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.0.0 -Portable
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.2.0 -Portable
 ```
 
 ### Direct `.exe` Download
 
-Grab `WaveForm-Setup-1.0.0.exe` (NSIS installer) or `WaveForm-Portable-1.0.0.exe` (standalone executable) directly from the [Releases page](https://github.com/Trapston3/waveform-desktop/releases/latest).
+Grab `WaveForm-Setup-1.2.0.exe` (NSIS installer with smart changed-files-only Update mode) or `WaveForm-Portable-1.2.0.exe` (standalone executable) directly from the [Releases page](https://github.com/Trapston3/waveform-desktop/releases/latest).
 
 ---
 

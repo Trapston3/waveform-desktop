@@ -18,7 +18,9 @@ param(
     [switch]$Portable,
     [string]$Version,
     [switch]$Silent,
-    [string]$InstallDir
+    [string]$InstallDir,
+    [switch]$Fresh,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,6 +78,43 @@ try {
     }
 
     $tagName = $release.tag_name
+    $targetVersion = $tagName.TrimStart('v')
+
+    # Detect existing NSIS installation in HKCU / HKLM Uninstall registry
+    $installedVersion = $null
+    $installedLocation = $null
+    if (-not $Portable) {
+        $regRoots = @(
+            'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        )
+        foreach ($regRoot in $regRoots) {
+            $match = Get-ItemProperty -Path $regRoot -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -like 'WaveForm*' -and $_.InstallLocation } |
+                Select-Object -First 1
+            if ($match) {
+                $installedLocation = $match.InstallLocation
+                $installedVersion = $match.DisplayVersion
+                break
+            }
+        }
+        if (-not $installedVersion -and $installedLocation) {
+            $exeCandidate = Join-Path $installedLocation 'WaveForm.exe'
+            if (Test-Path -LiteralPath $exeCandidate) {
+                $installedVersion = (Get-Item -LiteralPath $exeCandidate).VersionInfo.ProductVersion
+            }
+        }
+        if ($installedVersion) {
+            Write-Ok "Detected existing WaveForm v$installedVersion at $installedLocation"
+            if (($installedVersion -eq $targetVersion) -and (-not $Force) -and (-not $Fresh)) {
+                Write-Host ""
+                Write-Host "${cGreen}${cBold}WaveForm Desktop ($tagName) is already up to date! (Use -Force to reinstall)${cReset}"
+                return
+            }
+            Write-Step "Preparing changed-files-only update: v$installedVersion -> v$targetVersion"
+        }
+    }
+
     $assetPattern = if ($Portable) { '^WaveForm-Portable-.*\.exe$' } else { '^WaveForm-Setup-.*\.exe$' }
     $exeAsset = $release.assets | Where-Object { $_.name -match $assetPattern } | Select-Object -First 1
 
@@ -160,8 +199,11 @@ try {
     } else {
         Write-Step "Launching WaveForm Setup installer..."
         $nsisArgs = New-Object System.Collections.Generic.List[string]
-        if ($Silent) {
+        if ($Silent -or $installedVersion) {
             $nsisArgs.Add('/S')
+        }
+        if ($Fresh) {
+            $nsisArgs.Add('/FRESH')
         }
         if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
             # NSIS requires /D=path to be the last parameter without surrounding quotes

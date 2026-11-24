@@ -4,6 +4,8 @@ dist/
 dist-electron/
 release/
 coverage/
+build/7za.exe
+build/install-manifest.tsv
 
 # Agent / local runtime state
 /.agents/

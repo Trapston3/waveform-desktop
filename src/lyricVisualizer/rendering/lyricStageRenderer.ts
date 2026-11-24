@@ -3,6 +3,7 @@
 // spring-damped manual scroll, and preallocated hit-rect pool for hover/click-to-seek.
 
 import {
+  getStyleDefinition,
   resolveStyleVariationId,
   SF_PRO_DISPLAY_STACK,
   type AudioFrameMetrics,
@@ -16,6 +17,7 @@ import {
   type StyleTrackMetadata,
   type VisualStyleId,
 } from '../core/models';
+import { isBlankOrInstrumentalLineText } from '../core/lrcParser';
 import { ensurePaletteContrast } from '../core/oklchPalette';
 import { LyricsMeasurer } from './lyricsMeasurer';
 import { setActiveShip3DScene, setShip3DSceneHint, Ship3DScene } from './ship3dScene';
@@ -433,9 +435,14 @@ export class LyricStageRenderer {
     const legacyChanged = styleId === 'HoloVaporwave' || styleId === 'SpectrumRibbon';
     if (this.styleId === nextId && !legacyChanged) return;
     this.styleId = nextId;
-    if (!this.hasExplicitVariation || legacyChanged) {
-      this.variationId = resolveStyleVariationId(styleId, undefined);
+    const def = getStyleDefinition(nextId);
+    const isCurrentVariationValidForNext = def.variations.some((v) => v.id === this.variationId);
+    if (!this.hasExplicitVariation || legacyChanged || !isCurrentVariationValidForNext) {
+      this.variationId = resolveStyleVariationId(legacyChanged ? styleId : nextId, undefined);
       this.frameContext.variationId = this.variationId;
+      if (!legacyChanged && !isCurrentVariationValidForNext) {
+        this.hasExplicitVariation = false;
+      }
     }
     this.registry.get(this.styleId).reset?.();
   }
@@ -576,7 +583,17 @@ export class LyricStageRenderer {
     }
 
     const lines = fc.lyrics?.lines;
-    if (!lines || lines.length === 0) {
+    let firstNonBlankIdx = -1;
+    let lastNonBlankIdx = -1;
+    if (lines && lines.length > 0) {
+      for (let i = 0; i < lines.length; i++) {
+        if (!isBlankOrInstrumentalLineText(lines[i].text)) {
+          if (firstNonBlankIdx < 0) firstNonBlankIdx = i;
+          lastNonBlankIdx = i;
+        }
+      }
+    }
+    if (!lines || lines.length === 0 || firstNonBlankIdx < 0) {
       fc.hasLyrics = false;
       fc.isInstrumentalGap = true;
       fc.gapProgress = 0;
@@ -588,7 +605,14 @@ export class LyricStageRenderer {
 
     fc.hasLyrics = true;
     const t = fc.timeSeconds;
-    const activeIdx = fc.activeLineIndex;
+    const rawActiveIdx = fc.activeLineIndex;
+    const activeIdx =
+      rawActiveIdx >= 0 && rawActiveIdx < lines.length && !isBlankOrInstrumentalLineText(lines[rawActiveIdx].text)
+        ? rawActiveIdx
+        : -1;
+    if (rawActiveIdx !== activeIdx) {
+      fc.activeLineIndex = activeIdx;
+    }
     let isGap = false;
     let gapProgress = 0;
     let timeUntilNext = Number.POSITIVE_INFINITY;
@@ -600,8 +624,13 @@ export class LyricStageRenderer {
       const line = lines[activeIdx];
       const lastWordEnd =
         line.words.length > 0 ? line.words[line.words.length - 1].endSeconds : line.endSeconds;
-      if (activeIdx + 1 < lines.length) {
-        nextIdx = activeIdx + 1;
+      for (let i = activeIdx + 1; i < lines.length; i++) {
+        if (!isBlankOrInstrumentalLineText(lines[i].text)) {
+          nextIdx = i;
+          break;
+        }
+      }
+      if (nextIdx >= 0) {
         const nextStart = lines[nextIdx].startSeconds;
         timeUntilNext = Math.max(0, nextStart - t);
         const tailGap = nextStart - lastWordEnd;
@@ -613,39 +642,61 @@ export class LyricStageRenderer {
         isGap = true;
         gapProgress = Math.max(0, Math.min(1, (t - lastWordEnd) / Math.max(0.001, line.endSeconds - lastWordEnd)));
       }
-    } else if (t < lines[0].startSeconds) {
-      nextIdx = 0;
+    } else if (t < lines[firstNonBlankIdx].startSeconds) {
+      nextIdx = firstNonBlankIdx;
       lastActive = -1;
-      const firstStart = lines[0].startSeconds;
+      const firstStart = lines[firstNonBlankIdx].startSeconds;
       timeUntilNext = Math.max(0, firstStart - t);
       if (firstStart > 3.0) {
         isGap = true;
         gapProgress = Math.max(0, Math.min(1, t / Math.max(0.001, firstStart)));
       }
-    } else if (t > lines[lines.length - 1].endSeconds) {
-      lastActive = lines.length - 1;
+    } else if (t > lines[lastNonBlankIdx].endSeconds) {
+      lastActive = lastNonBlankIdx;
       isGap = true;
       gapProgress = 1;
     } else {
-      let prevIdx = 0;
+      let prevIdx = -1;
       for (let i = 0; i < lines.length; i++) {
-        if (lines[i].endSeconds < t) prevIdx = i;
-        else break;
+        if (lines[i].endSeconds <= t && !isBlankOrInstrumentalLineText(lines[i].text)) {
+          prevIdx = i;
+        } else if (lines[i].endSeconds > t) {
+          break;
+        }
       }
-      lastActive = prevIdx;
-      nextIdx = prevIdx + 1 < lines.length ? prevIdx + 1 : -1;
-      if (nextIdx >= 0) {
-        const prevLine = lines[prevIdx];
-        const prevEnd =
-          prevLine.words.length > 0
-            ? Math.min(prevLine.endSeconds, prevLine.words[prevLine.words.length - 1].endSeconds)
-            : prevLine.endSeconds;
-        const nextStart = lines[nextIdx].startSeconds;
-        const gapDur = nextStart - prevEnd;
-        timeUntilNext = Math.max(0, nextStart - t);
-        if (gapDur >= 3.5) {
+      if (prevIdx < 0) {
+        nextIdx = firstNonBlankIdx;
+        lastActive = -1;
+        const firstStart = lines[firstNonBlankIdx].startSeconds;
+        timeUntilNext = Math.max(0, firstStart - t);
+        if (firstStart > 3.0) {
           isGap = true;
-          gapProgress = Math.max(0, Math.min(1, (t - prevEnd) / Math.max(0.001, gapDur)));
+          gapProgress = Math.max(0, Math.min(1, t / Math.max(0.001, firstStart)));
+        }
+      } else {
+        lastActive = prevIdx;
+        for (let i = prevIdx + 1; i < lines.length; i++) {
+          if (!isBlankOrInstrumentalLineText(lines[i].text)) {
+            nextIdx = i;
+            break;
+          }
+        }
+        if (nextIdx >= 0) {
+          const prevLine = lines[prevIdx];
+          const prevEnd =
+            prevLine.words.length > 0
+              ? Math.min(prevLine.endSeconds, prevLine.words[prevLine.words.length - 1].endSeconds)
+              : prevLine.endSeconds;
+          const nextStart = lines[nextIdx].startSeconds;
+          const gapDur = nextStart - prevEnd;
+          timeUntilNext = Math.max(0, nextStart - t);
+          if (gapDur >= 3.5) {
+            isGap = true;
+            gapProgress = Math.max(0, Math.min(1, (t - prevEnd) / Math.max(0.001, gapDur)));
+          }
+        } else {
+          isGap = true;
+          gapProgress = 1;
         }
       }
     }
@@ -884,8 +935,12 @@ export class LyricStageRenderer {
         this.webGlLayer.render(activeWebGlEffect, this.webGlParams);
       }
     }
+    const webGlRenderable =
+      typeof (this.webGlLayer as any)?.isRenderable === 'boolean'
+        ? (this.webGlLayer as any).isRenderable
+        : Boolean(this.webGlLayer);
     this.frameContext.hasWebGlBackdrop = Boolean(
-      this.webGlLayer && activeWebGlEffect !== 'none' && !isTransparent
+      webGlRenderable && activeWebGlEffect !== 'none' && !isTransparent
     );
 
     // 2. Clear Canvas2D transparently (critical for Overlay/Embedded mode & WebGL2 compositing)

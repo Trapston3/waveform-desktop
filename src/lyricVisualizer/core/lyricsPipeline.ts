@@ -1,4 +1,8 @@
-import { parseLrc } from './lrcParser';
+import {
+  filterBlankAndInstrumentalLines,
+  isBlankOrInstrumentalLineText,
+  parseLrc,
+} from './lrcParser';
 import type { ILyricsProvider, LyricLine, Lyrics, LyricWord, TrackInfo } from './models';
 import { synthesizeLyricsWords } from './wordSynthesizer';
 import { hasNonLatinScript, mapRomanizedWords, transliterateToLatin } from '../../utils/transliterate';
@@ -62,8 +66,43 @@ export class EmbeddedTrackLyricsProvider implements ILyricsProvider {
 
     if (track.parsedLyricsLines && track.parsedLyricsLines.length > 0) {
       let hasWordLevel = false;
-      const lines: LyricLine[] = track.parsedLyricsLines.map((line) => {
+      const rawMapped: LyricLine[] = [];
+      for (const line of track.parsedLyricsLines) {
         const startSeconds = Math.max(0, line.startTimeMs / 1000);
+        if (isBlankOrInstrumentalLineText(line.text)) {
+          if (rawMapped.length > 0) {
+            const prev = rawMapped[rawMapped.length - 1];
+            if (startSeconds > prev.startSeconds && startSeconds < prev.endSeconds) {
+              const clampedEnd = Math.max(prev.startSeconds + 0.05, Math.min(prev.endSeconds, startSeconds));
+              rawMapped[rawMapped.length - 1] = {
+                ...prev,
+                endSeconds: clampedEnd,
+                words: prev.words.map((w) => ({
+                  ...w,
+                  startSeconds: Math.min(Math.max(prev.startSeconds, clampedEnd - 0.02), w.startSeconds),
+                  endSeconds: Math.max(
+                    Math.min(Math.max(prev.startSeconds, clampedEnd - 0.02), w.startSeconds) + 0.02,
+                    Math.min(clampedEnd, w.endSeconds)
+                  ),
+                })),
+                ...(prev.romanizedWords
+                  ? {
+                      romanizedWords: prev.romanizedWords.map((w) => ({
+                        ...w,
+                        startSeconds: Math.min(Math.max(prev.startSeconds, clampedEnd - 0.02), w.startSeconds),
+                        endSeconds: Math.max(
+                          Math.min(Math.max(prev.startSeconds, clampedEnd - 0.02), w.startSeconds) + 0.02,
+                          Math.min(clampedEnd, w.endSeconds)
+                        ),
+                      })),
+                    }
+                  : {}),
+              };
+            }
+          }
+          continue;
+        }
+
         const endSeconds = Math.max(startSeconds + 0.05, line.endTimeMs / 1000);
         const words: LyricWord[] =
           line.words && line.words.length > 0
@@ -93,7 +132,7 @@ export class EmbeddedTrackLyricsProvider implements ILyricsProvider {
               }))
             : undefined;
 
-        return {
+        rawMapped.push({
           startSeconds,
           endSeconds,
           text: line.text,
@@ -102,14 +141,16 @@ export class EmbeddedTrackLyricsProvider implements ILyricsProvider {
           ...(line.romanizedText ? { romanizedText: line.romanizedText } : {}),
           ...(romanizedWords ? { romanizedWords } : {}),
           ...(line.translatedText ? { translatedText: line.translatedText } : {}),
-        };
-      });
+        });
+      }
 
-      return {
-        providerName: this.name,
-        sourceKind: hasWordLevel ? 'WordSynced' : 'LineSynced',
-        lines,
-      };
+      if (rawMapped.length > 0) {
+        return {
+          providerName: this.name,
+          sourceKind: hasWordLevel ? 'WordSynced' : 'LineSynced',
+          lines: rawMapped,
+        };
+      }
     }
 
     if (track.rawSyncedLyrics && track.rawSyncedLyrics.trim().length > 0) {
@@ -236,7 +277,10 @@ export class LyricsPipeline {
         const cached = await this.cache.getCachedLyrics(cacheKey);
         if (signal?.aborted) return null;
         if (cached && cached.lines.length > 0) {
-          return this.ensureWordTimings(cached);
+          const normalized = this.ensureWordTimings(cached);
+          if (normalized.lines.length > 0) {
+            return normalized;
+          }
         }
       } catch {
         // Cache read failure must never crash the lyrics pipeline
@@ -250,14 +294,16 @@ export class LyricsPipeline {
         if (signal?.aborted) return null;
         if (raw && raw.lines.length > 0) {
           const normalized = this.ensureWordTimings(raw);
-          if (this.cache) {
-            try {
-              await this.cache.setCachedLyrics(cacheKey, normalized);
-            } catch {
-              // Cache write failure must never crash the pipeline
+          if (normalized.lines.length > 0) {
+            if (this.cache) {
+              try {
+                await this.cache.setCachedLyrics(cacheKey, normalized);
+              } catch {
+                // Cache write failure must never crash the pipeline
+              }
             }
+            return normalized;
           }
-          return normalized;
         }
       } catch {
         // Individual provider failure falls through to next provider
@@ -268,11 +314,17 @@ export class LyricsPipeline {
   }
 
   private ensureWordTimings(lyrics: Lyrics): Lyrics {
+    const filteredLines = filterBlankAndInstrumentalLines(lyrics.lines);
+    const cleanedLyrics =
+      filteredLines === lyrics.lines ? lyrics : { ...lyrics, lines: filteredLines };
+    if (cleanedLyrics.lines.length === 0) {
+      return cleanedLyrics;
+    }
     const withWords =
-      lyrics.sourceKind === 'WordSynced' && lyrics.lines.every((l) => l.words.length > 0)
-        ? lyrics
-        : synthesizeLyricsWords(lyrics, {
-            sourceKind: lyrics.sourceKind === 'LineSynced' ? 'LineSynced' : 'FallbackSynthesis',
+      cleanedLyrics.sourceKind === 'WordSynced' && cleanedLyrics.lines.every((l) => l.words.length > 0)
+        ? cleanedLyrics
+        : synthesizeLyricsWords(cleanedLyrics, {
+            sourceKind: cleanedLyrics.sourceKind === 'LineSynced' ? 'LineSynced' : 'FallbackSynthesis',
           });
     return enrichLyricsRomanization(withWords);
   }

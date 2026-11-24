@@ -5,6 +5,7 @@
 // Timestamp strictly stays >= focal.left + 12.
 
 import type { StyleFrameContext } from '../../core/models';
+import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
 import {
   clamp01,
   drawEmptyState,
@@ -119,21 +120,48 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
       return;
     }
 
+    const isLineBlank = (idx: number): boolean =>
+      idx < 0 ||
+      idx >= layout.lines.length ||
+      isBlankOrInstrumentalLineText(frame.lyrics?.lines[idx]?.text ?? layout.lines[idx].text);
+
+    let firstNonBlankIdx = -1;
+    for (let i = 0; i < layout.lines.length; i++) {
+      if (!isLineBlank(i)) {
+        firstNonBlankIdx = i;
+        break;
+      }
+    }
+    if (firstNonBlankIdx < 0) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      return;
+    }
+
+    const activeLineIsBlank =
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      isLineBlank(frame.activeLineIndex);
     const hasActiveLine =
-      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      !activeLineIsBlank;
     if (hasActiveLine) {
       this.lastKnownActiveIdx = frame.activeLineIndex;
     }
     const fallbackIdx =
-      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+      typeof frame.lastActiveLineIndex === 'number' &&
+      frame.lastActiveLineIndex >= 0 &&
+      !isLineBlank(frame.lastActiveLineIndex)
         ? frame.lastActiveLineIndex
-        : this.lastKnownActiveIdx >= 0
+        : this.lastKnownActiveIdx >= 0 && !isLineBlank(this.lastKnownActiveIdx)
         ? this.lastKnownActiveIdx
-        : 0;
-    const scrollIdx = Math.max(
+        : firstNonBlankIdx;
+    let scrollIdx = Math.max(
       0,
       Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
     );
+    while (scrollIdx > 0 && isLineBlank(scrollIdx)) scrollIdx--;
+    if (isLineBlank(scrollIdx)) scrollIdx = firstNonBlankIdx;
     const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y;
 
@@ -180,10 +208,12 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
     // Timestamp X in local focal coordinates: Math.max(14, fgGutterX - 72) -> global X is ALWAYS >= focal.left + 14 >= focal.left + 12!
     const timestampLocalX = Math.max(14, fgGutterX - 72);
 
+    const showInstrumental = Boolean(frame.isInstrumentalGap || activeLineIsBlank);
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
+      if (isLineBlank(i)) continue;
       const gapOffset =
-        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+        showInstrumental && !isBrowsing && !hasActiveLine
           ? i <= scrollIdx
             ? -58
             : 58
@@ -310,7 +340,7 @@ export class MinimalSwissStyle implements ILyricVisualStyle {
 
     ctx.restore();
 
-    if (frame.isInstrumentalGap && !isBrowsing) {
+    if (showInstrumental && !isBrowsing) {
       drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
     }
   }

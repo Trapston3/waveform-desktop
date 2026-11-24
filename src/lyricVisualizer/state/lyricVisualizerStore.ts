@@ -1113,6 +1113,10 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   },
 
   broadcastSnapshot: (partial, force = false) => {
+    const state = get();
+    if (!force && !state.config.overlayEnabled && !state.isAmbientOpen) {
+      return;
+    }
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     if (!force && now - lastBroadcastTimeMs < 50) {
       return;
@@ -1120,14 +1124,21 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     lastBroadcastTimeMs = now;
     broadcastRevisionCounter += 1;
 
-    const state = get();
     const bridge = getSharedWaveFormPlaybackBridge();
-    const snap = bridge.currentSnapshot;
-    const audio = state.config.audioReactive
-      ? bridge.sampleAudioMetrics()
-      : { rmsLevel: 0, bassEnergy: 0, midEnergy: 0, trebleEnergy: 0, beatDetected: false };
+    const needsSnap =
+      partial?.track === undefined ||
+      partial?.positionSeconds === undefined ||
+      partial?.isPlaying === undefined;
+    const snap = needsSnap ? bridge.currentSnapshot : null;
+    const audio =
+      partial?.audio !== undefined
+        ? partial.audio
+        : state.config.audioReactive
+        ? bridge.sampleAudioMetrics()
+        : { rmsLevel: 0, bassEnergy: 0, midEnergy: 0, trebleEnergy: 0, beatDetected: false };
 
-    const resolvedTrack = partial?.track !== undefined ? partial.track : state.activeTrack ?? snap.track;
+    const resolvedTrack =
+      partial?.track !== undefined ? partial.track : state.activeTrack ?? snap?.track ?? null;
     const resolvedTrackId =
       partial?.trackId !== undefined ? partial.trackId : resolvedTrack?.id ?? null;
 
@@ -1147,11 +1158,14 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
           ? state.activePalette
           : DEMO_FALLBACK_PALETTE,
       positionSeconds:
-        partial?.positionSeconds !== undefined ? partial.positionSeconds : snap.positionSeconds,
-      isPlaying: partial?.isPlaying !== undefined ? partial.isPlaying : snap.isPlaying,
+        partial?.positionSeconds !== undefined
+          ? partial.positionSeconds
+          : snap?.positionSeconds ?? 0,
+      isPlaying:
+        partial?.isPlaying !== undefined ? partial.isPlaying : snap?.isPlaying ?? false,
       songOffsetMs:
         partial?.songOffsetMs !== undefined ? partial.songOffsetMs : state.currentSongOffsetMs,
-      audio: partial?.audio !== undefined ? partial.audio : audio,
+      audio,
       isScreenLocked:
         partial?.isScreenLocked !== undefined ? partial.isScreenLocked : state.isScreenLocked,
       timestampMs: partial?.timestampMs !== undefined ? partial.timestampMs : now,

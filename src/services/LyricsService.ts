@@ -7,6 +7,7 @@ import {
   mapRomanizedWords,
   transliterateToLatin,
 } from '../utils/transliterate';
+import { isBlankOrInstrumentalLineText } from '../lyricVisualizer/core/lrcParser';
 
 export interface LyricSyllable {
   text: string;
@@ -95,6 +96,7 @@ export class LyricsService {
    */
   public static parseLrc(lrcText: string, provider = 'LrcLib'): LyricsData {
     const lines: LyricLine[] = [];
+    const breakTimestampsMs: number[] = [];
     const regex = /^\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\](.*)/;
     const rawLines = lrcText.split('\n');
 
@@ -107,6 +109,10 @@ export class LyricsService {
         const frac = match[3] ? parseInt(match[3].padEnd(3, '0').slice(0, 3), 10) : 0;
         const startTimeMs = min * 60000 + sec * 1000 + frac;
         const text = match[4].trim();
+        if (isBlankOrInstrumentalLineText(text)) {
+          breakTimestampsMs.push(startTimeMs);
+          continue;
+        }
         if (this.isRtlText(text)) isRtl = true;
         lines.push({
           lineIndex: lines.length,
@@ -119,11 +125,20 @@ export class LyricsService {
 
     // Sort chronologically by start time
     lines.sort((a, b) => a.startTimeMs - b.startTimeMs);
+    breakTimestampsMs.sort((a, b) => a - b);
 
-    // Calculate end times from subsequent line start times
+    // Calculate end times from subsequent line start times, clamped to any break boundary
+    let breakPtr = 0;
     for (let i = 0; i < lines.length; i++) {
       lines[i].lineIndex = i;
-      lines[i].endTimeMs = i < lines.length - 1 ? lines[i + 1].startTimeMs : lines[i].startTimeMs + 5000;
+      let endTimeMs = i < lines.length - 1 ? lines[i + 1].startTimeMs : lines[i].startTimeMs + 5000;
+      while (breakPtr < breakTimestampsMs.length && breakTimestampsMs[breakPtr] <= lines[i].startTimeMs + 50) {
+        breakPtr++;
+      }
+      if (breakPtr < breakTimestampsMs.length && breakTimestampsMs[breakPtr] < endTimeMs) {
+        endTimeMs = Math.max(lines[i].startTimeMs + 50, breakTimestampsMs[breakPtr]);
+      }
+      lines[i].endTimeMs = endTimeMs;
     }
 
     return {
@@ -140,6 +155,7 @@ export class LyricsService {
    */
   public static parseTtml(ttmlXml: string, provider = 'AppleMusic'): LyricsData {
     const lines: LyricLine[] = [];
+    const breakTimestampsMs: number[] = [];
     let isRtl = false;
 
     // Support arbitrary XML attribute order for <p> and <span>
@@ -189,6 +205,11 @@ export class LyricsService {
         innerContent.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim()
       );
 
+      if (isBlankOrInstrumentalLineText(fullText)) {
+        breakTimestampsMs.push(pBeginMs);
+        continue;
+      }
+
       lines.push({
         lineIndex: lineIdx++,
         startTimeMs: pBeginMs,
@@ -196,6 +217,28 @@ export class LyricsService {
         text: fullText,
         syllables: syllables.length > 0 ? syllables : undefined,
       });
+    }
+
+    if (breakTimestampsMs.length > 0 && lines.length > 0) {
+      breakTimestampsMs.sort((a, b) => a - b);
+      let breakPtr = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        while (breakPtr < breakTimestampsMs.length && breakTimestampsMs[breakPtr] <= line.startTimeMs + 50) {
+          breakPtr++;
+        }
+        if (breakPtr < breakTimestampsMs.length && breakTimestampsMs[breakPtr] < line.endTimeMs) {
+          const clampedEnd = Math.max(line.startTimeMs + 50, breakTimestampsMs[breakPtr]);
+          line.endTimeMs = clampedEnd;
+          if (line.syllables && line.syllables.length > 0) {
+            for (const syl of line.syllables) {
+              if (syl.endTimeMs > clampedEnd) {
+                syl.endTimeMs = Math.max(syl.startTimeMs + 20, clampedEnd);
+              }
+            }
+          }
+        }
+      }
     }
 
     return {
@@ -337,7 +380,7 @@ export class LyricsService {
 
     for (let i = 0; i < rawLines.length; i++) {
       const lineText = rawLines[i].trim();
-      if (!lineText) continue;
+      if (!lineText || isBlankOrInstrumentalLineText(lineText)) continue;
       if (this.isRtlText(lineText)) isRtl = true;
       lines.push({
         lineIndex: lines.length,

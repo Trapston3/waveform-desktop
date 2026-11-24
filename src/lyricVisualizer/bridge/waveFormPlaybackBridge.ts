@@ -15,6 +15,7 @@ import {
   type TrackInfo,
 } from '../core/models';
 import { snapAllSyncEngines } from '../core/syncEngine';
+import { isBlankOrInstrumentalLineText } from '../core/lrcParser';
 import { enrichLyricsRomanization } from '../core/lyricsPipeline';
 import { registerPlayerBridgeResync, usePlayerStore } from '../../state/playerStore';
 import { useLyricsStore } from '../../state/lyricsStore';
@@ -52,7 +53,37 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
   let hasAnyWords = false;
   let allSynthesized = true;
 
-  const lines: LyricLine[] = parsed.lines.map((line, idx) => {
+  const lines: LyricLine[] = [];
+  for (let idx = 0; idx < parsed.lines.length; idx++) {
+    const line = parsed.lines[idx];
+    const lineText = line.text || '';
+
+    if (isBlankOrInstrumentalLineText(lineText)) {
+      if (!isUnsynced && lines.length > 0) {
+        const prev = lines[lines.length - 1];
+        const breakSec = Math.max(0, (line.startTimeMs || 0) / 1000);
+        if (breakSec > prev.startSeconds && breakSec < prev.endSeconds) {
+          const clampedEnd = Math.max(prev.startSeconds + 0.05, Math.min(prev.endSeconds, breakSec));
+          lines[lines.length - 1] = {
+            ...prev,
+            endSeconds: clampedEnd,
+            words:
+              prev.words.length > 0
+                ? prev.words.map((w) => {
+                    const wStart = Math.min(Math.max(prev.startSeconds, clampedEnd - 0.02), w.startSeconds);
+                    return {
+                      text: w.text,
+                      startSeconds: wStart,
+                      endSeconds: Math.max(wStart + 0.02, Math.min(clampedEnd, w.endSeconds)),
+                    };
+                  })
+                : prev.words,
+          };
+        }
+      }
+      continue;
+    }
+
     const rawRom =
       (typeof line.romanization === 'string' && line.romanization.trim()) ||
       (typeof (line as any).romanizedText === 'string' && (line as any).romanizedText.trim()) ||
@@ -63,17 +94,18 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
       undefined;
 
     if (isUnsynced) {
-      const startSec = idx * 4;
-      const endSec = (idx + 1) * 4;
-      return {
+      const startSec = lines.length * 4;
+      const endSec = (lines.length + 1) * 4;
+      lines.push({
         startSeconds: startSec,
         endSeconds: endSec,
-        text: line.text || '',
+        text: lineText,
         words: [],
         isSynthesizedWords: false,
         ...(rawRom ? { romanizedText: rawRom } : {}),
         ...(rawTrans ? { translatedText: rawTrans } : {}),
-      };
+      });
+      continue;
     }
 
     const startSeconds = Math.max(0, (line.startTimeMs || 0) / 1000);
@@ -98,29 +130,22 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
           endSeconds: Math.min(endSeconds + 0.5, wEnd),
         };
       });
-      return {
+      lines.push({
         startSeconds,
         endSeconds,
-        text: line.text || words.map((w) => w.text).join(' '),
+        text: lineText || words.map((w) => w.text).join(' '),
         words,
         isSynthesizedWords: isInterpolatedLrc,
         ...(rawRom ? { romanizedText: rawRom } : {}),
         ...(rawTrans ? { translatedText: rawTrans } : {}),
-      };
+      });
+      continue;
     }
 
     // Synthesize proportional word timings for line-synced lines without syllables
-    const tokens = (line.text || '').trim().split(/\s+/).filter(Boolean);
+    const tokens = lineText.trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) {
-      return {
-        startSeconds,
-        endSeconds,
-        text: line.text || '',
-        words: [],
-        isSynthesizedWords: true,
-        ...(rawRom ? { romanizedText: rawRom } : {}),
-        ...(rawTrans ? { translatedText: rawTrans } : {}),
-      };
+      continue;
     }
 
     hasAnyWords = true;
@@ -146,16 +171,20 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
       };
     });
 
-    return {
+    lines.push({
       startSeconds,
       endSeconds,
-      text: line.text || '',
+      text: lineText,
       words,
       isSynthesizedWords: true,
       ...(rawRom ? { romanizedText: rawRom } : {}),
       ...(rawTrans ? { translatedText: rawTrans } : {}),
-    };
-  });
+    });
+  }
+
+  if (lines.length === 0) {
+    return null;
+  }
 
   let sourceKind: LyricsSourceKind = 'LineSynced';
   if (isUnsynced) {
@@ -173,8 +202,14 @@ export function convertParsedLyricsToVisualizerLyrics(parsed: ParsedLyrics | nul
   });
 }
 
+const songTrackInfoCache = new WeakMap<
+  Song,
+  { lyrics: ParsedLyrics | null | undefined; durationMs: number; trackInfo: TrackInfo }
+>();
+
 /**
  * Converts a WaveForm Song and optional ParsedLyrics into a LyricVisualizer TrackInfo.
+ * Memoized by (song, parsedLyrics, fallbackDurationMs) to avoid 60fps allocations.
  */
 export function songToTrackInfo(
   song: Song | null,
@@ -182,6 +217,11 @@ export function songToTrackInfo(
   fallbackDurationMs = 0
 ): TrackInfo | null {
   if (!song) return null;
+
+  const cached = songTrackInfoCache.get(song);
+  if (cached && cached.lyrics === parsedLyrics && cached.durationMs === fallbackDurationMs) {
+    return cached.trackInfo;
+  }
 
   const durationSeconds =
     (song.totalPlayTimeMs && song.totalPlayTimeMs > 0
@@ -218,7 +258,7 @@ export function songToTrackInfo(
         }))
       : null;
 
-  return {
+  const trackInfo: TrackInfo = {
     id: song.videoId || (song as any).id || `${song.title}-${song.artist}`,
     title: song.title || 'Unknown Title',
     artist: song.artist || 'Unknown Artist',
@@ -228,6 +268,12 @@ export function songToTrackInfo(
     rawSyncedLyrics: typeof song.lyrics === 'string' ? song.lyrics : null,
     parsedLyricsLines: parsedLines,
   };
+  songTrackInfoCache.set(song, {
+    lyrics: parsedLyrics,
+    durationMs: fallbackDurationMs,
+    trackInfo,
+  });
+  return trackInfo;
 }
 
 export class WaveFormPlaybackBridge implements IPlaybackBridge {
@@ -240,7 +286,7 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
   private sandboxBasePositionSec = 0;
   private sandboxResumeTimestampMs = nowMs();
   private sandboxLastBeatIndex = -1;
-  private pendingDidSeek = false;
+  private _seekGeneration = 0;
 
   private lastObservedTrackId: string | null = null;
   private lastObservedIsPlaying = false;
@@ -288,7 +334,7 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
           ? this.lastObservedPositionSec + elapsedSec
           : this.lastObservedPositionSec;
         if (Math.abs(nextPosSec - expectedPosSec) > 0.85) {
-          this.pendingDidSeek = true;
+          this._seekGeneration += 1;
           this.emitSeeked(nextPosSec);
         }
         this.lastObservedPositionSec = nextPosSec;
@@ -318,12 +364,16 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
     return this.sandboxMode;
   }
 
+  get seekGeneration(): number {
+    return this._seekGeneration;
+  }
+
   setSandboxMode(enabled: boolean): void {
     const next = Boolean(enabled);
     if (this.sandboxMode === next) return;
 
     this.sandboxMode = next;
-    this.pendingDidSeek = true;
+    this._seekGeneration += 1;
 
     if (next) {
       this.sandboxBasePositionSec = 0;
@@ -374,8 +424,7 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
   }
 
   get currentSnapshot(): PlaybackSnapshot {
-    const didSeek = this.pendingDidSeek;
-    this.pendingDidSeek = false;
+    const seekGeneration = this._seekGeneration;
     const timestampMs = nowMs();
 
     if (this.sandboxMode) {
@@ -385,8 +434,9 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
         isPlaying: this.sandboxIsPlaying,
         playbackRate: 1.0,
         timestampMs,
-        didSeek,
-      };
+        didSeek: false,
+        seekGeneration,
+      } as PlaybackSnapshot & { seekGeneration: number };
     }
 
     const pState = usePlayerStore.getState();
@@ -401,8 +451,9 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
       isPlaying,
       playbackRate: 1.0,
       timestampMs,
-      didSeek,
-    };
+      didSeek: false,
+      seekGeneration,
+    } as PlaybackSnapshot & { seekGeneration: number };
   }
 
   /**
@@ -459,14 +510,14 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
       const clamped = Math.max(0, Math.min(dur, positionSeconds));
       this.sandboxBasePositionSec = clamped;
       this.sandboxResumeTimestampMs = nowMs();
-      this.pendingDidSeek = true;
+      this._seekGeneration += 1;
       this.emitSeeked(clamped);
       return;
     }
 
     const pState = usePlayerStore.getState();
     const targetMs = Math.max(0, Math.round(positionSeconds * 1000));
-    this.pendingDidSeek = true;
+    this._seekGeneration += 1;
     this.lastObservedPositionSec = targetMs / 1000;
     this.lastObservedTimestampMs = nowMs();
 
@@ -502,7 +553,7 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
         ? this.getSandboxPositionSeconds()
         : this.getLivePositionSeconds();
 
-    this.pendingDidSeek = true;
+    this._seekGeneration += 1;
     this.lastObservedPositionSec = liveSec;
     this.lastObservedTimestampMs = nowMs();
 

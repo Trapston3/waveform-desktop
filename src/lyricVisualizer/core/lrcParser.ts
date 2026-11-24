@@ -9,6 +9,81 @@ const LINE_TAG_REGEX = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
 const WORD_TAG_REGEX = /<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>([^<]*)/g;
 const OFFSET_TAG_REGEX = /^\[offset:\s*([+-]?\d+)\s*\]$/i;
 const METADATA_TAG_REGEX = /^\[(ar|ti|al|au|by|length|re|ve|la|id):.*\]$/i;
+const ZERO_WIDTH_BIDI_REGEX = /[\u200B-\u200F\u202A-\u202E\uFEFF]/g;
+const MEANINGFUL_CONTENT_REGEX = /[\p{L}\p{N}]|(?![\u{1F3B5}\u{1F3B6}\u{1F3BC}])\p{Extended_Pictographic}/u;
+const WRAPPED_INSTRUMENTAL_TAG_REGEX =
+  /^[\[\(\{<【（*~♪♫\-–—\s]+(?:instrumental(?:\s+(?:break|interlude|solo|intro|outro|part|music))?|interlude|music(?:\s+playing)?|solo|(?:guitar|piano|sax|saxophone|bass|drum|synth|violin|trumpet|flute|organ)\s+solo|outro|intro|break|instrumental\s+music|纯音乐|間奏|間奏中|간주|간주중)[\]\)\}>】）*~♪♫\-–—\s]+$/i;
+const BARE_INSTRUMENTAL_TAG_REGEX =
+  /^(?:instrumental(?:\s+(?:break|interlude|solo|intro|outro|part|music))?|interlude|music\s+playing|(?:guitar|piano|sax|saxophone|bass|drum|synth|violin)\s+solo|纯音乐|間奏|間奏中|간주|간주중|no\s+lyrics|lyrics\s+unavailable)$/i;
+
+/**
+ * Returns true if a lyric line is empty/whitespace (ignoring zero-width/BiDi chars),
+ * pure punctuation/dividers/musical notes with no letters or digits, or an explicit
+ * instrumental marker tag (e.g. [Instrumental], (Music), *Interlude*, [Solo], [Outro], [Intro], [Break]).
+ */
+export function isBlankOrInstrumentalLineText(text: string): boolean {
+  if (typeof text !== 'string') return true;
+  const cleaned = text.replace(ZERO_WIDTH_BIDI_REGEX, '').trim();
+  if (!cleaned) return true;
+  if (!MEANINGFUL_CONTENT_REGEX.test(cleaned)) return true;
+  if (WRAPPED_INSTRUMENTAL_TAG_REGEX.test(cleaned)) return true;
+  if (BARE_INSTRUMENTAL_TAG_REGEX.test(cleaned)) return true;
+  return false;
+}
+
+function clampWordsToEnd(words: readonly LyricWord[], endSeconds: number): LyricWord[] {
+  return words.map((w) => {
+    const wStart = Math.min(Math.max(0, endSeconds - 0.02), w.startSeconds);
+    const wEnd = Math.max(wStart + 0.02, Math.min(endSeconds, w.endSeconds));
+    return {
+      text: w.text,
+      startSeconds: wStart,
+      endSeconds: wEnd,
+    };
+  });
+}
+
+/**
+ * Filters out blank/instrumental lines while clamping the preceding vocal line's
+ * endSeconds (and word endSeconds) to min(endSeconds, breakTimestamp).
+ */
+export function filterBlankAndInstrumentalLines(lines: readonly LyricLine[]): LyricLine[] {
+  let hasBlank = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (isBlankOrInstrumentalLineText(lines[i].text)) {
+      hasBlank = true;
+      break;
+    }
+  }
+  if (!hasBlank) {
+    return lines as LyricLine[];
+  }
+
+  const filtered: LyricLine[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isBlankOrInstrumentalLineText(line.text)) {
+      if (filtered.length > 0) {
+        const prev = filtered[filtered.length - 1];
+        const breakSec = line.startSeconds;
+        if (Number.isFinite(breakSec) && breakSec > prev.startSeconds && breakSec < prev.endSeconds) {
+          const clampedEnd = Math.max(prev.startSeconds + 0.05, Math.min(prev.endSeconds, breakSec));
+          filtered[filtered.length - 1] = {
+            ...prev,
+            endSeconds: clampedEnd,
+            words: prev.words.length > 0 ? clampWordsToEnd(prev.words, clampedEnd) : prev.words,
+            ...(prev.romanizedWords && prev.romanizedWords.length > 0
+              ? { romanizedWords: clampWordsToEnd(prev.romanizedWords, clampedEnd) }
+              : {}),
+          };
+        }
+      }
+      continue;
+    }
+    filtered.push(line);
+  }
+  return filtered;
+}
 
 function parseTimestampSeconds(minStr: string, secStr: string, fracStr?: string): number {
   const minutes = Number.parseInt(minStr, 10);
@@ -42,6 +117,7 @@ export function parseLrc(raw: string, options: LrcParseOptions = {}): Lyrics | n
 
   let offsetSeconds = 0;
   const timedEntries: RawParsedLine[] = [];
+  const breakBoundaries: number[] = [];
   const unsyncedLines: string[] = [];
 
   for (const rawLine of rawLines) {
@@ -74,12 +150,19 @@ export function parseLrc(raw: string, options: LrcParseOptions = {}): Lyrics | n
     }
 
     if (timestamps.length === 0) {
-      unsyncedLines.push(trimmed);
+      if (!isBlankOrInstrumentalLineText(trimmed)) {
+        unsyncedLines.push(trimmed);
+      }
       continue;
     }
 
     const content = trimmed.slice(lastTagEnd).trim();
-    if (!content) continue;
+    if (!content) {
+      for (const ts of timestamps) {
+        breakBoundaries.push(ts);
+      }
+      continue;
+    }
 
     // Check for enhanced A2/ELRC word tags: <mm:ss.xx>word
     WORD_TAG_REGEX.lastIndex = 0;
@@ -101,7 +184,12 @@ export function parseLrc(raw: string, options: LrcParseOptions = {}): Lyrics | n
         ? parsedWords.map((w) => w.text).join(' ')
         : content.replace(/<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>/g, '').trim();
 
-    if (!cleanText) continue;
+    if (!cleanText || isBlankOrInstrumentalLineText(cleanText)) {
+      for (const ts of timestamps) {
+        breakBoundaries.push(ts);
+      }
+      continue;
+    }
 
     for (const lineStart of timestamps) {
       // For multi-timestamp lines, if there are inline word tags and only 1 timestamp, use exact word starts;
@@ -156,6 +244,8 @@ export function parseLrc(raw: string, options: LrcParseOptions = {}): Lyrics | n
   }
 
   timedEntries.sort((a, b) => a.startSeconds - b.startSeconds);
+  breakBoundaries.sort((a, b) => a - b);
+  let breakPtr = 0;
 
   let hasAnyWordTags = false;
   const finalLines: LyricLine[] = [];
@@ -178,6 +268,16 @@ export function parseLrc(raw: string, options: LrcParseOptions = {}): Lyrics | n
       endSeconds = Math.min(options.trackDurationSeconds, Math.max(lastWordEnd, entry.startSeconds + 5.0));
     } else {
       endSeconds = Math.max(lastWordEnd, entry.startSeconds + 4.5);
+    }
+
+    while (breakPtr < breakBoundaries.length && breakBoundaries[breakPtr] <= entry.startSeconds + 0.05) {
+      breakPtr++;
+    }
+    if (breakPtr < breakBoundaries.length) {
+      const nextBreak = breakBoundaries[breakPtr];
+      if (nextBreak < endSeconds) {
+        endSeconds = Math.max(entry.startSeconds + 0.05, nextBreak);
+      }
     }
 
     const clampedWords: LyricWord[] = [];

@@ -1,4 +1,5 @@
 import type { Lyrics, LyricWord, PlaybackSnapshot } from './models';
+import { isBlankOrInstrumentalLineText } from './lrcParser';
 
 export const MIN_OFFSET_MS = -2000;
 export const MAX_OFFSET_MS = 2000;
@@ -20,6 +21,7 @@ export interface SyncFrameResult {
   readonly isInstrumentalGap: boolean;
   readonly gapProgress: number;
   readonly timeUntilNextLine: number;
+  readonly gapDuration?: number;
   readonly hasLyrics: boolean;
   readonly lastActiveLineIndex: number;
   readonly nextLineIndex: number;
@@ -29,6 +31,24 @@ function clamp01(v: number): number {
   if (v <= 0) return 0;
   if (v >= 1) return 1;
   return v;
+}
+
+function findFirstNonBlankLine(lines: Lyrics['lines'], fromIndex = 0): number {
+  for (let i = Math.max(0, fromIndex); i < lines.length; i++) {
+    if (!isBlankOrInstrumentalLineText(lines[i].text)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findLastNonBlankLine(lines: Lyrics['lines'], upToIndex = lines.length - 1): number {
+  for (let i = Math.min(lines.length - 1, upToIndex); i >= 0; i--) {
+    if (!isBlankOrInstrumentalLineText(lines[i].text)) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 function binarySearchLine(lines: Lyrics['lines'], timeSeconds: number): number {
@@ -46,7 +66,7 @@ function binarySearchLine(lines: Lyrics['lines'], timeSeconds: number): number {
     ) {
       low = mid + 1;
     } else {
-      return mid;
+      return isBlankOrInstrumentalLineText(line.text) ? -1 : mid;
     }
   }
 
@@ -79,9 +99,13 @@ function computeLineFadeAlpha(lines: Lyrics['lines'], timeSeconds: number, activ
   if (lines.length === 0) return 0;
   if (activeLineIndex >= 0) return 1;
 
-  // Before the first line
-  if (timeSeconds < lines[0].startSeconds) {
-    const leadIn = lines[0].startSeconds - timeSeconds;
+  const firstIdx = findFirstNonBlankLine(lines, 0);
+  if (firstIdx < 0) return 0;
+  const lastIdx = findLastNonBlankLine(lines, lines.length - 1);
+
+  // Before the first vocal line
+  if (timeSeconds < lines[firstIdx].startSeconds) {
+    const leadIn = lines[firstIdx].startSeconds - timeSeconds;
     if (leadIn > INSTRUMENTAL_FADE_THRESHOLD_SECONDS) {
       const excess = leadIn - INSTRUMENTAL_FADE_THRESHOLD_SECONDS;
       return clamp01(1 - excess / INSTRUMENTAL_FADE_DURATION_SECONDS);
@@ -89,8 +113,8 @@ function computeLineFadeAlpha(lines: Lyrics['lines'], timeSeconds: number, activ
     return 1;
   }
 
-  // After the last line
-  const lastLine = lines[lines.length - 1];
+  // After the last vocal line
+  const lastLine = lines[lastIdx];
   if (timeSeconds > lastLine.endSeconds) {
     const silence = timeSeconds - lastLine.endSeconds;
     if (silence > INSTRUMENTAL_FADE_THRESHOLD_SECONDS) {
@@ -100,22 +124,25 @@ function computeLineFadeAlpha(lines: Lyrics['lines'], timeSeconds: number, activ
     return 1;
   }
 
-  // Between two lines: find the preceding line end via binary search
+  // Between two lines: find the preceding non-blank line end via binary search
   let low = 0;
   let high = lines.length - 1;
   let prevIdx = 0;
   while (low <= high) {
     const mid = (low + high) >> 1;
-    if (lines[mid].endSeconds < timeSeconds) {
+    if (lines[mid].endSeconds <= timeSeconds) {
       prevIdx = mid;
       low = mid + 1;
     } else {
       high = mid - 1;
     }
   }
+  prevIdx = findLastNonBlankLine(lines, prevIdx);
+  if (prevIdx < 0) prevIdx = firstIdx;
 
   const prevEnd = lines[prevIdx].endSeconds;
-  const nextStart = prevIdx + 1 < lines.length ? lines[prevIdx + 1].startSeconds : prevEnd;
+  const nextIdx = findFirstNonBlankLine(lines, prevIdx + 1);
+  const nextStart = nextIdx >= 0 ? lines[nextIdx].startSeconds : prevEnd;
   const gapDuration = nextStart - prevEnd;
   const silenceElapsed = timeSeconds - prevEnd;
 
@@ -148,6 +175,7 @@ export class SyncEngine {
   private lastOutputTime = 0;
   private lastLineIndex = -1;
   private pendingSeekFlag = false;
+  private lastSeenSeekGeneration = -1;
 
   constructor() {
     activeSyncEngines.add(this);
@@ -191,6 +219,7 @@ export class SyncEngine {
     this.lastOutputTime = 0;
     this.lastLineIndex = -1;
     this.pendingSeekFlag = true;
+    this.lastSeenSeekGeneration = -1;
   }
 
   update(
@@ -199,8 +228,18 @@ export class SyncEngine {
     nowMs: number = typeof performance !== 'undefined' ? performance.now() : Date.now(),
   ): SyncFrameResult {
     const trackId = snapshot.track?.id ?? null;
+    const snapSeekGen = (snapshot as { seekGeneration?: number }).seekGeneration;
     let didSeekThisFrame = this.pendingSeekFlag || Boolean(snapshot.didSeek);
     this.pendingSeekFlag = false;
+    if (typeof snapSeekGen === 'number') {
+      if (
+        (this.lastSeenSeekGeneration >= 0 && snapSeekGen !== this.lastSeenSeekGeneration) ||
+        (this.lastSeenSeekGeneration < 0 && snapSeekGen > 0)
+      ) {
+        didSeekThisFrame = true;
+      }
+      this.lastSeenSeekGeneration = snapSeekGen;
+    }
 
     if (trackId !== this.lastTrackId) {
       this.lastTrackId = trackId;
@@ -251,7 +290,8 @@ export class SyncEngine {
     }
     this.lastOutputTime = timeSeconds;
 
-    if (!lyrics || lyrics.lines.length === 0) {
+    const firstNonBlankIdx = lyrics && lyrics.lines.length > 0 ? findFirstNonBlankLine(lyrics.lines, 0) : -1;
+    if (!lyrics || lyrics.lines.length === 0 || firstNonBlankIdx < 0) {
       this.lastLineIndex = -1;
       return {
         timeSeconds,
@@ -263,6 +303,7 @@ export class SyncEngine {
         isInstrumentalGap: true,
         gapProgress: 0,
         timeUntilNextLine: Number.POSITIVE_INFINITY,
+        gapDuration: Number.POSITIVE_INFINITY,
         hasLyrics: false,
         lastActiveLineIndex: -1,
         nextLineIndex: -1,
@@ -270,6 +311,7 @@ export class SyncEngine {
     }
 
     const lines = lyrics.lines;
+    const lastNonBlankIdx = findLastNonBlankLine(lines, lines.length - 1);
     const activeLineIndex = binarySearchLine(lines, timeSeconds);
     this.lastLineIndex = activeLineIndex;
     let activeWordIndex = -1;
@@ -299,6 +341,7 @@ export class SyncEngine {
     let isInstrumentalGap = false;
     let gapProgress = 0;
     let timeUntilNextLine = Number.POSITIVE_INFINITY;
+    let gapDuration = 0;
     let lastActiveLineIndex = -1;
     let nextLineIndex = -1;
 
@@ -308,61 +351,82 @@ export class SyncEngine {
       const lastWordEnd =
         line.words.length > 0 ? line.words[line.words.length - 1].endSeconds : line.endSeconds;
 
-      if (activeLineIndex + 1 < lines.length) {
-        nextLineIndex = activeLineIndex + 1;
+      nextLineIndex = findFirstNonBlankLine(lines, activeLineIndex + 1);
+      if (nextLineIndex >= 0) {
         const nextStart = lines[nextLineIndex].startSeconds;
         timeUntilNextLine = Math.max(0, nextStart - timeSeconds);
-        const tailGap = nextStart - lastWordEnd;
+        const tailGap = Math.max(0, nextStart - lastWordEnd);
+        gapDuration = tailGap;
         if (tailGap >= 3.5 && timeSeconds > lastWordEnd) {
           isInstrumentalGap = true;
           gapProgress = clamp01((timeSeconds - lastWordEnd) / Math.max(0.001, tailGap));
         }
       } else if (line.words.length > 0 && timeSeconds > lastWordEnd && line.endSeconds - lastWordEnd >= 3.5) {
+        gapDuration = Math.max(0, line.endSeconds - lastWordEnd);
         isInstrumentalGap = true;
         gapProgress = clamp01((timeSeconds - lastWordEnd) / Math.max(0.001, line.endSeconds - lastWordEnd));
       }
-    } else if (timeSeconds < lines[0].startSeconds) {
-      // Intro before first line
-      nextLineIndex = 0;
-      const firstStart = lines[0].startSeconds;
+    } else if (timeSeconds < lines[firstNonBlankIdx].startSeconds) {
+      // Intro before first vocal line
+      nextLineIndex = firstNonBlankIdx;
+      const firstStart = lines[firstNonBlankIdx].startSeconds;
       timeUntilNextLine = Math.max(0, firstStart - timeSeconds);
+      gapDuration = Math.max(0, firstStart);
       if (firstStart > 3.0) {
         isInstrumentalGap = true;
         gapProgress = clamp01(timeSeconds / Math.max(0.001, firstStart));
       }
-    } else if (timeSeconds > lines[lines.length - 1].endSeconds) {
-      // Outro after last line
-      lastActiveLineIndex = lines.length - 1;
+    } else if (timeSeconds > lines[lastNonBlankIdx].endSeconds) {
+      // Outro after last vocal line
+      lastActiveLineIndex = lastNonBlankIdx;
       isInstrumentalGap = true;
       gapProgress = 1;
+      gapDuration = Number.POSITIVE_INFINITY;
     } else {
-      // Explicit gap between lines[prevIdx] and lines[prevIdx + 1]
+      // Explicit gap between non-blank lines
       let low = 0;
       let high = lines.length - 1;
-      let prevIdx = 0;
+      let prevIdx = -1;
       while (low <= high) {
         const mid = (low + high) >> 1;
-        if (lines[mid].endSeconds < timeSeconds) {
+        if (lines[mid].endSeconds <= timeSeconds) {
           prevIdx = mid;
           low = mid + 1;
         } else {
           high = mid - 1;
         }
       }
-      lastActiveLineIndex = prevIdx;
-      nextLineIndex = prevIdx + 1 < lines.length ? prevIdx + 1 : -1;
-      if (nextLineIndex >= 0) {
-        const prevLine = lines[prevIdx];
-        const prevVocalEnd =
-          prevLine.words.length > 0
-            ? Math.min(prevLine.endSeconds, prevLine.words[prevLine.words.length - 1].endSeconds)
-            : prevLine.endSeconds;
-        const nextStart = lines[nextLineIndex].startSeconds;
-        const gapDur = nextStart - prevVocalEnd;
-        timeUntilNextLine = Math.max(0, nextStart - timeSeconds);
-        if (gapDur >= 3.5) {
+      prevIdx = prevIdx >= 0 ? findLastNonBlankLine(lines, prevIdx) : -1;
+      if (prevIdx < 0) {
+        // Only blank lines precede timeSeconds -> treat as intro before firstNonBlankIdx
+        nextLineIndex = firstNonBlankIdx;
+        const firstStart = lines[firstNonBlankIdx].startSeconds;
+        timeUntilNextLine = Math.max(0, firstStart - timeSeconds);
+        gapDuration = Math.max(0, firstStart);
+        if (firstStart > 3.0) {
           isInstrumentalGap = true;
-          gapProgress = clamp01((timeSeconds - prevVocalEnd) / Math.max(0.001, gapDur));
+          gapProgress = clamp01(timeSeconds / Math.max(0.001, firstStart));
+        }
+      } else {
+        lastActiveLineIndex = prevIdx;
+        nextLineIndex = findFirstNonBlankLine(lines, prevIdx + 1);
+        if (nextLineIndex >= 0) {
+          const prevLine = lines[prevIdx];
+          const prevVocalEnd =
+            prevLine.words.length > 0
+              ? Math.min(prevLine.endSeconds, prevLine.words[prevLine.words.length - 1].endSeconds)
+              : prevLine.endSeconds;
+          const nextStart = lines[nextLineIndex].startSeconds;
+          gapDuration = Math.max(0, nextStart - prevVocalEnd);
+          timeUntilNextLine = Math.max(0, nextStart - timeSeconds);
+          if (gapDuration >= 3.5) {
+            isInstrumentalGap = true;
+            gapProgress = clamp01((timeSeconds - prevVocalEnd) / Math.max(0.001, gapDuration));
+          }
+        } else {
+          isInstrumentalGap = true;
+          gapProgress = 1;
+          gapDuration = Number.POSITIVE_INFINITY;
         }
       }
     }
@@ -377,6 +441,7 @@ export class SyncEngine {
       isInstrumentalGap,
       gapProgress,
       timeUntilNextLine,
+      gapDuration,
       hasLyrics: true,
       lastActiveLineIndex,
       nextLineIndex,

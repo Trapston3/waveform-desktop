@@ -15,7 +15,6 @@ import type {
 } from '../../core/models';
 import {
   clamp01,
-  drawEmptyState,
   drawRoundedRectPath,
   easeOutBack,
   easeOutCubic,
@@ -31,6 +30,7 @@ import {
   mapRomanizedWords,
   transliterateToLatin,
 } from '../../../utils/transliterate';
+import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
 
 export const CODE_FONT_STACK =
   "'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace";
@@ -571,6 +571,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
   private whipChromatic = 0;
   private lastActiveLineIdx = -1;
   private lastKnownActiveIdx = -1;
+  private lineToCodeIdx: Int32Array = new Int32Array(0);
   private initialized = false;
 
   getVariationIndex(variationId: string): number {
@@ -598,6 +599,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     this.cachedFontSize = -1;
     this.cachedScriptMode = 'auto';
     this.codeLines = [];
+    this.lineToCodeIdx = new Int32Array(0);
     this.totalCodeHeight = 0;
     this.scrollY = 0;
     this.scrollVel = 0;
@@ -672,7 +674,9 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     ctx.font = `600 ${codeFontSize}px ${CODE_FONT_STACK}`;
 
     const count = Math.min(lyrics.lines.length, layout.lines.length);
-    const result: PrecomputedCodeLine[] = new Array(count);
+    const lineToCodeIdx = new Int32Array(count);
+    lineToCodeIdx.fill(-1);
+    const result: PrecomputedCodeLine[] = [];
     const gutterWidth = Math.max(54, Math.round(focalWidth * 0.08));
     const maxCodeLineWidth = Math.max(180, focalWidth - gutterWidth - 48);
     const rowHeight = Math.round(codeFontSize * 1.62);
@@ -684,11 +688,16 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     for (let i = 0; i < count; i++) {
       const line = lyrics.lines[i];
       const measured = layout.lines[i];
+      if (isBlankOrInstrumentalLineText(line.text)) continue;
+      const display = resolveDisplayLine(line, scriptMode, this.id);
+      if (isBlankOrInstrumentalLineText(display.primaryText)) continue;
+
+      const cIdx = result.length;
+      lineToCodeIdx[i] = cIdx;
       const normKey = line.text.trim().toLowerCase();
       const rep = (seenCounts.get(normKey) ?? 0) + 1;
       seenCounts.set(normKey, rep);
 
-      const display = resolveDisplayLine(line, scriptMode, this.id);
       let codeSourceText = display.primaryText;
       let codeSourceWords: readonly LyricWord[] = display.primaryWords;
       if (hasNonLatinScript(codeSourceText)) {
@@ -796,10 +805,10 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const gitDiff: 1 | -1 | 0 = hasNegOrDel ? -1 : hasAddOrRise || i % 3 === 0 ? 1 : 0;
 
       const lineH = penY + rowHeight;
-      result[i] = {
+      result.push({
         lineIndex: i,
         lineNumberLabel:
-          i < LINE_NUM_LABELS.length ? LINE_NUM_LABELS[i] : String(i + 1).padStart(2, '0'),
+          cIdx < LINE_NUM_LABELS.length ? LINE_NUM_LABELS[cIdx] : String(cIdx + 1).padStart(2, '0'),
         indentLevel: transformed.indentLevel,
         isParenthetical: transformed.isParenthetical,
         repeatCount: rep,
@@ -813,13 +822,14 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         inlineComment,
         hasAsyncBreakpoint,
         gitDiff,
-      };
+      });
 
       cursorY += lineH + lineGap;
     }
 
     ctx.restore();
     this.codeLines = result;
+    this.lineToCodeIdx = lineToCodeIdx;
     this.totalCodeHeight = Math.max(1, cursorY);
   }
 
@@ -1428,22 +1438,48 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     const scriptMode: LyricsScriptMode = frame.scriptMode ?? 'auto';
     this.ensurePrecomputed(ctx, lyrics, layout, focalWidth, scriptMode);
     if (this.codeLines.length === 0) {
-      drawEmptyState(ctx, frame, width, height, '// awaiting_lyrics.stream()');
+      const chromeH = !isTransparent
+        ? this.drawIdeChromeAndTelemetry(ctx, frame, focal.left, focalWidth, width, 1, false)
+        : 0;
+      this.drawInstrumentalCodeLine(
+        ctx,
+        frame,
+        focal.left + Math.max(54, Math.round(focalWidth * 0.08)) + 16,
+        focal.left + Math.max(54, Math.round(focalWidth * 0.08)),
+        chromeH + (height - chromeH) * 0.46,
+        Math.round(18 * (frame.fontSizeScale || 1)),
+        focal.left,
+        focalWidth,
+        motionScale
+      );
       return;
     }
 
+    const activeLineIsBlank =
+      frame.activeLineIndex >= 0 &&
+      (frame.activeLineIndex >= this.lineToCodeIdx.length ||
+        this.lineToCodeIdx[frame.activeLineIndex] < 0);
+
     // WS6: preserve lastActiveLineIndex across instrumental breaks (never snap -1 -> 0)
-    let resolvedActiveIdx = frame.activeLineIndex;
-    if (resolvedActiveIdx >= 0) {
+    let resolvedActiveIdx = -1;
+    if (!activeLineIsBlank && frame.activeLineIndex >= 0) {
+      resolvedActiveIdx = this.lineToCodeIdx[frame.activeLineIndex];
       this.lastKnownActiveIdx = Math.min(this.codeLines.length - 1, resolvedActiveIdx);
     } else if (typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0) {
-      resolvedActiveIdx = frame.lastActiveLineIndex;
-    } else if (this.lastKnownActiveIdx >= 0) {
+      for (let li = Math.min(this.lineToCodeIdx.length - 1, frame.lastActiveLineIndex); li >= 0; li--) {
+        if (this.lineToCodeIdx[li] >= 0) {
+          resolvedActiveIdx = this.lineToCodeIdx[li];
+          break;
+        }
+      }
+    }
+    if (resolvedActiveIdx < 0 && this.lastKnownActiveIdx >= 0) {
       resolvedActiveIdx = this.lastKnownActiveIdx;
-    } else {
+    }
+    if (resolvedActiveIdx < 0) {
       resolvedActiveIdx = 0;
-      for (let i = 0; i < lyrics.lines.length; i++) {
-        if (lyrics.lines[i].startSeconds <= frame.timeSeconds) {
+      for (let i = 0; i < this.codeLines.length; i++) {
+        if (lyrics.lines[this.codeLines[i].lineIndex].startSeconds <= frame.timeSeconds) {
           resolvedActiveIdx = i;
         } else {
           break;
@@ -1604,11 +1640,12 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const screenY = anchorY + (cl.topY - effectiveScrollY);
       if (screenY + cl.lineH < minY || screenY > maxY) continue;
 
-      const isActive = i === activeIdx && frame.activeLineIndex >= 0;
-      const isHovered = i === hoveredIdx;
+      const isActive = !activeLineIsBlank && frame.activeLineIndex >= 0 && cl.lineIndex === frame.activeLineIndex;
+      const isHovered = cl.lineIndex === hoveredIdx;
       const isPast =
         i < activeIdx ||
-        (frame.activeLineIndex < 0 && lyrics.lines[i].endSeconds < frame.timeSeconds);
+        ((frame.activeLineIndex < 0 || activeLineIsBlank) &&
+          lyrics.lines[cl.lineIndex].endSeconds < frame.timeSeconds);
       const dist = Math.abs(i - activeIdx);
 
       const hitY =
@@ -1618,7 +1655,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const hitH =
         (this.cameraZoom !== 1.0 ? cl.lineH * this.cameraZoom : cl.lineH) + 8;
       frame.recordHitRect?.(
-        i,
+        cl.lineIndex,
         focal.left + 8,
         hitY,
         focalWidth - 16,
@@ -1800,38 +1837,43 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
 
     // WS6: Live pulsing instrumental code line during instrumental gaps
     let nextLineIdx =
-      typeof frame.nextLineIndex === 'number' ? frame.nextLineIndex : -1;
+      typeof frame.nextLineIndex === 'number' &&
+      frame.nextLineIndex >= 0 &&
+      frame.nextLineIndex < this.lineToCodeIdx.length &&
+      this.lineToCodeIdx[frame.nextLineIndex] >= 0
+        ? frame.nextLineIndex
+        : -1;
     if (nextLineIdx < 0) {
-      for (let i = 0; i < lyrics.lines.length; i++) {
-        if (lyrics.lines[i].startSeconds > frame.timeSeconds) {
-          nextLineIdx = i;
+      for (let c = 0; c < this.codeLines.length; c++) {
+        const li = this.codeLines[c].lineIndex;
+        if (lyrics.lines[li].startSeconds > frame.timeSeconds) {
+          nextLineIdx = li;
           break;
         }
       }
     }
-    const nextLine =
-      nextLineIdx >= 0 && nextLineIdx < lyrics.lines.length ? lyrics.lines[nextLineIdx] : null;
-    const prevEnd =
-      nextLineIdx > 0
-        ? Math.min(
-            lyrics.lines[nextLineIdx - 1].endSeconds,
-            lyrics.lines[nextLineIdx - 1].words.length > 0
-              ? lyrics.lines[nextLineIdx - 1].words[lyrics.lines[nextLineIdx - 1].words.length - 1].endSeconds
-              : lyrics.lines[nextLineIdx - 1].endSeconds
-          )
-        : 0;
+    const nextCodeIdx = nextLineIdx >= 0 ? this.lineToCodeIdx[nextLineIdx] : -1;
+    const nextLine = nextLineIdx >= 0 ? lyrics.lines[nextLineIdx] : null;
+    const prevCodeObj =
+      nextCodeIdx > 0 ? lyrics.lines[this.codeLines[nextCodeIdx - 1].lineIndex] : null;
+    const prevEnd = prevCodeObj
+      ? prevCodeObj.words.length > 0
+        ? Math.min(prevCodeObj.endSeconds, prevCodeObj.words[prevCodeObj.words.length - 1].endSeconds)
+        : prevCodeObj.endSeconds
+      : 0;
     const gapDur = nextLine ? nextLine.startSeconds - prevEnd : 0;
     const isGap =
-      typeof frame.isInstrumentalGap === 'boolean'
+      activeLineIsBlank ||
+      (typeof frame.isInstrumentalGap === 'boolean'
         ? frame.isInstrumentalGap
         : frame.activeLineIndex < 0 &&
-          ((nextLineIdx === 0 && nextLine!.startSeconds > 3.0) ||
-            (nextLineIdx > 0 && gapDur >= 3.5) ||
-            nextLineIdx < 0);
+          ((nextCodeIdx === 0 && nextLine!.startSeconds > 3.0) ||
+            (nextCodeIdx > 0 && gapDur >= 3.5) ||
+            nextCodeIdx < 0));
 
     if (isGap) {
       const gapScreenY =
-        nextLineIdx === 0
+        nextCodeIdx === 0
           ? anchorY - codeFontSize * 0.6
           : anchorY + (activeCodeLine.topY + activeCodeLine.lineH + 12 - effectiveScrollY);
       if (gapScreenY > minY && gapScreenY < maxY) {
@@ -1850,7 +1892,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     }
 
     // Glowing Crimson Block Cursor (█) or Secondary Blue Bar Cursor + Floating Collaborator Pill
-    if (!isGap && frame.activeLineIndex >= 0 && activeIdx < this.codeLines.length) {
+    if (!isGap && !activeLineIsBlank && frame.activeLineIndex >= 0 && activeIdx < this.codeLines.length) {
       const curScreenX = codeOriginX + this.cursorX;
       const curScreenY = anchorY + (this.cursorY - effectiveScrollY);
       const isSecondary = activeCodeLine.isParenthetical;

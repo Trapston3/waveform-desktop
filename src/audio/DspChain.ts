@@ -844,6 +844,32 @@ export class DspChain {
   }
 }
 
+export interface NativeDspAccelerator {
+  computeBiquadMagnitudeDb?: (
+    filters: AutoEqFilter[],
+    freqs: number[],
+    sampleRate?: number,
+    preampDb?: number
+  ) => number[];
+  computeSvfEqMagnitudeDb?: (
+    bands10: number[],
+    freqs: number[],
+    sampleRate?: number,
+    toneBassDb?: number,
+    toneTrebleDb?: number
+  ) => number[];
+}
+
+let nativeDspAccelerator: NativeDspAccelerator | null = null;
+
+/**
+ * Registers an optional native DSP accelerator (e.g. from Electron IPC/preload) without
+ * introducing Node/Electron imports into the browser bundle.
+ */
+export function registerNativeDspAccelerator(accelerator: NativeDspAccelerator | null): void {
+  nativeDspAccelerator = accelerator;
+}
+
 /**
  * Evaluates exact combined magnitude frequency response (in dB) of an AutoEQ filter cascade + preamp
  * across a supplied frequency grid, suitable for real-time EQ/AutoEQ curve plotting.
@@ -857,8 +883,24 @@ export function computeBiquadMagnitudeDb(
   const validRate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 48000;
   const fs = Math.max(8000, validRate);
   const safePreamp = Number.isFinite(preampGainDb) ? preampGainDb : 0;
-
   const list = Array.isArray(filters) ? filters : [];
+
+  if (nativeDspAccelerator?.computeBiquadMagnitudeDb) {
+    try {
+      const res = nativeDspAccelerator.computeBiquadMagnitudeDb(
+        list,
+        Array.from(freqs),
+        fs,
+        safePreamp
+      );
+      if (Array.isArray(res) && res.length === freqs.length) {
+        return res;
+      }
+    } catch {
+      // Fallback to pure-TS implementation
+    }
+  }
+
   const coeffsList: BiquadCoeffs[] = new Array(list.length);
   for (let k = 0; k < list.length; k++) {
     coeffsList[k] = AutoEqProcessor.calculateBiquadCoefficients(list[k], fs);
@@ -890,6 +932,139 @@ export function computeBiquadMagnitudeDb(
       const denI = -(c.a1 * sinW + c.a2 * sin2W);
       const numSq = numR * numR + numI * numI;
       const denSq = Math.max(1e-30, denR * denR + denI * denI);
+      db += 10 * Math.log10(Math.max(1e-30, numSq / denSq));
+    }
+    out[i] = db;
+  }
+
+  return out;
+}
+
+/**
+ * Evaluates exact combined magnitude frequency response (in dB) of the 10-band Cytomic
+ * trapezoidal SVF equalizer + tone controls + partial makeup attenuation.
+ */
+export function computeSvfEqMagnitudeDb(
+  bands10: ArrayLike<number>,
+  freqs: ArrayLike<number>,
+  sampleRate = 44100,
+  toneBassDb = 0,
+  toneTrebleDb = 0
+): number[] {
+  const validRate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 44100;
+  const fs = Math.max(8000, validRate);
+  const bass = Number.isFinite(toneBassDb) ? toneBassDb : 0;
+  const treble = Number.isFinite(toneTrebleDb) ? toneTrebleDb : 0;
+
+  const normalizedBands = new Array<number>(10);
+  for (let i = 0; i < 10; i++) {
+    const raw = bands10 && i < bands10.length ? bands10[i] : 0;
+    normalizedBands[i] = Number.isFinite(raw) ? Math.max(-12, Math.min(12, raw)) : 0;
+  }
+
+  if (nativeDspAccelerator?.computeSvfEqMagnitudeDb) {
+    try {
+      const res = nativeDspAccelerator.computeSvfEqMagnitudeDb(
+        normalizedBands,
+        Array.from(freqs),
+        fs,
+        bass,
+        treble
+      );
+      if (Array.isArray(res) && res.length === freqs.length) {
+        return res;
+      }
+    } catch {
+      // Fallback to pure-TS implementation
+    }
+  }
+
+  const effectiveGains = new Float64Array(10);
+  let peakBoost = 0;
+  for (let i = 0; i < 10; i++) {
+    let eff = normalizedBands[i];
+    if (i === 0) eff = Math.max(-12, Math.min(12, eff + bass));
+    if (i === 9) eff = Math.max(-12, Math.min(12, eff + treble));
+    effectiveGains[i] = eff;
+    if (eff > peakBoost) peakBoost = eff;
+  }
+
+  const makeupDb = -peakBoost * 0.5;
+  const bandParams: Array<{
+    active: boolean;
+    effectiveG: number;
+    k: number;
+    mixInput: number;
+    mixBand: number;
+    mixLow: number;
+  }> = new Array(10);
+
+  for (let s = 0; s < 10; s++) {
+    const gainDb = effectiveGains[s];
+    if (Math.abs(gainDb) <= 0.005) {
+      bandParams[s] = { active: false, effectiveG: 1, k: 1, mixInput: 1, mixBand: 0, mixLow: 0 };
+      continue;
+    }
+    const fc = Math.min(EQ_FREQUENCIES_HZ[s], 0.49 * fs);
+    const A = Math.pow(10, gainDb / 40);
+    const g = Math.tan((Math.PI * fc) / fs);
+    if (s === 0) {
+      const k = 1.0 / 0.707;
+      bandParams[s] = {
+        active: true,
+        effectiveG: g / Math.sqrt(A),
+        k,
+        mixInput: 1.0,
+        mixBand: k * (A - 1.0),
+        mixLow: A * A - 1.0,
+      };
+    } else if (s === 9) {
+      const k = 1.0 / 0.707;
+      bandParams[s] = {
+        active: true,
+        effectiveG: g * Math.sqrt(A),
+        k,
+        mixInput: A * A,
+        mixBand: k * (1.0 - A) * A,
+        mixLow: 1.0 - A * A,
+      };
+    } else {
+      const k = 1.0 / (1.0 * A);
+      bandParams[s] = {
+        active: true,
+        effectiveG: g,
+        k,
+        mixInput: 1.0,
+        mixBand: k * (A * A - 1.0),
+        mixLow: 0.0,
+      };
+    }
+  }
+
+  const out = new Array<number>(freqs.length);
+  const nyquist = fs * 0.5;
+  const piOverFs = Math.PI / fs;
+
+  for (let i = 0; i < freqs.length; i++) {
+    const rawFreq = freqs[i];
+    if (!Number.isFinite(rawFreq) || rawFreq <= 0) {
+      out[i] = makeupDb;
+      continue;
+    }
+    const f = Math.min(rawFreq, nyquist * 0.999);
+    const tanHalfW = Math.tan(piOverFs * f);
+    let db = makeupDb;
+
+    for (let s = 0; s < 10; s++) {
+      const p = bandParams[s];
+      if (!p.active) continue;
+      const y = tanHalfW / p.effectiveG;
+      const oneMinusY2 = 1.0 - y * y;
+      const ky = p.k * y;
+      const numR = p.mixInput * oneMinusY2 + p.mixLow;
+      const numI = (p.mixInput * p.k + p.mixBand) * y;
+      const numSq = numR * numR + numI * numI;
+      const denSq = Math.max(1e-30, oneMinusY2 * oneMinusY2 + ky * ky);
       db += 10 * Math.log10(Math.max(1e-30, numSq / denSq));
     }
     out[i] = db;

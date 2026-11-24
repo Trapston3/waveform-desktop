@@ -66,6 +66,11 @@ if (process.platform === 'win32') {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let lyricVisualizerPlatform: ReturnType<typeof createLyricVisualizerPlatformController> | null = null;
+let isQuitting = false;
+const trayBehavior = {
+  minimizeToTray: true,
+  closeToTray: false,
+};
 
 const isDev = !app.isPackaged && (process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production');
 
@@ -290,6 +295,26 @@ function createWindow(): BrowserWindow {
     }
   });
 
+  win.on('minimize', (event: Electron.Event) => {
+    if (!isQuitting && tray && trayBehavior.minimizeToTray && !win.isDestroyed()) {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+
+  win.on('close', (event: Electron.Event) => {
+    if (!isQuitting && tray && trayBehavior.closeToTray && !win.isDestroyed()) {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+
+  win.on('closed', () => {
+    if (mainWindow === win) {
+      mainWindow = null;
+    }
+  });
+
   loadWindowContent(win).catch((err) => {
     console.error('[WaveForm Main] Error in loadWindowContent:', err);
   });
@@ -433,7 +458,15 @@ async function loadWindowContent(win: BrowserWindow, hashRoute?: string): Promis
   }
 }
 
-function createTray(win: BrowserWindow): Tray | null {
+function showMainWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+function createTray(): Tray | null {
   try {
     const icon = createTrayIcon(
       nativeImage,
@@ -451,34 +484,39 @@ function createTray(win: BrowserWindow): Tray | null {
       {
         label: 'WaveForm',
         click: () => {
-          if (win.isMinimized()) win.restore();
-          win.show();
-          win.focus();
+          showMainWindow();
         },
       },
       { type: 'separator' },
       {
         label: 'Play / Pause',
         click: () => {
-          win.webContents.send('media-toggle-playback');
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('media-toggle-playback');
+          }
         },
       },
       {
         label: 'Next Track',
         click: () => {
-          win.webContents.send('media-next-track');
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('media-next-track');
+          }
         },
       },
       {
         label: 'Previous Track',
         click: () => {
-          win.webContents.send('media-prev-track');
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('media-prev-track');
+          }
         },
       },
       { type: 'separator' },
       {
         label: 'Quit WaveForm',
         click: () => {
+          isQuitting = true;
           app.quit();
         },
       },
@@ -487,9 +525,7 @@ function createTray(win: BrowserWindow): Tray | null {
     trayInstance.setToolTip('WaveForm Music Player');
     trayInstance.setContextMenu(contextMenu);
     trayInstance.on('double-click', () => {
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
+      showMainWindow();
     });
 
     return trayInstance;
@@ -500,6 +536,16 @@ function createTray(win: BrowserWindow): Tray | null {
 }
 
 // Window control IPC handlers
+ipcMain.handle('ui:setTrayBehavior', (_event, behavior?: { minimizeToTray?: boolean; closeToTray?: boolean }) => {
+  if (behavior && typeof behavior === 'object') {
+    if (typeof behavior.minimizeToTray === 'boolean') {
+      trayBehavior.minimizeToTray = behavior.minimizeToTray;
+    }
+    if (typeof behavior.closeToTray === 'boolean') {
+      trayBehavior.closeToTray = behavior.closeToTray;
+    }
+  }
+});
 ipcMain.handle('window-minimize', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.minimize();
@@ -792,6 +838,7 @@ function registerLocalProtocol(): void {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
+    const isHead = request.method === 'HEAD';
     try {
       const parsedUrl = new URL(request.url);
       if (parsedUrl.hostname === 'art') {
@@ -818,10 +865,13 @@ function registerLocalProtocol(): void {
         if (start > end || start >= size) {
           return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
         }
+        if (isHead) {
+          return new Response(null, { status: 206, headers: { ...base, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(end - start + 1) } });
+        }
         const body = Readable.toWeb(fs.createReadStream(filePath, { start, end })) as unknown as ReadableStream;
         return new Response(body, { status: 206, headers: { ...base, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(end - start + 1) } });
       }
-      if (size === 0) return new Response(null, { status: 200, headers: { ...base, 'Content-Length': '0' } });
+      if (size === 0 || isHead) return new Response(null, { status: 200, headers: { ...base, 'Content-Length': String(size) } });
       const body = Readable.toWeb(fs.createReadStream(filePath)) as unknown as ReadableStream;
       return new Response(body, { status: 200, headers: { ...base, 'Content-Length': String(size) } });
     } catch {
@@ -992,6 +1042,8 @@ function loginProvider(provider: Provider): Promise<{ connected: boolean; displa
     const win = new BrowserWindow({ width: 520, height: 720, parent: mainWindow ?? undefined, title: 'Sign in', webPreferences: { session: ses, contextIsolation: true, nodeIntegration: false } });
     win.setMenuBarVisibility(false);
     let done = false;
+    let checking = false;
+    let pendingRecheck = false;
     const finish = async (ok: boolean) => {
       if (done) return;
       done = true;
@@ -1000,21 +1052,36 @@ function loginProvider(provider: Provider): Promise<{ connected: boolean; displa
       resolve(ok ? { connected: true, displayName: accountsState[provider]?.displayName } : { connected: false });
     };
     const check = async () => {
-      if (done) return;
-      const cookies = await ses.cookies.get({ domain: cfg.domain });
-      if (!cookies.some((c) => cfg.cookie.includes(c.name) && c.value)) return;
-      let displayName: string | undefined;
+      if (done || win.isDestroyed()) return;
+      if (checking) {
+        pendingRecheck = true;
+        return;
+      }
+      checking = true;
       try {
-        displayName = provider === 'ytmusic'
-          ? (await win.webContents.executeJavaScript(`document.querySelector('ytmusic-settings-button img')?.alt || ''`)) || undefined
-          : undefined;
-      } catch { /* ignore */ }
-      accountsState[provider] = {
-        connected: true, displayName: displayName || (provider === 'ytmusic' ? 'YouTube Music' : 'Spotify'),
-        cookie: cookies.map((c) => `${c.name}=${c.value}`).join('; '), connectedAt: Date.now(),
-      };
-      saveAccounts();
-      void finish(true);
+        const cookies = await ses.cookies.get({ domain: cfg.domain });
+        if (done || win.isDestroyed()) return;
+        if (!cookies.some((c) => cfg.cookie.includes(c.name) && c.value)) return;
+        let displayName: string | undefined;
+        try {
+          displayName = provider === 'ytmusic'
+            ? (await win.webContents.executeJavaScript(`document.querySelector('ytmusic-settings-button img')?.alt || ''`)) || undefined
+            : undefined;
+        } catch { /* ignore */ }
+        if (done || win.isDestroyed()) return;
+        accountsState[provider] = {
+          connected: true, displayName: displayName || (provider === 'ytmusic' ? 'YouTube Music' : 'Spotify'),
+          cookie: cookies.map((c) => `${c.name}=${c.value}`).join('; '), connectedAt: Date.now(),
+        };
+        saveAccounts();
+        void finish(true);
+      } finally {
+        checking = false;
+        if (pendingRecheck && !done && !win.isDestroyed()) {
+          pendingRecheck = false;
+          void check();
+        }
+      }
     };
     ses.cookies.on('changed', check);
     win.on('closed', () => void finish(false));
@@ -1163,10 +1230,7 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showMainWindow();
   });
 
   app.whenReady().then(() => {
@@ -1175,7 +1239,7 @@ if (!gotTheLock) {
     void prewarmAutoEqDb(resolveDataAssetCandidatePaths('auto_eq.db'));
     getSharedDiscordRpc().configure({ userDataDir: app.getPath('userData') });
     mainWindow = createWindow();
-    tray = createTray(mainWindow);
+    tray = createTray();
 
     lyricVisualizerPlatform = createLyricVisualizerPlatformController({
       app,
@@ -1203,10 +1267,13 @@ if (!gotTheLock) {
   });
 
   app.on('before-quit', () => {
+    isQuitting = true;
     getSharedDiscordRpc().shutdown();
   });
 
   app.on('will-quit', () => {
+    tray?.destroy();
+    tray = null;
     lyricVisualizerPlatform?.dispose();
     lyricVisualizerPlatform = null;
     getSharedDiscordRpc().shutdown();

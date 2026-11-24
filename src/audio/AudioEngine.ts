@@ -247,6 +247,8 @@ export class WebAudioDeck {
   private pendingSeekMs: number | null = null;
   private pendingCanPlayRetry: (() => void) | null = null;
   private pendingCanPlayRetryEl: HTMLAudioElement | null = null;
+  private pendingRecoverySeek: (() => void) | null = null;
+  private pendingRecoverySeekEl: HTMLAudioElement | null = null;
   onEndedCallback: (() => void) | null = null;
   onPrematureEndedCallback: ((positionMs: number) => void) | null = null;
   onErrorCallback: (() => void) | null = null;
@@ -791,6 +793,19 @@ export class WebAudioDeck {
     }
   }
 
+  private clearPendingRecoverySeek(): void {
+    const seekEl = this.pendingRecoverySeekEl || this.audioElement;
+    if (this.pendingRecoverySeek && seekEl) {
+      try {
+        seekEl.removeEventListener('loadedmetadata', this.pendingRecoverySeek);
+      } catch {
+        // Ignore
+      }
+      this.pendingRecoverySeek = null;
+      this.pendingRecoverySeekEl = null;
+    }
+  }
+
   private attemptPlayWithCanPlayRetry(el: HTMLAudioElement): void {
     const capturedToken = this.loadToken;
     Promise.resolve()
@@ -842,6 +857,7 @@ export class WebAudioDeck {
                 .catch(() => {});
             }
           };
+          this.clearPendingCanPlayRetry();
           this.pendingCanPlayRetry = retry;
           this.pendingCanPlayRetryEl = el;
           el.addEventListener('canplay', retry);
@@ -852,6 +868,7 @@ export class WebAudioDeck {
   teardownSource(): void {
     this.loadToken++;
     this.clearPendingCanPlayRetry();
+    this.clearPendingRecoverySeek();
     this.clearSeekGuardTimer();
     this.clearStallTimer();
     this.pendingSeekMs = null;
@@ -961,13 +978,16 @@ export class WebAudioDeck {
           el.load();
           const localResumeMs = Math.max(0, resumeMs - this.playbackOffsetMs);
           if (localResumeMs > 0) {
+            this.clearPendingRecoverySeek();
             const seek = () => {
-              el.removeEventListener('loadedmetadata', seek);
+              this.clearPendingRecoverySeek();
               if (this.loadToken !== reloadToken || el !== this.audioElement || this.isTearingDownSrc) {
                 return;
               }
               try { el.currentTime = localResumeMs / 1000; } catch { /* ignore */ }
             };
+            this.pendingRecoverySeek = seek;
+            this.pendingRecoverySeekEl = el;
             el.addEventListener('loadedmetadata', seek);
           }
         } catch {
@@ -1137,6 +1157,7 @@ export class AudioEngine {
   private crossfadeSequence = 0;
   private pendingResumePositionSec: number | null = null;
   private pendingResumeVerifyTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingResumeMaxWaitTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingResumeVerifyCleanup: (() => void) | null = null;
   private pendingResumeVerifyEl: HTMLAudioElement | null = null;
   private isApplyingPendingResumeSeek = false;
@@ -1275,6 +1296,10 @@ export class AudioEngine {
       clearTimeout(this.pendingResumeVerifyTimer);
       this.pendingResumeVerifyTimer = null;
     }
+    if (this.pendingResumeMaxWaitTimer !== null) {
+      clearTimeout(this.pendingResumeMaxWaitTimer);
+      this.pendingResumeMaxWaitTimer = null;
+    }
   }
 
   private clearPendingResumeVerify(): void {
@@ -1398,6 +1423,16 @@ export class AudioEngine {
         // Ignore in headless mock
       }
     }
+    this.pendingResumeMaxWaitTimer = setTimeout(() => {
+      this.pendingResumeMaxWaitTimer = null;
+      if (this.pendingResumeVerifyCleanup === cleanup) {
+        verifyResume(true);
+        if (this.pendingResumeVerifyCleanup === cleanup) {
+          cleanup();
+        }
+      }
+    }, 13_000);
+    (this.pendingResumeMaxWaitTimer as any)?.unref?.();
     armFallbackTimer();
 
     return true;
@@ -1438,7 +1473,7 @@ export class AudioEngine {
     // Pre-calculate 200-bucket amplitude envelope
     if (!this.cachedWaveforms.has(track.videoId)) {
       const envelope = await this.waveformExtractor.getOrExtractWaveform(track.videoId);
-      this.cachedWaveforms.set(track.videoId, envelope);
+      this.setCachedWaveform(track.videoId, envelope);
     }
 
     if (token !== this.playbackToken) {
@@ -1491,7 +1526,7 @@ export class AudioEngine {
     if (!this.cachedWaveforms.has(track.videoId)) {
       try {
         const envelope = await this.waveformExtractor.getOrExtractWaveform(track.videoId);
-        this.cachedWaveforms.set(track.videoId, envelope);
+        this.setCachedWaveform(track.videoId, envelope);
       } catch {
         // Fallback handled in store
       }
@@ -1600,15 +1635,15 @@ export class AudioEngine {
       throw new Error("Target deck must be 'active' or 'standby'");
     }
 
-    this.playbackState = 'CROSSFADING';
-    this._emitStateChange();
-
     const outgoing = this.activeDeckName === 'active' ? this.deckA : this.deckB;
     const incoming = this.activeDeckName === 'active' ? this.deckB : this.deckA;
 
     if (!incoming.track) {
       throw new Error('Standby deck has no pre-rolled track for crossfading');
     }
+
+    this.playbackState = 'CROSSFADING';
+    this._emitStateChange();
 
     incoming.play();
 
@@ -1695,8 +1730,8 @@ export class AudioEngine {
     try {
       standbyDeck.setGain(0.0);
       standbyDeck.setFallbackVolume(this.globalVolume);
-      standbyDeck.suppressDirectFallback = true;
       standbyDeck.load(losslessTrack);
+      standbyDeck.suppressDirectFallback = true;
 
       const el = standbyDeck.audioElement;
       if (!el) {
@@ -2022,16 +2057,31 @@ export class AudioEngine {
     this.dspChain.spatial.width = this.spatialAudio.width;
   }
 
+  private setCachedWaveform(songId: string, envelope: Float32Array): void {
+    if (this.cachedWaveforms.has(songId)) {
+      this.cachedWaveforms.delete(songId);
+    } else if (this.cachedWaveforms.size >= 200) {
+      const oldestKey = this.cachedWaveforms.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.cachedWaveforms.delete(oldestKey);
+      }
+    }
+    this.cachedWaveforms.set(songId, envelope);
+  }
+
   /**
    * Retrieve pre-computed 200-bucket amplitude envelope
    */
   async getWaveformData(songId: string): Promise<Float32Array> {
     if (!songId) throw new Error('Song ID required');
-    if (this.cachedWaveforms.has(songId)) {
-      return this.cachedWaveforms.get(songId)!;
+    const cached = this.cachedWaveforms.get(songId);
+    if (cached) {
+      this.cachedWaveforms.delete(songId);
+      this.cachedWaveforms.set(songId, cached);
+      return cached;
     }
     const envelope = await this.waveformExtractor.getOrExtractWaveform(songId);
-    this.cachedWaveforms.set(songId, envelope);
+    this.setCachedWaveform(songId, envelope);
     return envelope;
   }
 
@@ -2145,6 +2195,13 @@ export class AudioEngine {
     this.clearPendingResumePosition();
     this.deckA.teardownSource();
     this.deckB.teardownSource();
+    this.livePcmSubscribers.clear();
+    this.stateChangeSubscribers.clear();
+    this.onTrackEndedSubscribers.clear();
+    this.onPrematureEndedSubscribers.clear();
+    this.onPlaybackErrorSubscribers.clear();
+    this.cachedWaveforms.clear();
+    this.ctx?.close?.().catch(() => {});
     this.playbackState = 'IDLE';
   }
 

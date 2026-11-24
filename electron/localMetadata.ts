@@ -7,6 +7,22 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseFile } from 'music-metadata';
 import type { IAudioMetadata, ILyricsTag, IPicture } from 'music-metadata';
+import type { NativeCoreBindings } from './nativeCore.js';
+
+let nativeCoreModule: { getNativeCore: () => NativeCoreBindings | null } | null = null;
+try {
+  nativeCoreModule = await import('./nativeCore.js');
+} catch {
+  try {
+    nativeCoreModule = await import(new URL('./nativeCore.ts', import.meta.url).href);
+  } catch {
+    nativeCoreModule = null;
+  }
+}
+
+function getNativeCoreSafe(): NativeCoreBindings | null {
+  return nativeCoreModule ? nativeCoreModule.getNativeCore() : null;
+}
 
 const AUDIO_EXTENSIONS = new Set([
   '.mp3',
@@ -495,10 +511,57 @@ async function collectAudioFiles(
   return results;
 }
 
+function normalizeNativeTrack(raw: any): Record<string, any> {
+  return {
+    ...raw,
+    album: raw.album ?? undefined,
+    albumName: raw.albumName ?? null,
+    albumId: raw.albumId ?? null,
+    trackNumber: raw.trackNumber ?? undefined,
+    year: raw.year ?? null,
+    bitDepth: raw.bitDepth ?? undefined,
+    sampleRate: raw.sampleRate ?? undefined,
+    bitrate: raw.bitrate ?? undefined,
+    artworkHash: raw.artworkHash ?? null,
+    thumbnailUrl: raw.thumbnailUrl ?? null,
+    artworkUrl: raw.artworkUrl ?? undefined,
+    lyrics: raw.lyrics ?? null,
+  };
+}
+
+async function enrichNativeTracksFromDiskCache(
+  tracks: any[],
+  userDataPath: string
+): Promise<any[]> {
+  const out: any[] = new Array(tracks.length);
+  for (let i = 0; i < tracks.length; i++) {
+    const track = normalizeNativeTrack(tracks[i]);
+    if (!track.thumbnailUrl && track.metadataCacheKey) {
+      const cached = await readMetadataDiskCache(userDataPath, track.metadataCacheKey);
+      if (cached?.artworkUrl && typeof cached.artworkUrl === 'string') {
+        track.thumbnailUrl = cached.artworkUrl;
+        track.artworkUrl = cached.artworkUrl;
+      }
+    }
+    out[i] = track;
+  }
+  return out;
+}
+
 export async function scanAudioFolderWithMetadata(
   root: string,
   userDataPath: string
 ): Promise<any[]> {
+  const core = getNativeCoreSafe();
+  if (core) {
+    try {
+      const nativeTracks = await core.scanFolderMetadata(root, userDataPath);
+      return await enrichNativeTracksFromDiskCache(nativeTracks, userDataPath);
+    } catch {
+      // Fallback to music-metadata implementation below
+    }
+  }
+
   const files = await collectAudioFiles(root);
   const folderArtCache = new Map<string, { artworkHash: string; thumbnailUrl: string } | null>();
   const songs: any[] = [];
@@ -600,6 +663,60 @@ export async function incrementalScanLocalFolders(
   for (const track of existing.tracks) {
     if (track && typeof track.localFilePath === 'string' && track.localFilePath) {
       cachedByPath.set(normalizeFsPath(track.localFilePath), track);
+    }
+  }
+
+  const core = getNativeCoreSafe();
+  if (core) {
+    try {
+      const cachedEntries = existing.tracks
+        .filter((t) => t && typeof t.localFilePath === 'string' && t.localFilePath)
+        .map((t) => ({
+          localFilePath: t.localFilePath,
+          mtimeMs: typeof t.mtimeMs === 'number' ? t.mtimeMs : t.lastModifiedMs ?? 0,
+          size: typeof t.size === 'number' ? t.size : t.fileSizeBytes ?? 0,
+        }));
+
+      const res = await core.scanLocalFoldersIncremental(folders, userDataPath, cachedEntries);
+      const enriched = await enrichNativeTracksFromDiskCache(res.tracks, userDataPath);
+      const nextTracks: any[] = [];
+
+      for (const unchangedPath of res.unchangedPaths) {
+        const prev = cachedByPath.get(normalizeFsPath(unchangedPath));
+        if (prev) {
+          nextTracks.push({
+            ...prev,
+            folderPath: prev.folderPath || path.resolve(folders[0] || ''),
+            source: 'local',
+            isLocal: true,
+            playbackSourceType: 'LOCAL',
+          });
+        }
+      }
+
+      for (const parsed of enriched) {
+        const prev = cachedByPath.get(normalizeFsPath(parsed.localFilePath));
+        if (prev && !parsed.thumbnailUrl && prev.thumbnailUrl) {
+          parsed.thumbnailUrl = prev.thumbnailUrl;
+          parsed.artworkUrl = prev.artworkUrl || prev.thumbnailUrl;
+        }
+        nextTracks.push(parsed);
+      }
+
+      const saved = await saveLocalLibraryCache(userDataPath, {
+        folders: res.folders,
+        tracks: nextTracks,
+      });
+
+      return {
+        folders: saved.folders,
+        tracks: saved.tracks,
+        added: res.added,
+        updated: res.updated,
+        removed: res.removed,
+      };
+    } catch {
+      // Fallback to music-metadata implementation below
     }
   }
 

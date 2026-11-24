@@ -155,12 +155,40 @@ const PLAYER_CLIENTS: PlayerClientProfile[] = [
 ];
 
 let cachedVisitorData: { value: string; fetchedAt: number } | null = null;
+const MAX_ACTIVE_SEEK_JOBS = 3;
+const MAX_COMPLETED_PROXY_MIMES = 200;
 const activeJobs = new Map<string, ActiveStreamJob>();
 const activeSeekJobs = new Map<string, ActiveStreamJob>();
 const activeProxyJobs = new Map<string, ActiveStreamJob>();
+const startingJobs = new Map<string, Promise<ActiveStreamJob>>();
 const activeSeekSeq = new Map<string, number>();
 const completedProxyMimes = new Map<string, string>();
 let seekFileCounter = 0;
+
+function setCompletedProxyMime(proxyKey: string, contentType: string): void {
+  if (completedProxyMimes.has(proxyKey)) {
+    completedProxyMimes.delete(proxyKey);
+  } else if (completedProxyMimes.size >= MAX_COMPLETED_PROXY_MIMES) {
+    const oldestKey = completedProxyMimes.keys().next().value;
+    if (oldestKey !== undefined) {
+      completedProxyMimes.delete(oldestKey);
+    }
+  }
+  completedProxyMimes.set(proxyKey, contentType);
+}
+
+function setActiveSeekJob(jobKey: string, job: ActiveStreamJob): void {
+  if (activeSeekJobs.has(jobKey)) {
+    activeSeekJobs.delete(jobKey);
+  }
+  while (activeSeekJobs.size >= MAX_ACTIVE_SEEK_JOBS) {
+    const oldest = activeSeekJobs.entries().next().value as [string, ActiveStreamJob] | undefined;
+    if (!oldest) break;
+    activeSeekJobs.delete(oldest[0]);
+    void abortAndCleanupJob(oldest[1]);
+  }
+  activeSeekJobs.set(jobKey, job);
+}
 
 const WEBM_CLUSTER_ID = Buffer.from([0x1f, 0x43, 0xb6, 0x75]);
 
@@ -734,12 +762,20 @@ async function pruneCache(cacheDir: string, maxBytes = MAX_CACHE_BYTES): Promise
   try {
     const entries = await fsp.readdir(cacheDir, { withFileTypes: true });
     const files: { name: string; fullPath: string; size: number; mtimeMs: number }[] = [];
+    const activeSeekPartPaths = new Set(
+      Array.from(activeSeekJobs.values()).map((j) => path.resolve(j.partPath))
+    );
     let totalSize = 0;
 
     for (const entry of entries) {
       if (!entry.isFile()) continue;
-      if (entry.name.endsWith('.part')) continue;
       const fullPath = path.join(cacheDir, entry.name);
+      if (entry.name.endsWith('.part')) {
+        if (entry.name.includes('.seek-') && !activeSeekPartPaths.has(path.resolve(fullPath))) {
+          await fsp.unlink(fullPath).catch(() => {});
+        }
+        continue;
+      }
       try {
         const st = await fsp.stat(fullPath);
         totalSize += st.size;
@@ -757,7 +793,10 @@ async function pruneCache(cacheDir: string, maxBytes = MAX_CACHE_BYTES): Promise
     if (totalSize <= maxBytes) return;
 
     files.sort((a, b) => a.mtimeMs - b.mtimeMs);
-    const activeVideoIds = new Set(Array.from(activeJobs.values()).map((j) => j.videoId));
+    const activeVideoIds = new Set([
+      ...Array.from(activeJobs.values()).map((j) => j.videoId),
+      ...Array.from(activeProxyJobs.values()).map((j) => j.videoId),
+    ]);
 
     for (const file of files) {
       if (totalSize <= maxBytes * 0.85) break;
@@ -796,8 +835,8 @@ async function finalizePartFile(partPath: string, finalPath: string): Promise<vo
 
 function findYtDlpBinary(): string {
   const candidates = [
-    'C:\\Users\\traps\\scoop\\shims\\yt-dlp.exe',
-    'C:\\Users\\traps\\scoop\\shims\\yt-dlp',
+    path.join(os.homedir(), 'scoop', 'shims', 'yt-dlp.exe'),
+    path.join(os.homedir(), 'scoop', 'shims', 'yt-dlp'),
     'yt-dlp',
   ];
   for (const candidate of candidates) {
@@ -902,24 +941,42 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
       });
 
       let writeChain = Promise.resolve();
+      let writeErr: Error | null = null;
       child.stdout?.on('data', (chunk: Buffer) => {
-        if (job.aborted || !fh) return;
+        if (job.aborted || !fh || writeErr) return;
         const copy = Buffer.from(chunk);
-        writeChain = writeChain.then(async () => {
-          if (job.aborted || !fh) return;
-          if (ytdlpBytes === 0) {
-            sniffedMime = sniffAudioMimeFromHeader(copy, sniffedMime);
-            if (streamDirectlyToPart) {
-              job.mimeType = sniffedMime;
+        child.stdout?.pause();
+        writeChain = writeChain
+          .then(async () => {
+            if (job.aborted || !fh || writeErr) return;
+            if (ytdlpBytes === 0) {
+              sniffedMime = sniffAudioMimeFromHeader(copy, sniffedMime);
+              if (streamDirectlyToPart) {
+                job.mimeType = sniffedMime;
+              }
             }
-          }
-          await fh.write(copy, 0, copy.length, ytdlpBytes);
-          ytdlpBytes += copy.length;
-          if (streamDirectlyToPart) {
-            job.bytesWritten = ytdlpBytes;
-            notifyWaiters(job);
-          }
-        });
+            await fh.write(copy, 0, copy.length, ytdlpBytes);
+            ytdlpBytes += copy.length;
+            if (streamDirectlyToPart) {
+              job.bytesWritten = ytdlpBytes;
+              notifyWaiters(job);
+            }
+          })
+          .catch((err) => {
+            if (!writeErr) {
+              writeErr = err instanceof Error ? err : new Error(String(err));
+            }
+            try {
+              child.kill('SIGTERM');
+            } catch {
+              // Ignore kill errors
+            }
+          })
+          .finally(() => {
+            if (!job.aborted && !writeErr && !child.stdout?.destroyed) {
+              child.stdout?.resume();
+            }
+          });
       });
 
       const exitCode = await new Promise<number | null>((resolve, reject) => {
@@ -928,6 +985,9 @@ async function downloadWithYtDlpIntoJob(job: ActiveStreamJob, streamDirectlyToPa
       });
 
       await writeChain;
+      if (writeErr) {
+        throw writeErr;
+      }
 
       if (job.aborted) {
         throw new Error('yt-dlp download aborted');
@@ -1054,433 +1114,461 @@ async function startSabrJob(
   options?: SabrStreamAuthOptions,
   startMs = 0
 ): Promise<ActiveStreamJob> {
-  await fsp.mkdir(cacheDir, { recursive: true });
-  const visitorData = await fetchFreshVisitorData();
-  const initialMetadata = await fetchPlayerMetadata(videoId, visitorData, 0, options);
+  const isSeekJob = startMs > 0;
+  const jobKey = getJobKey(cacheDir, videoId);
+  const startKey = isSeekJob ? `${jobKey}::seek::${startMs}` : jobKey;
 
-  const initialSabrFormats = initialMetadata.adaptiveFormats.map((f) => buildSabrFormat(f));
-  const chosenFormat = selectBestAudioFormat(initialSabrFormats);
-  if (!chosenFormat) {
-    throw new Error(`No audio-only SABR format available for ${videoId}`);
+  if (!isSeekJob) {
+    const existing = activeJobs.get(jobKey);
+    if (existing && !existing.error && !existing.aborted) {
+      return existing;
+    }
   }
 
-  const isSeekJob = startMs > 0;
-  const { mimeType, ext } = normalizeAudioMimeAndExt(chosenFormat.mimeType);
-  const partPath = isSeekJob
-    ? path.join(cacheDir, `${videoId}.seek-${startMs}-${++seekFileCounter}.${ext}.part`)
-    : path.join(cacheDir, `${videoId}.${ext}.part`);
-  const finalPath = isSeekJob ? partPath : path.join(cacheDir, `${videoId}.${ext}`);
-  const metaPath = path.join(cacheDir, `${videoId}.json`);
-  const resolvedPoToken = options?.poToken || process.env.WAVEFORM_YOUTUBE_POTOKEN || undefined;
+  const pendingStart = startingJobs.get(startKey);
+  if (pendingStart) {
+    return pendingStart;
+  }
 
-  const durationSec =
-    initialMetadata.durationSec ||
-    (chosenFormat.approxDurationMs ? Math.round(chosenFormat.approxDurationMs / 1000) : 0);
-  const bitrateBps = chosenFormat.averageBitrate || chosenFormat.bitrate || 160_000;
-  const computedEstimatedSize =
-    durationSec > 0 ? Math.round((bitrateBps / 8) * durationSec * 1.04) : 4 * 1024 * 1024;
-  const baseEstimatedSize =
-    chosenFormat.contentLength && chosenFormat.contentLength > 0
-      ? chosenFormat.contentLength
-      : computedEstimatedSize;
-  const estimatedSize =
-    isSeekJob && durationSec > 0
-      ? Math.max(
-          256 * 1024,
-          Math.round(baseEstimatedSize * Math.max(0.08, (durationSec - startMs / 1000) / durationSec))
-        )
-      : baseEstimatedSize;
+  const startPromise = (async () => {
+    await fsp.mkdir(cacheDir, { recursive: true });
+    const visitorData = await fetchFreshVisitorData();
+    const initialMetadata = await fetchPlayerMetadata(videoId, visitorData, 0, options);
 
-  const job: ActiveStreamJob = {
-    videoId,
-    cacheDir,
-    partPath,
-    finalPath,
-    metaPath,
-    ext,
-    mimeType,
-    itag: chosenFormat.itag,
-    durationSec,
-    sourceClient: initialMetadata.clientProfile.name,
-    estimatedSize,
-    bytesWritten: 0,
-    finalSize: 0,
-    done: false,
-    error: null,
-    sabrStream: null,
-    childProcess: null,
-    fileHandle: null,
-    aborted: false,
-    waiters: new Set(),
-    completionPromise: Promise.resolve(),
-    startMs,
-    actualStartMs: isSeekJob ? null : 0,
-    reportedTotal: estimatedSize,
-    knownTotalSize: null,
-    isSeekJob,
-    abortController: null,
-  };
-
-  const jobKey = getJobKey(cacheDir, videoId);
-  const jobMap = isSeekJob ? activeSeekJobs : activeJobs;
-  jobMap.set(jobKey, job);
-
-  const openSabrAttempt = (
-    meta: PlayerMetadata,
-    formats: SabrFormat[],
-    targetFormat: SabrFormat,
-    resumeTimeMs: number,
-    clientIndexOffset: number
-  ) => {
-    const clientInfo: ClientInfo = {
-      clientName: meta.clientProfile.clientNameNum,
-      clientVersion: meta.clientProfile.clientVersion,
-      osName: meta.clientProfile.osName,
-      osVersion: meta.clientProfile.osVersion,
-      deviceMake: meta.clientProfile.deviceMake,
-      deviceModel: meta.clientProfile.deviceModel,
-      hl: 'en',
-    };
-
-    let reloadAttempt = clientIndexOffset;
-    const stream = new SabrStream({
-      videoId,
-      serverAbrStreamingUrl: meta.serverAbrStreamingUrl,
-      videoPlaybackUstreamerConfig: meta.videoPlaybackUstreamerConfig,
-      clientInfo,
-      ...(resolvedPoToken ? { poToken: resolvedPoToken } : {}),
-      formats,
-      callbacks: {
-        onReloadPlayerResponse: async (reloadContext) => {
-          reloadAttempt += 1;
-          const refreshedVisitor = await fetchFreshVisitorData(true);
-          const refreshed = await fetchPlayerMetadata(videoId, refreshedVisitor, reloadAttempt, {
-            ...options,
-            poToken: resolvedPoToken,
-            reloadPlaybackParams: reloadContext?.reloadPlaybackParams,
-          });
-          return {
-            serverAbrStreamingUrl: refreshed.serverAbrStreamingUrl,
-            videoPlaybackUstreamerConfig: refreshed.videoPlaybackUstreamerConfig,
-          };
-        },
-      },
-    });
-
-    if (resumeTimeMs > 0) {
-      // googlevideo's setupStreaming calls seekTo(trackCollection.buffered, 'client') after the init-only
-      // first response, which resets playerTimeMs back to 0 before the first media segment arrives.
-      const sabrAny = stream as any;
-      const origSeekTo = typeof sabrAny.seekTo === 'function' ? sabrAny.seekTo.bind(stream) : null;
-      if (origSeekTo) {
-        sabrAny.seekTo = (timeMs: number, source: string) => {
-          if (
-            timeMs === 0 &&
-            source === 'client' &&
-            (!sabrAny.trackCollection?.bufferedRanges || sabrAny.trackCollection.bufferedRanges.length === 0)
-          ) {
-            return;
-          }
-          return origSeekTo(timeMs, source);
-        };
-      }
+    const initialSabrFormats = initialMetadata.adaptiveFormats.map((f) => buildSabrFormat(f));
+    const chosenFormat = selectBestAudioFormat(initialSabrFormats);
+    if (!chosenFormat) {
+      throw new Error(`No audio-only SABR format available for ${videoId}`);
     }
 
-    const started = stream.start({
-      enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
-      isPostLiveDvr: false,
-      audioFormat: targetFormat,
-      ...(resumeTimeMs > 0 ? { startTimeMs: resumeTimeMs } : {}),
-      maxRetries: 6,
-      stallDetectionMs: 18_000,
-    });
+    const { mimeType, ext } = normalizeAudioMimeAndExt(chosenFormat.mimeType);
+    const partPath = isSeekJob
+      ? path.join(cacheDir, `${videoId}.seek-${startMs}-${++seekFileCounter}.${ext}.part`)
+      : path.join(cacheDir, `${videoId}.${ext}.part`);
+    const finalPath = isSeekJob ? partPath : path.join(cacheDir, `${videoId}.${ext}`);
+    const metaPath = path.join(cacheDir, `${videoId}.json`);
+    const resolvedPoToken = options?.poToken || process.env.WAVEFORM_YOUTUBE_POTOKEN || undefined;
 
-    return { stream, audioStream: started.audioStream, selectedFormats: started.selectedFormats };
-  };
+    const durationSec =
+      initialMetadata.durationSec ||
+      (chosenFormat.approxDurationMs ? Math.round(chosenFormat.approxDurationMs / 1000) : 0);
+    const bitrateBps = chosenFormat.averageBitrate || chosenFormat.bitrate || 160_000;
+    const computedEstimatedSize =
+      durationSec > 0 ? Math.round((bitrateBps / 8) * durationSec * 1.04) : 4 * 1024 * 1024;
+    const baseEstimatedSize =
+      chosenFormat.contentLength && chosenFormat.contentLength > 0
+        ? chosenFormat.contentLength
+        : computedEstimatedSize;
+    const estimatedSize =
+      isSeekJob && durationSec > 0
+        ? Math.max(
+            256 * 1024,
+            Math.round(baseEstimatedSize * Math.max(0.08, (durationSec - startMs / 1000) / durationSec))
+          )
+        : baseEstimatedSize;
 
-  job.completionPromise = (async () => {
-    let fh: fsp.FileHandle | null = null;
-    let lastError: Error | null = null;
-    let maxWrittenClusterTcMs = -1;
-    let sabrBufferedEndMs = startMs;
-    let streamReachedInfinity = false;
-    let sabrSucceeded = false;
-    let sabrCanPersistCache = false;
-    let currentMeta = initialMetadata;
-    let currentFormats = initialSabrFormats;
-    let currentTargetFormat = chosenFormat;
+    const job: ActiveStreamJob = {
+      videoId,
+      cacheDir,
+      partPath,
+      finalPath,
+      metaPath,
+      ext,
+      mimeType,
+      itag: chosenFormat.itag,
+      durationSec,
+      sourceClient: initialMetadata.clientProfile.name,
+      estimatedSize,
+      bytesWritten: 0,
+      finalSize: 0,
+      done: false,
+      error: null,
+      sabrStream: null,
+      childProcess: null,
+      fileHandle: null,
+      aborted: false,
+      waiters: new Set(),
+      completionPromise: Promise.resolve(),
+      startMs,
+      actualStartMs: isSeekJob ? null : 0,
+      reportedTotal: estimatedSize,
+      knownTotalSize: null,
+      isSeekJob,
+      abortController: null,
+    };
 
-    try {
-      fh = await fsp.open(partPath, 'w');
-      job.fileHandle = fh;
+    if (isSeekJob) {
+      setActiveSeekJob(jobKey, job);
+    } else {
+      activeJobs.set(jobKey, job);
+    }
 
-      for (let attempt = 1; attempt <= MAX_SABR_PUMP_ATTEMPTS; attempt++) {
-        if (job.aborted) {
-          throw new Error('SABR stream aborted');
+    const openSabrAttempt = (
+      meta: PlayerMetadata,
+      formats: SabrFormat[],
+      targetFormat: SabrFormat,
+      resumeTimeMs: number,
+      clientIndexOffset: number
+    ) => {
+      const clientInfo: ClientInfo = {
+        clientName: meta.clientProfile.clientNameNum,
+        clientVersion: meta.clientProfile.clientVersion,
+        osName: meta.clientProfile.osName,
+        osVersion: meta.clientProfile.osVersion,
+        deviceMake: meta.clientProfile.deviceMake,
+        deviceModel: meta.clientProfile.deviceModel,
+        hl: 'en',
+      };
+
+      let reloadAttempt = clientIndexOffset;
+      const stream = new SabrStream({
+        videoId,
+        serverAbrStreamingUrl: meta.serverAbrStreamingUrl,
+        videoPlaybackUstreamerConfig: meta.videoPlaybackUstreamerConfig,
+        clientInfo,
+        ...(resolvedPoToken ? { poToken: resolvedPoToken } : {}),
+        formats,
+        callbacks: {
+          onReloadPlayerResponse: async (reloadContext) => {
+            reloadAttempt += 1;
+            const refreshedVisitor = await fetchFreshVisitorData(true);
+            const refreshed = await fetchPlayerMetadata(videoId, refreshedVisitor, reloadAttempt, {
+              ...options,
+              poToken: resolvedPoToken,
+              reloadPlaybackParams: reloadContext?.reloadPlaybackParams,
+            });
+            return {
+              serverAbrStreamingUrl: refreshed.serverAbrStreamingUrl,
+              videoPlaybackUstreamerConfig: refreshed.videoPlaybackUstreamerConfig,
+            };
+          },
+        },
+      });
+
+      if (resumeTimeMs > 0) {
+        // googlevideo's setupStreaming calls seekTo(trackCollection.buffered, 'client') after the init-only
+        // first response, which resets playerTimeMs back to 0 before the first media segment arrives.
+        const sabrAny = stream as any;
+        const origSeekTo = typeof sabrAny.seekTo === 'function' ? sabrAny.seekTo.bind(stream) : null;
+        if (origSeekTo) {
+          sabrAny.seekTo = (timeMs: number, source: string) => {
+            if (
+              timeMs === 0 &&
+              source === 'client' &&
+              (!sabrAny.trackCollection?.bufferedRanges || sabrAny.trackCollection.bufferedRanges.length === 0)
+            ) {
+              return;
+            }
+            return origSeekTo(timeMs, source);
+          };
         }
+      }
 
-        if (attempt > 1) {
-          const prevErrMsg = lastError?.message || '';
-          const backoffMs = prevErrMsg.includes('429') ? 1200 : 400 * (attempt - 1);
-          await sleepMs(backoffMs);
+      const started = stream.start({
+        enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
+        isPostLiveDvr: false,
+        audioFormat: targetFormat,
+        ...(resumeTimeMs > 0 ? { startTimeMs: resumeTimeMs } : {}),
+        maxRetries: 6,
+        stallDetectionMs: 18_000,
+      });
+
+      return { stream, audioStream: started.audioStream, selectedFormats: started.selectedFormats };
+    };
+
+    job.completionPromise = (async () => {
+      let fh: fsp.FileHandle | null = null;
+      let lastError: Error | null = null;
+      let maxWrittenClusterTcMs = -1;
+      let sabrBufferedEndMs = startMs;
+      let streamReachedInfinity = false;
+      let sabrSucceeded = false;
+      let sabrCanPersistCache = false;
+      let currentMeta = initialMetadata;
+      let currentFormats = initialSabrFormats;
+      let currentTargetFormat = chosenFormat;
+
+      try {
+        fh = await fsp.open(partPath, 'w');
+        job.fileHandle = fh;
+
+        for (let attempt = 1; attempt <= MAX_SABR_PUMP_ATTEMPTS; attempt++) {
           if (job.aborted) {
             throw new Error('SABR stream aborted');
           }
 
-          const refreshedVisitor = await fetchFreshVisitorData(true);
-          const clientIdx = (attempt - 1) % PLAYER_CLIENTS.length;
-          currentMeta = await fetchPlayerMetadata(videoId, refreshedVisitor, clientIdx, options);
-          currentFormats = currentMeta.adaptiveFormats.map((f) => buildSabrFormat(f));
-          const sameItagFormat = currentFormats.find((f) => f.itag === job.itag);
-          if (job.bytesWritten > 0 && !sameItagFormat) {
-            lastError = new Error(
-              `Rotated client ${currentMeta.clientProfile.name} lacks matching itag=${job.itag} for mid-stream resume`
-            );
-            continue;
-          }
-          currentTargetFormat = sameItagFormat || selectBestAudioFormat(currentFormats) || currentTargetFormat;
-          job.sourceClient = currentMeta.clientProfile.name;
-        }
-
-        const resumeTimeMs =
-          job.bytesWritten > 0
-            ? maxWrittenClusterTcMs >= 0
-              ? maxWrittenClusterTcMs + 5_000
-              : Math.max(startMs, Math.floor(sabrBufferedEndMs))
-            : startMs;
-        const { stream: activeSabrStream, audioStream, selectedFormats } = openSabrAttempt(
-          currentMeta,
-          currentFormats,
-          currentTargetFormat,
-          resumeTimeMs,
-          attempt - 1
-        );
-        job.sabrStream = activeSabrStream;
-
-        const actualFormat = selectedFormats.audioFormat || currentTargetFormat;
-        if (attempt === 1) {
-          job.itag = actualFormat.itag;
-          if (actualFormat.contentLength && actualFormat.contentLength > 0 && !isSeekJob) {
-            job.estimatedSize = actualFormat.contentLength;
-            job.reportedTotal = Math.max(job.reportedTotal, actualFormat.contentLength);
-          }
-        }
-
-        let sabrErrored: Error | null = null;
-        activeSabrStream.on('error', (err) => {
-          sabrErrored = err instanceof Error ? err : new Error(String(err));
-        });
-
-        const reader = audioStream.getReader();
-        let attemptTimedOut = false;
-        let emptyChunkError: Error | null = null;
-        let consecutiveEmptyChunks = 0;
-        let strippedInitThisAttempt = job.bytesWritten === 0 || attempt === 1;
-
-        try {
-          while (true) {
-            if (job.aborted) break;
-
-            const stallTimeoutMs =
-              job.bytesWritten >= PRIME_MIN_BYTES
-                ? SABR_STALL_HANDOFF_MS
-                : isSeekJob
-                ? 8_000
-                : 18_000;
-            let stallTimer: ReturnType<typeof setTimeout> | undefined;
-            const readResult = await Promise.race([
-              reader.read().then((res) => ({ timedOut: false as const, res })),
-              new Promise<{ timedOut: true }>((resolve) => {
-                stallTimer = setTimeout(() => resolve({ timedOut: true }), stallTimeoutMs);
-              }),
-            ]);
-            if (stallTimer) clearTimeout(stallTimer);
-
-            if (readResult.timedOut) {
-              attemptTimedOut = true;
-              break;
+          if (attempt > 1) {
+            const prevErrMsg = lastError?.message || '';
+            const backoffMs = prevErrMsg.includes('429') ? 1200 : 400 * (attempt - 1);
+            await sleepMs(backoffMs);
+            if (job.aborted) {
+              throw new Error('SABR stream aborted');
             }
 
-            const { done, value } = readResult.res;
-            if (done) break;
-            if (!value || value.byteLength === 0) {
-              consecutiveEmptyChunks += 1;
-              if (consecutiveEmptyChunks >= MAX_EMPTY_CHUNKS_BEFORE_RETRY) {
-                emptyChunkError = new Error(
-                  `SABR stream produced ${consecutiveEmptyChunks} consecutive empty chunks for ${videoId}`
-                );
-                break;
-              }
+            const refreshedVisitor = await fetchFreshVisitorData(true);
+            const clientIdx = (attempt - 1) % PLAYER_CLIENTS.length;
+            currentMeta = await fetchPlayerMetadata(videoId, refreshedVisitor, clientIdx, options);
+            currentFormats = currentMeta.adaptiveFormats.map((f) => buildSabrFormat(f));
+            const sameItagFormat = currentFormats.find((f) => f.itag === job.itag);
+            if (job.bytesWritten > 0 && !sameItagFormat) {
+              lastError = new Error(
+                `Rotated client ${currentMeta.clientProfile.name} lacks matching itag=${job.itag} for mid-stream resume`
+              );
               continue;
             }
+            currentTargetFormat = sameItagFormat || selectBestAudioFormat(currentFormats) || currentTargetFormat;
+            job.sourceClient = currentMeta.clientProfile.name;
+          }
 
-            consecutiveEmptyChunks = 0;
-            const bufferedRaw = Number((activeSabrStream as any)?.trackCollection?.buffered);
-            if (bufferedRaw === Infinity) {
-              streamReachedInfinity = true;
-            } else if (Number.isFinite(bufferedRaw) && bufferedRaw > sabrBufferedEndMs) {
-              sabrBufferedEndMs = bufferedRaw;
+          const resumeTimeMs =
+            job.bytesWritten > 0
+              ? maxWrittenClusterTcMs >= 0
+                ? maxWrittenClusterTcMs + 5_000
+                : Math.max(startMs, Math.floor(sabrBufferedEndMs))
+              : startMs;
+          const { stream: activeSabrStream, audioStream, selectedFormats } = openSabrAttempt(
+            currentMeta,
+            currentFormats,
+            currentTargetFormat,
+            resumeTimeMs,
+            attempt - 1
+          );
+          job.sabrStream = activeSabrStream;
+
+          const actualFormat = selectedFormats.audioFormat || currentTargetFormat;
+          if (attempt === 1) {
+            job.itag = actualFormat.itag;
+            if (actualFormat.contentLength && actualFormat.contentLength > 0 && !isSeekJob) {
+              job.estimatedSize = actualFormat.contentLength;
+              job.reportedTotal = Math.max(job.reportedTotal, actualFormat.contentLength);
             }
+          }
 
-            let writeBuf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-            if (!strippedInitThisAttempt) {
-              if (job.ext === 'webm') {
-                const stripped = stripWebmPrefixUpToTimecode(writeBuf, maxWrittenClusterTcMs);
-                if (!stripped || stripped.byteLength === 0) {
-                  continue;
-                }
-                writeBuf = stripped;
-                strippedInitThisAttempt = true;
-              } else {
-                // Non-WebM mid-stream cannot safely strip init headers without muxed offset rewrite
-                emptyChunkError = new Error(`Non-WebM mid-stream resume unsupported for ${videoId}`);
+          let sabrErrored: Error | null = null;
+          activeSabrStream.on('error', (err) => {
+            sabrErrored = err instanceof Error ? err : new Error(String(err));
+          });
+
+          const reader = audioStream.getReader();
+          let attemptTimedOut = false;
+          let emptyChunkError: Error | null = null;
+          let consecutiveEmptyChunks = 0;
+          let strippedInitThisAttempt = job.bytesWritten === 0 || attempt === 1;
+
+          try {
+            while (true) {
+              if (job.aborted) break;
+
+              const stallTimeoutMs =
+                job.bytesWritten >= PRIME_MIN_BYTES
+                  ? SABR_STALL_HANDOFF_MS
+                  : isSeekJob
+                  ? 8_000
+                  : 18_000;
+              let stallTimer: ReturnType<typeof setTimeout> | undefined;
+              const readResult = await Promise.race([
+                reader.read().then((res) => ({ timedOut: false as const, res })),
+                new Promise<{ timedOut: true }>((resolve) => {
+                  stallTimer = setTimeout(() => resolve({ timedOut: true }), stallTimeoutMs);
+                }),
+              ]);
+              if (stallTimer) clearTimeout(stallTimer);
+
+              if (readResult.timedOut) {
+                attemptTimedOut = true;
                 break;
               }
-            }
 
-            if (job.ext === 'webm') {
-              const lastTc = getLastWebmClusterTimecodeMs(writeBuf);
-              if (lastTc !== null && lastTc > maxWrittenClusterTcMs) {
-                maxWrittenClusterTcMs = lastTc;
+              const { done, value } = readResult.res;
+              if (done) break;
+              if (!value || value.byteLength === 0) {
+                consecutiveEmptyChunks += 1;
+                if (consecutiveEmptyChunks >= MAX_EMPTY_CHUNKS_BEFORE_RETRY) {
+                  emptyChunkError = new Error(
+                    `SABR stream produced ${consecutiveEmptyChunks} consecutive empty chunks for ${videoId}`
+                  );
+                  break;
+                }
+                continue;
               }
+
+              consecutiveEmptyChunks = 0;
+              const bufferedRaw = Number((activeSabrStream as any)?.trackCollection?.buffered);
+              if (bufferedRaw === Infinity) {
+                streamReachedInfinity = true;
+              } else if (Number.isFinite(bufferedRaw) && bufferedRaw > sabrBufferedEndMs) {
+                sabrBufferedEndMs = bufferedRaw;
+              }
+
+              let writeBuf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+              if (!strippedInitThisAttempt) {
+                if (job.ext === 'webm') {
+                  const stripped = stripWebmPrefixUpToTimecode(writeBuf, maxWrittenClusterTcMs);
+                  if (!stripped || stripped.byteLength === 0) {
+                    continue;
+                  }
+                  writeBuf = stripped;
+                  strippedInitThisAttempt = true;
+                } else {
+                  // Non-WebM mid-stream cannot safely strip init headers without muxed offset rewrite
+                  emptyChunkError = new Error(`Non-WebM mid-stream resume unsupported for ${videoId}`);
+                  break;
+                }
+              }
+
+              if (job.ext === 'webm') {
+                const lastTc = getLastWebmClusterTimecodeMs(writeBuf);
+                if (lastTc !== null && lastTc > maxWrittenClusterTcMs) {
+                  maxWrittenClusterTcMs = lastTc;
+                }
+              }
+
+              await fh.write(writeBuf, 0, writeBuf.length, job.bytesWritten);
+              job.bytesWritten += writeBuf.length;
+              notifyWaiters(job);
             }
+          } catch (readErr) {
+            sabrErrored = readErr instanceof Error ? readErr : new Error(String(readErr));
+          } finally {
+            const finalBufferedRaw = Number((activeSabrStream as any)?.trackCollection?.buffered);
+            if (finalBufferedRaw === Infinity) {
+              streamReachedInfinity = true;
+            } else if (Number.isFinite(finalBufferedRaw) && finalBufferedRaw > sabrBufferedEndMs) {
+              sabrBufferedEndMs = finalBufferedRaw;
+            }
+            await reader.cancel().catch(() => {});
+            try {
+              reader.releaseLock();
+            } catch {
+              // Ignore release lock errors
+            }
+            await activeSabrStream.abort().catch(() => {});
+            if (job.sabrStream === activeSabrStream) {
+              job.sabrStream = null;
+            }
+          }
 
-            await fh.write(writeBuf, 0, writeBuf.length, job.bytesWritten);
-            job.bytesWritten += writeBuf.length;
-            notifyWaiters(job);
+          if (job.aborted) {
+            throw new Error('SABR stream aborted');
           }
-        } catch (readErr) {
-          sabrErrored = readErr instanceof Error ? readErr : new Error(String(readErr));
-        } finally {
-          const finalBufferedRaw = Number((activeSabrStream as any)?.trackCollection?.buffered);
-          if (finalBufferedRaw === Infinity) {
-            streamReachedInfinity = true;
-          } else if (Number.isFinite(finalBufferedRaw) && finalBufferedRaw > sabrBufferedEndMs) {
-            sabrBufferedEndMs = finalBufferedRaw;
+
+          const actualWrittenSec =
+            maxWrittenClusterTcMs >= 0
+              ? (maxWrittenClusterTcMs + 10_000) / 1000
+              : sabrBufferedEndMs / 1000;
+          const hasExactContentLength = Boolean(actualFormat.contentLength && actualFormat.contentLength > 0);
+          const durationReachedEof =
+            streamReachedInfinity ||
+            (job.durationSec > 0 && actualWrittenSec >= job.durationSec - 8);
+          const sizeReachedEof = job.estimatedSize <= 0 || job.bytesWritten >= job.estimatedSize * 0.92;
+          const cacheRatioOk = hasExactContentLength
+            ? job.bytesWritten >= job.estimatedSize * 0.9
+            : durationReachedEof || job.estimatedSize <= 0 || job.bytesWritten >= job.estimatedSize * 0.9;
+          const reachedTrueEof =
+            !attemptTimedOut &&
+            !emptyChunkError &&
+            !sabrErrored &&
+            job.bytesWritten > 0 &&
+            (durationReachedEof || sizeReachedEof) &&
+            (isSeekJob || cacheRatioOk);
+
+          if (reachedTrueEof) {
+            sabrSucceeded = true;
+            sabrCanPersistCache = cacheRatioOk;
+            break;
           }
-          await reader.cancel().catch(() => {});
-          try {
-            reader.releaseLock();
-          } catch {
-            // Ignore release lock errors
-          }
-          await activeSabrStream.abort().catch(() => {});
-          if (job.sabrStream === activeSabrStream) {
-            job.sabrStream = null;
-          }
+
+          lastError =
+            sabrErrored ||
+            emptyChunkError ||
+            (attemptTimedOut
+              ? new Error(`SABR segment fetch timed out for ${videoId} at ${job.bytesWritten} bytes`)
+              : new Error(
+                  `SABR stream ended prematurely for ${videoId} at ${job.bytesWritten}/${job.estimatedSize} bytes`
+                ));
         }
 
-        if (job.aborted) {
-          throw new Error('SABR stream aborted');
+        if (!sabrSucceeded) {
+          if (!isSeekJob && !job.aborted) {
+            await fh.close().catch(() => {});
+            fh = null;
+            job.fileHandle = null;
+            await downloadWithYtDlpIntoJob(job, job.bytesWritten === 0);
+            return;
+          }
+          throw (
+            lastError ||
+            new Error(`SABR stream failed after ${MAX_SABR_PUMP_ATTEMPTS} attempts for ${videoId}`)
+          );
         }
 
-        const actualWrittenSec =
-          maxWrittenClusterTcMs >= 0
-            ? (maxWrittenClusterTcMs + 10_000) / 1000
-            : sabrBufferedEndMs / 1000;
-        const hasExactContentLength = Boolean(actualFormat.contentLength && actualFormat.contentLength > 0);
-        const durationReachedEof =
-          streamReachedInfinity ||
-          (job.durationSec > 0 && actualWrittenSec >= job.durationSec - 8);
-        const sizeReachedEof = job.estimatedSize <= 0 || job.bytesWritten >= job.estimatedSize * 0.92;
-        const cacheRatioOk = hasExactContentLength
-          ? job.bytesWritten >= job.estimatedSize * 0.9
-          : durationReachedEof || job.estimatedSize <= 0 || job.bytesWritten >= job.estimatedSize * 0.9;
-        const reachedTrueEof =
-          !attemptTimedOut &&
-          !emptyChunkError &&
-          !sabrErrored &&
-          job.bytesWritten > 0 &&
-          (durationReachedEof || sizeReachedEof) &&
-          (isSeekJob || cacheRatioOk);
+        await fh.close();
+        fh = null;
+        job.fileHandle = null;
 
-        if (reachedTrueEof) {
-          sabrSucceeded = true;
-          sabrCanPersistCache = cacheRatioOk;
-          break;
-        }
-
-        lastError =
-          sabrErrored ||
-          emptyChunkError ||
-          (attemptTimedOut
-            ? new Error(`SABR segment fetch timed out for ${videoId} at ${job.bytesWritten} bytes`)
-            : new Error(
-                `SABR stream ended prematurely for ${videoId} at ${job.bytesWritten}/${job.estimatedSize} bytes`
-              ));
-      }
-
-      if (!sabrSucceeded) {
-        if (!isSeekJob && !job.aborted) {
-          await fh.close().catch(() => {});
-          fh = null;
-          job.fileHandle = null;
-          await downloadWithYtDlpIntoJob(job, job.bytesWritten === 0);
+        if (isSeekJob) {
+          // Seek sessions stay in their own temp file and never overwrite 0..EOF cache
+          job.finalPath = partPath;
+          job.finalSize = job.bytesWritten;
+          job.done = true;
+          notifyWaiters(job);
           return;
         }
-        throw (
-          lastError ||
-          new Error(`SABR stream failed after ${MAX_SABR_PUMP_ATTEMPTS} attempts for ${videoId}`)
-        );
-      }
 
-      await fh.close();
-      fh = null;
-      job.fileHandle = null;
+        // Never persist truncated < 90% .webm files to permanent cache
+        if (!sabrCanPersistCache) {
+          throw new Error(
+            `Refusing to cache truncated SABR stream for ${videoId}: ${job.bytesWritten} < 90% of ${job.estimatedSize}`
+          );
+        }
 
-      if (isSeekJob) {
-        // Seek sessions stay in their own temp file and never overwrite 0..EOF cache
-        job.finalPath = partPath;
+        await finalizePartFile(partPath, finalPath);
         job.finalSize = job.bytesWritten;
+
+        const meta: CachedYoutubeStreamMeta = {
+          videoId,
+          mimeType: job.mimeType,
+          contentLength: job.finalSize,
+          durationSec: job.durationSec,
+          itag: job.itag,
+          ext: job.ext,
+          sourceClient: job.sourceClient,
+        };
+        await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+
         job.done = true;
         notifyWaiters(job);
-        return;
+        void pruneCache(cacheDir);
+      } catch (err) {
+        if (fh) {
+          await fh.close().catch(() => {});
+          job.fileHandle = null;
+        }
+        await fsp.unlink(partPath).catch(() => {});
+        job.error = err instanceof Error ? err : new Error(String(err));
+        if (isSeekJob && activeSeekJobs.get(jobKey) === job) {
+          activeSeekJobs.delete(jobKey);
+        }
+        notifyWaiters(job);
+      } finally {
+        job.sabrStream = null;
+        if (!isSeekJob && activeJobs.get(jobKey) === job) {
+          activeJobs.delete(jobKey);
+        }
       }
+    })();
 
-      // Never persist truncated < 90% .webm files to permanent cache
-      if (!sabrCanPersistCache) {
-        throw new Error(
-          `Refusing to cache truncated SABR stream for ${videoId}: ${job.bytesWritten} < 90% of ${job.estimatedSize}`
-        );
-      }
-
-      await finalizePartFile(partPath, finalPath);
-      job.finalSize = job.bytesWritten;
-
-      const meta: CachedYoutubeStreamMeta = {
-        videoId,
-        mimeType: job.mimeType,
-        contentLength: job.finalSize,
-        durationSec: job.durationSec,
-        itag: job.itag,
-        ext: job.ext,
-        sourceClient: job.sourceClient,
-      };
-      await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf8');
-
-      job.done = true;
-      notifyWaiters(job);
-      void pruneCache(cacheDir);
-    } catch (err) {
-      if (fh) {
-        await fh.close().catch(() => {});
-        job.fileHandle = null;
-      }
-      await fsp.unlink(partPath).catch(() => {});
-      job.error = err instanceof Error ? err : new Error(String(err));
-      if (isSeekJob && activeSeekJobs.get(jobKey) === job) {
-        activeSeekJobs.delete(jobKey);
-      }
-      notifyWaiters(job);
-    } finally {
-      job.sabrStream = null;
-      if (!isSeekJob && activeJobs.get(jobKey) === job) {
-        activeJobs.delete(jobKey);
-      }
-    }
+    return job;
   })();
 
-  return job;
+  startingJobs.set(startKey, startPromise);
+  try {
+    return await startPromise;
+  } finally {
+    if (startingJobs.get(startKey) === startPromise) {
+      startingJobs.delete(startKey);
+    }
+  }
 }
 
 async function primeJob(job: ActiveStreamJob): Promise<void> {
@@ -1519,6 +1607,8 @@ async function ensureSeekJob(
   const jobKey = getJobKey(cacheDir, videoId);
   const existing = activeSeekJobs.get(jobKey);
   if (existing && !existing.error && !existing.aborted && existing.startMs === startMs) {
+    activeSeekJobs.delete(jobKey);
+    activeSeekJobs.set(jobKey, existing);
     await primeJob(existing);
     if (!existing.error && !existing.aborted) {
       return existing;
@@ -1569,16 +1659,18 @@ async function ensureActiveOrCached(
     return { type: 'active', job: existingJob };
   }
 
+  let sabrJob: ActiveStreamJob | null = null;
   try {
-    const sabrJob = await startSabrJob(videoId, cacheDir);
+    sabrJob = await startSabrJob(videoId, cacheDir);
     await primeJob(sabrJob);
     return { type: 'active', job: sabrJob };
   } catch (sabrErr) {
-    const failedJob = activeJobs.get(jobKey);
+    const failedJob = activeJobs.get(jobKey) || sabrJob;
     if (failedJob) {
-      failedJob.aborted = true;
-      await failedJob.sabrStream?.abort().catch(() => {});
-      activeJobs.delete(jobKey);
+      if (activeJobs.get(jobKey) === failedJob) {
+        activeJobs.delete(jobKey);
+      }
+      await abortAndCleanupJob(failedJob);
     }
 
     try {
@@ -2254,8 +2346,9 @@ function startProxyCacheJob(
       job.finalSize = job.bytesWritten;
       job.knownTotalSize = job.bytesWritten;
       job.done = true;
-      completedProxyMimes.set(proxyKey, contentType);
+      setCompletedProxyMime(proxyKey, contentType);
       notifyWaiters(job);
+      void pruneCache(cacheDir);
     } catch (err) {
       if (reader) {
         await reader.cancel().catch(() => {});
@@ -2677,6 +2770,7 @@ export async function destroyAllSabrStreams(): Promise<void> {
   activeSeekJobs.clear();
   activeProxyJobs.clear();
   activeSeekSeq.clear();
+  completedProxyMimes.clear();
 
   await Promise.all(jobs.map((job) => abortAndCleanupJob(job)));
 }

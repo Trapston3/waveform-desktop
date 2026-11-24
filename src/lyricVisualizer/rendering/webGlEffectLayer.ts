@@ -265,32 +265,94 @@ uniform vec3 u_bgMid;
 uniform vec3 u_accent1;
 uniform vec3 u_accent2;
 
-float hash21(vec2 p) {
+float sfHash21(vec2 p) {
   p = fract(p * vec2(234.34, 435.345));
   p += dot(p, p + 34.23);
   return fract(p.x * p.y);
 }
 
-void main() {
-  vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / max(1.0, min(u_res.x, u_res.y));
-  float speed = u_reduceMotion > 0.5 ? 0.04 : (0.28 + u_bass * 0.35 + u_beat * 0.15);
-  float t = u_time * speed;
+float sfNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(sfHash21(i), sfHash21(i + vec2(1.0, 0.0)), u.x),
+    mix(sfHash21(i + vec2(0.0, 1.0)), sfHash21(i + vec2(1.0, 1.0)), u.x),
+    u.y
+  );
+}
 
-  vec3 col = mix(u_bgDeep * 0.6, u_bgMid * 0.35, clamp(1.0 - length(uv), 0.0, 1.0));
+float sfFbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+  for (int i = 0; i < 4; i++) {
+    v += a * sfNoise(p);
+    p = rot * p * 2.03;
+    a *= 0.5;
+  }
+  return v;
+}
+
+void main() {
+  float minDim = max(1.0, min(u_res.x, u_res.y));
+  vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / minDim;
+  float drift = u_reduceMotion > 0.5 ? 0.0 : u_time * 0.012;
+
+  // Serene deep velvet midnight-blue/indigo sky respecting u_variation
+  vec3 midnightSky;
+  float nebulaLift;
+  if (u_variation < 0.5) {
+    // deep-space
+    midnightSky = mix(vec3(0.012, 0.018, 0.048), u_bgDeep * 0.72, 0.55);
+    nebulaLift = 0.20;
+  } else if (u_variation < 1.5) {
+    // nebula-run
+    midnightSky = mix(vec3(0.016, 0.021, 0.058), u_bgDeep * 0.78, 0.60);
+    nebulaLift = 0.38;
+  } else {
+    // retro-wireframe (deeper pitch-black)
+    midnightSky = mix(vec3(0.005, 0.006, 0.015), u_bgDeep * 0.24, 0.30);
+    nebulaLift = 0.08;
+  }
+
+  float horizonGrad = smoothstep(-0.75, 0.75, v_uv.y);
+  vec3 skyVelvet = mix(midnightSky * 0.82, mix(midnightSky, u_bgMid * 0.32, 0.35), 1.0 - horizonGrad * 0.65);
+
+  // Subtle diagonal Milky Way & album-art-tinted smooth FBM nebula veil
+  vec2 mwUv = mat2(0.848, -0.530, 0.530, 0.848) * uv;
+  float band = exp(-pow(mwUv.y * 2.15, 2.0));
+  float fbmBroad = sfFbm(mwUv * 2.1 + vec2(drift, -drift * 0.35));
+  float fbmDetail = sfFbm(mwUv * 4.4 - vec2(drift * 0.45, 0.0) + vec2(fbmBroad * 0.55));
+  float veil = band * smoothstep(0.24, 0.88, fbmBroad * 0.6 + fbmDetail * 0.4);
+  vec3 nebulaTint = mix(u_accent1, u_accent2, clamp(fbmDetail * 1.15, 0.0, 1.0));
+  vec3 col = skyVelvet + nebulaTint * (veil * nebulaLift * (0.88 + u_rms * 0.22));
+
+  // Crisp sub-pixel twinkling background stars (static positions, zero zooming circles, zero jitter)
+  vec2 starCoord = gl_FragCoord.xy / minDim;
   for (int layer = 0; layer < 3; layer++) {
     float fl = float(layer);
-    float depth = fract(fl * 0.333 + t * 0.25);
-    float scale = mix(14.0, 1.5, depth);
-    float fade = smoothstep(0.0, 0.25, depth) * smoothstep(1.0, 0.65, depth);
-    vec2 gv = fract(uv * scale + vec2(fl * 17.3, fl * 9.1)) - 0.5;
-    vec2 id = floor(uv * scale + vec2(fl * 17.3, fl * 9.1));
-    float n = hash21(id);
-    vec2 offset = (vec2(n, fract(n * 34.0)) - 0.5) * 0.7;
-    float d = length(gv - offset);
-    float star = smoothstep(0.055, 0.008, d) * fade;
-    vec3 starTint = mix(vec3(0.88, 0.93, 1.0), mix(u_accent1, u_accent2, fract(n * 19.0)), 0.45);
-    col += starTint * star * (0.7 + u_treble * 0.5);
+    float density = layer == 0 ? 44.0 : (layer == 1 ? 82.0 : 136.0);
+    vec2 cellUv = starCoord * density + vec2(fl * 29.7, fl * 17.3);
+    vec2 id = floor(cellUv);
+    vec2 gv = fract(cellUv) - 0.5;
+    float h1 = sfHash21(id);
+    if (h1 > 0.64) {
+      float h2 = sfHash21(id + vec2(11.3, 5.7));
+      vec2 offset = (vec2(h2, fract(h1 * 37.13)) - 0.5) * 0.76;
+      float d = length(gv - offset);
+      float pinpoint = exp(-d * d * 2600.0) * smoothstep(0.048, 0.004, d);
+      float twinkle = u_reduceMotion > 0.5
+        ? 0.88
+        : (0.58 + 0.42 * sin(u_time * (0.85 + h2 * 1.75) + h1 * 62.8318));
+      float mag = mix(0.35, 1.0, fract(h1 * 19.7)) * (1.0 - fl * 0.18);
+      vec3 starCol = h2 < 0.52
+        ? vec3(0.973, 0.980, 0.988)
+        : (h2 < 0.80 ? vec3(0.812, 0.894, 1.0) : vec3(1.0, 0.894, 0.710));
+      col += starCol * pinpoint * twinkle * mag * (0.78 + u_treble * 0.22);
+    }
   }
+
   outColor = vec4(col, clamp(u_bgOpacity, 0.2, 1.0));
 }
 `,
@@ -404,6 +466,7 @@ export class WebGlEffectLayer {
   private dpr = 1;
   private disposed = false;
   private readonly boundContextLost: (e: Event) => void;
+  private readonly boundContextRestored: () => void;
 
   // Pre-allocated RGB scratch buffers (zero per-frame heap allocations)
   private readonly rgbBgDeep = new Float32Array(3);
@@ -419,8 +482,12 @@ export class WebGlEffectLayer {
       }
       this.handleContextLost();
     };
+    this.boundContextRestored = () => {
+      this.handleContextRestored();
+    };
     if (typeof this.canvas.addEventListener === 'function') {
       this.canvas.addEventListener('webglcontextlost', this.boundContextLost);
+      this.canvas.addEventListener('webglcontextrestored', this.boundContextRestored);
     }
     this.initContext();
   }
@@ -441,8 +508,23 @@ export class WebGlEffectLayer {
     }
   }
 
+  private handleContextRestored(): void {
+    if (this.disposed) return;
+    this.programs.clear();
+    this.vao = null;
+    this.vbo = null;
+    this.initContext();
+    if (this.gl) {
+      this.gl.viewport(0, 0, Math.max(1, this.canvas.width), Math.max(1, this.canvas.height));
+    }
+  }
+
   get isWebGlActive(): boolean {
     return this.gl !== null && !this.disposed;
+  }
+
+  get isRenderable(): boolean {
+    return Boolean((this.gl || this.fallbackCtx) && !this.disposed);
   }
 
   private initContext(): void {
@@ -458,6 +540,7 @@ export class WebGlEffectLayer {
 
       if (gl && typeof gl.createShader === 'function') {
         this.gl = gl;
+        this.fallbackCtx = null;
         this.setupQuad(gl);
         return;
       }
@@ -767,6 +850,7 @@ export class WebGlEffectLayer {
     this.disposed = true;
     if (typeof this.canvas.removeEventListener === 'function') {
       this.canvas.removeEventListener('webglcontextlost', this.boundContextLost);
+      this.canvas.removeEventListener('webglcontextrestored', this.boundContextRestored);
     }
 
     if (this.gl) {

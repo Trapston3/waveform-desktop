@@ -8,6 +8,8 @@ files:
   - dist/**/*
   - "!dist/assets/data/**"
   - dist-electron/**/*
+  - native/waveform-core/*.node
+  - "!native/waveform-core/target/**"
   - build/icon.ico
   - build/icon.png
   - package.json
@@ -17,6 +19,7 @@ asarUnpack:
   - "dist/assets/*.woff2"
   - "dist/assets/*.woff"
   - "dist/assets/*.png"
+  - "native/waveform-core/*.node"
 extraResources:
   - from: src/assets/data
     to: assets/data

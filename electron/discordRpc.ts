@@ -360,8 +360,11 @@ export class DiscordRpcManager {
   private supportsStatusDisplayType = true;
   private lastError: string | null = null;
 
+  private static readonly RESOLVED_ART_CACHE_MAX = 200;
+
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectingPromise: Promise<boolean> | null = null;
+  private connectionGen = 0;
   private lastPlayback: DiscordPlaybackInput | null = null;
   private resolvedArtCache = new Map<string, string>();
   private artLookupInFlight = new Set<string>();
@@ -430,15 +433,32 @@ export class DiscordRpcManager {
 
     this.clearReconnectTimer();
     this.status = 'CONNECTING';
+    const gen = this.connectionGen;
 
-    this.connectingPromise = (async () => {
+    const connectTask = (async () => {
       const candidates = this.customPipePaths || getDiscordIpcPipePaths();
       for (const pipePath of candidates) {
-        if (this.disposed || !this.enabled) break;
-        const ok = await this.tryHandshakePipe(pipePath);
+        if (this.disposed || !this.enabled || gen !== this.connectionGen) break;
+        const ok = await this.tryHandshakePipe(pipePath, gen);
+        if (gen !== this.connectionGen || this.disposed || !this.enabled) {
+          if (ok && this.socket) {
+            const staleSock = this.socket;
+            this.socket = null;
+            this.activePipePath = null;
+            this.status = 'DISCONNECTED';
+            try {
+              if (!staleSock.destroyed) staleSock.destroy();
+            } catch {
+              // Ignore
+            }
+          }
+          break;
+        }
         if (ok) {
           this.lastError = null;
-          this.connectingPromise = null;
+          if (gen === this.connectionGen) {
+            this.connectingPromise = null;
+          }
           if (sendPendingOnReady && this.lastPlayback) {
             this.sendActivityNow(this.lastPlayback);
           }
@@ -446,17 +466,22 @@ export class DiscordRpcManager {
         }
       }
 
-      this.status = 'DISCONNECTED';
-      this.activePipePath = null;
-      this.connectingPromise = null;
-      this.scheduleReconnect();
+      if (gen === this.connectionGen) {
+        this.status = 'DISCONNECTED';
+        this.activePipePath = null;
+        this.connectingPromise = null;
+      }
+      if (gen === this.connectionGen && this.enabled && !this.disposed) {
+        this.scheduleReconnect();
+      }
       return false;
     })();
 
-    return this.connectingPromise;
+    this.connectingPromise = connectTask;
+    return connectTask;
   }
 
-  private tryHandshakePipe(pipePath: string): Promise<boolean> {
+  private tryHandshakePipe(pipePath: string, gen: number): Promise<boolean> {
     return new Promise((resolve) => {
       let settled = false;
       let sock: net.Socket;
@@ -510,7 +535,7 @@ export class DiscordRpcManager {
       timeoutHandle.unref?.();
 
       sock.once('connect', () => {
-        if (this.disposed || !this.enabled) {
+        if (this.disposed || !this.enabled || gen !== this.connectionGen) {
           finish(false, 'Disabled');
           return;
         }
@@ -600,17 +625,22 @@ export class DiscordRpcManager {
     this.activePipePath = null;
     this.readBuffer = Buffer.alloc(0);
     this.pendingSetActivity.clear();
+    try {
+      if (!sock.destroyed) sock.destroy();
+    } catch {
+      // Ignore destroy errors
+    }
     if (reason) this.lastError = reason;
     if (this.status !== 'DISCONNECTED') {
       this.status = 'DISCONNECTED';
     }
-    if (this.enabled && !this.disposed) {
+    if (this.enabled && !this.disposed && !this.connectingPromise) {
       this.scheduleReconnect();
     }
   }
 
   private scheduleReconnect(): void {
-    if (this.disposed || !this.enabled || this.reconnectTimer) return;
+    if (this.disposed || !this.enabled || this.reconnectTimer || this.connectingPromise) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.disposed && this.enabled && this.status === 'DISCONNECTED') {
@@ -627,6 +657,27 @@ export class DiscordRpcManager {
     }
   }
 
+  private getCachedResolvedArt(cacheKey: string): string | undefined {
+    const cached = this.resolvedArtCache.get(cacheKey);
+    if (cached !== undefined) {
+      this.resolvedArtCache.delete(cacheKey);
+      this.resolvedArtCache.set(cacheKey, cached);
+    }
+    return cached;
+  }
+
+  private setCachedResolvedArt(cacheKey: string, url: string): void {
+    if (this.resolvedArtCache.has(cacheKey)) {
+      this.resolvedArtCache.delete(cacheKey);
+    } else if (this.resolvedArtCache.size >= DiscordRpcManager.RESOLVED_ART_CACHE_MAX) {
+      const oldestKey = this.resolvedArtCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.resolvedArtCache.delete(oldestKey);
+      }
+    }
+    this.resolvedArtCache.set(cacheKey, url);
+  }
+
   public async update(input: DiscordPlaybackInput): Promise<boolean> {
     if (this.disposed) return false;
     this.lastPlayback = { ...input };
@@ -634,23 +685,26 @@ export class DiscordRpcManager {
 
     if (this.status !== 'CONNECTED' || !this.socket || this.socket.destroyed) {
       const ok = await this.connect(false);
-      if (!ok) return false;
+      if (!ok || !this.enabled || this.disposed || !this.lastPlayback) return false;
     }
 
-    const rawArt = (input.thumbnailUrl || input.artworkUrl || '').trim();
-    const cacheKey = `${(input.artist || '').toLowerCase()}|${(input.title || '').toLowerCase()}`;
-    const cachedArt = this.resolvedArtCache.get(cacheKey);
+    const current = this.lastPlayback;
+    if (!current) return false;
 
-    this.sendActivityNow(input, cachedArt);
+    const rawArt = (current.thumbnailUrl || current.artworkUrl || '').trim();
+    const cacheKey = `${(current.artist || '').toLowerCase()}|${(current.title || '').toLowerCase()}`;
+    const cachedArt = this.getCachedResolvedArt(cacheKey);
+
+    this.sendActivityNow(current, cachedArt);
 
     if (
       this.showAlbumArt &&
       !cachedArt &&
       this.userDataDir &&
-      input.title &&
-      (rawArt.startsWith('waveform-local://') || rawArt.startsWith('file://') || input.isLocal)
+      current.title &&
+      (rawArt.startsWith('waveform-local://') || rawArt.startsWith('file://') || current.isLocal)
     ) {
-      this.resolveLocalArtworkAsync(input, cacheKey);
+      this.resolveLocalArtworkAsync(current, cacheKey);
     }
 
     return this.status === 'CONNECTED';
@@ -675,7 +729,7 @@ export class DiscordRpcManager {
     )
       .then((url) => {
         if (url && url.startsWith('https://')) {
-          this.resolvedArtCache.set(cacheKey, url);
+          this.setCachedResolvedArt(cacheKey, url);
           const current = this.lastPlayback;
           if (
             current &&
@@ -757,6 +811,8 @@ export class DiscordRpcManager {
   }
 
   public disconnect(): void {
+    this.connectionGen++;
+    this.connectingPromise = null;
     this.clearReconnectTimer();
     const sock = this.socket;
     this.socket = null;

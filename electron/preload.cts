@@ -16,6 +16,8 @@ export interface ElectronAPI {
   setFullscreen: (flag: boolean) => Promise<boolean>;
   isFullscreen: () => Promise<boolean>;
   onFullscreenChange: (callback: (isFullscreen: boolean) => void) => () => void;
+  setTrayBehavior: (behavior: { minimizeToTray?: boolean; closeToTray?: boolean }) => Promise<void>;
+  onMediaCommand: (callback: (command: 'toggle-playback' | 'next-track' | 'prev-track') => void) => () => void;
   fetch: (url: string, options?: Record<string, any>) => Promise<ElectronFetchResult>;
   searchAutoEq: (query: string, limit?: number) => Promise<any[]>;
   findAutoEqProfile: (nameOrId: string) => Promise<any | null>;
@@ -81,6 +83,21 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('window-fullscreen-change', handler);
     return () => {
       ipcRenderer.removeListener('window-fullscreen-change', handler);
+    };
+  },
+  setTrayBehavior: (behavior: { minimizeToTray?: boolean; closeToTray?: boolean }) =>
+    ipcRenderer.invoke('ui:setTrayBehavior', behavior),
+  onMediaCommand: (callback: (command: 'toggle-playback' | 'next-track' | 'prev-track') => void) => {
+    const onToggle = () => callback('toggle-playback');
+    const onNext = () => callback('next-track');
+    const onPrev = () => callback('prev-track');
+    ipcRenderer.on('media-toggle-playback', onToggle);
+    ipcRenderer.on('media-next-track', onNext);
+    ipcRenderer.on('media-prev-track', onPrev);
+    return () => {
+      ipcRenderer.removeListener('media-toggle-playback', onToggle);
+      ipcRenderer.removeListener('media-next-track', onNext);
+      ipcRenderer.removeListener('media-prev-track', onPrev);
     };
   },
   fetch: (url: string, options?: Record<string, any>) =>

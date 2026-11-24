@@ -362,6 +362,45 @@ export function useAudioController() {
     };
   }, []);
 
+  // 3C. Tray playback commands & minimize/close-to-tray behavior sync
+  useEffect(() => {
+    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    const syncTrayBehavior = (settings: AppSettings) => {
+      void api?.setTrayBehavior?.({
+        minimizeToTray: Boolean(settings['ui.minimizeToTray']),
+        closeToTray: Boolean(settings['ui.closeToTray']),
+      });
+    };
+
+    syncTrayBehavior(useSettingsStore.getState().settings);
+
+    const unsubTraySettings = useSettingsStore.subscribe((state, prevState) => {
+      if (
+        state.settings['ui.minimizeToTray'] !== prevState?.settings?.['ui.minimizeToTray'] ||
+        state.settings['ui.closeToTray'] !== prevState?.settings?.['ui.closeToTray']
+      ) {
+        syncTrayBehavior(state.settings);
+      }
+    });
+
+    const unsubMediaCommand = api?.onMediaCommand?.((command: string) => {
+      if (command === 'toggle-playback') {
+        usePlayerStore.getState().togglePlay();
+      } else if (command === 'next-track') {
+        useQueueStore.getState().advanceQueue();
+      } else if (command === 'prev-track') {
+        useQueueStore.getState().previousTrack();
+      }
+    });
+
+    return () => {
+      unsubTraySettings();
+      if (typeof unsubMediaCommand === 'function') {
+        unsubMediaCommand();
+      }
+    };
+  }, []);
+
   // 4. Update navigator.mediaSession when currentTrack or playbackState changes
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const playbackState = usePlayerStore((s) => s.playbackState);

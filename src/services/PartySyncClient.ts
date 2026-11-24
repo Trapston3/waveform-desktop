@@ -310,18 +310,39 @@ export class MqttWsClient {
     this.closed = true;
     this.connected = false;
     this.stopKeepAlive();
+    const pendingConnack = this.pendingConnack;
     this.pendingConnack = null;
-    this.pendingSubacks.clear();
-    if (this.ws) {
+    if (pendingConnack) {
       try {
-        if (this.ws.readyState === 1) {
-          this.ws.send(new Uint8Array([0xe0, 0x00])); // DISCONNECT
+        pendingConnack(false);
+      } catch {
+        // Ignore
+      }
+    }
+    const pendingSubacks = Array.from(this.pendingSubacks.values());
+    this.pendingSubacks.clear();
+    for (const resolveSub of pendingSubacks) {
+      try {
+        resolveSub(false);
+      } catch {
+        // Ignore
+      }
+    }
+    if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try {
+        if (ws.readyState === 1) {
+          ws.send(new Uint8Array([0xe0, 0x00])); // DISCONNECT
         }
-        this.ws.close();
+        ws.close();
       } catch {
         // Ignore close error
       }
-      this.ws = null;
     }
     this.rxBuf = new Uint8Array(0);
   }
@@ -578,6 +599,7 @@ export class PartySyncClient {
       const url = this.buildWsUrl(partyCode, token, serverUrl, memberName);
 
       let settled = false;
+      let opened = false;
       const finish = (ok: boolean) => {
         if (settled) return;
         settled = true;
@@ -608,6 +630,7 @@ export class PartySyncClient {
         this.ws = ws;
 
         ws.onopen = () => {
+          opened = true;
           this.reconnectAttempt = 0;
           this.startClockSync();
           this.onStatusChanged?.('connected');
@@ -633,9 +656,8 @@ export class PartySyncClient {
           if (this.ws === ws) {
             this.ws = null;
           }
-          const hadOpened = settled;
           finish(false);
-          if (hadOpened && this.shouldReconnect && !this.manualDisconnect) {
+          if (opened && this.shouldReconnect && !this.manualDisconnect) {
             this.scheduleReconnect();
           } else if (!this.shouldReconnect || this.manualDisconnect) {
             this.onStatusChanged?.('disconnected');
@@ -1010,7 +1032,7 @@ let playerStoreUnsub: (() => void) | null = null;
 let driftCheckTimer: ReturnType<typeof setInterval> | null = null;
 let lastPublishedTrackId: string | null = null;
 let lastPublishedPlayState: string | null = null;
-let isApplyingRemotePlayback = false;
+let remoteApplyDepth = 0;
 
 function getElectronApi(): any {
   return typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
@@ -1062,6 +1084,7 @@ class InternetPartyCoordinator {
   private queue: PartyQueue = { tracks: [], currentIndex: 0 };
   private welcomeResolver: ((ok: boolean) => void) | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private reconnecting = false;
   private disposed = false;
 
   constructor(
@@ -1106,7 +1129,10 @@ class InternetPartyCoordinator {
         break;
       }
     }
-    if (!mqttConnected || this.disposed) return false;
+    if (!mqttConnected || this.disposed) {
+      this.stop();
+      return false;
+    }
 
     this.mqtt.setOnMessage((topic, payloadText) => {
       this.handleMqttMessage(topic, payloadText);
@@ -1119,7 +1145,10 @@ class InternetPartyCoordinator {
     });
 
     const subOk = await this.mqtt.subscribe(`${this.topicPrefix}/#`, 4000);
-    if (!subOk || this.disposed) return false;
+    if (!subOk || this.disposed) {
+      this.stop();
+      return false;
+    }
 
     this.client.attachInternetPeers(this.mqtt, this.roomHash, this.peers, this.channels);
     this.client.setInternetSendHook((frame) => this.sendOutboundFrame(frame));
@@ -1146,7 +1175,6 @@ class InternetPartyCoordinator {
     // Guest: send join_request and wait for host welcome (with 1 retry)
     usePartyStore.setState({ status: 'syncing' });
     const welcomed = await new Promise<boolean>((resolve) => {
-      this.welcomeResolver = resolve;
       const sendJoin = () => {
         this.mqtt.publish(`${this.topicPrefix}/control`, {
           type: 'join_request',
@@ -1156,19 +1184,20 @@ class InternetPartyCoordinator {
       };
       sendJoin();
       const retry = setTimeout(sendJoin, 1500);
-      const timeout = setTimeout(() => {
-        clearTimeout(retry);
-        if (this.welcomeResolver === resolve) {
-          this.welcomeResolver = null;
-          resolve(false);
-        }
-      }, 5000);
-      const origResolve = resolve;
-      this.welcomeResolver = (ok: boolean) => {
+      const wrapped = (ok: boolean) => {
         clearTimeout(retry);
         clearTimeout(timeout);
-        origResolve(ok);
+        if (this.welcomeResolver === wrapped) {
+          this.welcomeResolver = null;
+        }
+        resolve(ok);
       };
+      const timeout = setTimeout(() => {
+        if (this.welcomeResolver === wrapped) {
+          wrapped(false);
+        }
+      }, 5000);
+      this.welcomeResolver = wrapped;
     });
 
     if (!welcomed || this.disposed) {
@@ -1179,37 +1208,59 @@ class InternetPartyCoordinator {
   }
 
   private async reconnectMqtt(): Promise<void> {
-    for (let attempt = 0; attempt < 5 && !this.disposed; attempt++) {
-      const delay = Math.min(15000, 1000 * Math.pow(2, attempt));
-      await new Promise((r) => setTimeout(r, delay));
-      if (this.disposed) return;
-      for (const broker of MQTT_BROKERS) {
+    if (this.reconnecting || this.disposed) return;
+    this.reconnecting = true;
+    try {
+      for (let attempt = 0; attempt < 5 && !this.disposed; attempt++) {
+        const delay = Math.min(15000, 1000 * Math.pow(2, attempt));
+        await new Promise((r) => setTimeout(r, delay));
         if (this.disposed) return;
-        const ok = await this.mqtt.connect(broker, `wf_${this.memberId.slice(-16)}`, 5000);
-        if (ok) {
-          await this.mqtt.subscribe(`${this.topicPrefix}/#`, 4000);
-          usePartyStore.setState({ status: 'connected' });
-          if (!this.isHost) {
-            this.mqtt.publish(`${this.topicPrefix}/control`, {
-              type: 'join_request',
-              member: { id: this.memberId, name: this.nickname },
-              clientMs: Date.now(),
-            });
+        for (const broker of MQTT_BROKERS) {
+          if (this.disposed) return;
+          const ok = await this.mqtt.connect(broker, `wf_${this.memberId.slice(-16)}`, 5000);
+          if (this.disposed) return;
+          if (ok) {
+            const subOk = await this.mqtt.subscribe(`${this.topicPrefix}/#`, 4000);
+            if (!subOk || this.disposed) {
+              this.mqtt.disconnect();
+              continue;
+            }
+            usePartyStore.setState({ status: 'connected' });
+            if (!this.isHost) {
+              this.mqtt.publish(`${this.topicPrefix}/control`, {
+                type: 'join_request',
+                member: { id: this.memberId, name: this.nickname },
+                clientMs: Date.now(),
+              });
+            }
+            return;
           }
-          return;
         }
       }
-    }
-    if (!this.disposed) {
-      usePartyStore.setState({ status: 'disconnected', error: 'Internet relay connection lost' });
+      if (!this.disposed) {
+        usePartyStore.setState({ status: 'disconnected', error: 'Internet relay connection lost' });
+      }
+    } finally {
+      this.reconnecting = false;
     }
   }
 
   public stop(): void {
     this.disposed = true;
+    if (this.welcomeResolver) {
+      const resolveWelcome = this.welcomeResolver;
+      this.welcomeResolver = null;
+      resolveWelcome(false);
+    }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+    for (const peerId of Array.from(this.peers.keys())) {
+      this.cleanupPeer(peerId);
+    }
+    for (const peerId of Array.from(this.channels.keys())) {
+      this.cleanupPeer(peerId);
     }
     for (const t of this.iceFallbackTimers.values()) clearTimeout(t);
     this.iceFallbackTimers.clear();
@@ -1543,7 +1594,15 @@ class InternetPartyCoordinator {
       };
 
       const offer = await pc.createOffer();
+      if (this.disposed) {
+        this.cleanupPeer(guestId);
+        return;
+      }
       await pc.setLocalDescription(offer);
+      if (this.disposed) {
+        this.cleanupPeer(guestId);
+        return;
+      }
       this.mqtt.publish(`${this.topicPrefix}/rtc/${guestId}`, {
         type: 'rtc_offer',
         fromId: this.memberId,
@@ -1555,7 +1614,7 @@ class InternetPartyCoordinator {
   }
 
   private async handleRtcSignal(msg: any): Promise<void> {
-    if (typeof RTCPeerConnection === 'undefined' || !msg.fromId) return;
+    if (this.disposed || typeof RTCPeerConnection === 'undefined' || !msg.fromId) return;
     const peerId = String(msg.fromId);
 
     try {
@@ -1587,8 +1646,20 @@ class InternetPartyCoordinator {
         };
 
         await pc.setRemoteDescription(msg.sdp);
+        if (this.disposed) {
+          this.cleanupPeer(peerId);
+          return;
+        }
         const answer = await pc.createAnswer();
+        if (this.disposed) {
+          this.cleanupPeer(peerId);
+          return;
+        }
         await pc.setLocalDescription(answer);
+        if (this.disposed) {
+          this.cleanupPeer(peerId);
+          return;
+        }
         this.mqtt.publish(`${this.topicPrefix}/rtc/${peerId}`, {
           type: 'rtc_answer',
           fromId: this.memberId,
@@ -1598,11 +1669,19 @@ class InternetPartyCoordinator {
         const pc = this.peers.get(peerId);
         if (pc) {
           await pc.setRemoteDescription(msg.sdp);
+          if (this.disposed) {
+            this.cleanupPeer(peerId);
+            return;
+          }
         }
       } else if (msg.type === 'rtc_ice' && msg.candidate) {
         const pc = this.peers.get(peerId);
         if (pc) {
           await pc.addIceCandidate(msg.candidate);
+          if (this.disposed) {
+            this.cleanupPeer(peerId);
+            return;
+          }
         }
       }
     } catch {
@@ -1694,7 +1773,7 @@ async function attachPlayerStoreSync(client: PartySyncClient): Promise<void> {
     lastPublishedPlayState = initialState.playbackState;
 
     playerStoreUnsub = usePlayerStore.subscribe((state, prevState) => {
-      if (isApplyingRemotePlayback) return;
+      if (remoteApplyDepth > 0) return;
       const party = usePartyStore.getState();
       if (party.status !== 'connected' && party.status !== 'syncing') return;
       if (party.controlMode === 'host-only' && !party.isHost) return;
@@ -1812,11 +1891,13 @@ function createClientWithStoreBindings(): PartySyncClient {
             },
       }));
 
+      let applied = false;
       try {
         const { usePlayerStore } = await import('../state/playerStore');
         const pState = usePlayerStore.getState();
         if (pState.currentTrack?.videoId === track.videoId) return;
-        isApplyingRemotePlayback = true;
+        remoteApplyDepth++;
+        applied = true;
         lastPublishedTrackId = track.videoId;
         await pState.loadTrack(
           {
@@ -1843,7 +1924,9 @@ function createClientWithStoreBindings(): PartySyncClient {
       } catch {
         // Ignore in headless tests
       } finally {
-        isApplyingRemotePlayback = false;
+        if (applied) {
+          remoteApplyDepth = Math.max(0, remoteApplyDepth - 1);
+        }
       }
     },
     onPlayStateChange: async (isPlaying) => {
@@ -1852,10 +1935,12 @@ function createClientWithStoreBindings(): PartySyncClient {
         clockOffsetMs: client.getClockOffsetMs(),
         isClockSynced: client.getIsClockSynced(),
       }));
+      let applied = false;
       try {
         const { usePlayerStore } = await import('../state/playerStore');
         const pState = usePlayerStore.getState();
-        isApplyingRemotePlayback = true;
+        remoteApplyDepth++;
+        applied = true;
         lastPublishedPlayState = isPlaying ? 'PLAYING' : 'PAUSED';
         if (isPlaying && pState.playbackState !== 'PLAYING') {
           pState.play();
@@ -1865,7 +1950,9 @@ function createClientWithStoreBindings(): PartySyncClient {
       } catch {
         // Ignore
       } finally {
-        isApplyingRemotePlayback = false;
+        if (applied) {
+          remoteApplyDepth = Math.max(0, remoteApplyDepth - 1);
+        }
       }
     },
     onSeek: async (targetMs) => {
@@ -1874,14 +1961,18 @@ function createClientWithStoreBindings(): PartySyncClient {
         clockOffsetMs: client.getClockOffsetMs(),
         isClockSynced: client.getIsClockSynced(),
       }));
+      let applied = false;
       try {
         const { usePlayerStore } = await import('../state/playerStore');
-        isApplyingRemotePlayback = true;
+        remoteApplyDepth++;
+        applied = true;
         usePlayerStore.getState().seek(targetMs);
       } catch {
         // Ignore
       } finally {
-        isApplyingRemotePlayback = false;
+        if (applied) {
+          remoteApplyDepth = Math.max(0, remoteApplyDepth - 1);
+        }
       }
     },
   });
@@ -1999,6 +2090,8 @@ export const usePartyStore = create<PartyStore>((set, get) => ({
         memberName: nickname,
       });
       if (!ok) {
+        client.disconnect();
+        if (sharedSyncClient === client) sharedSyncClient = null;
         await api.partyStopLanHost?.();
         set({
           status: 'disconnected',
@@ -2011,6 +2104,8 @@ export const usePartyStore = create<PartyStore>((set, get) => ({
       }
     } else {
       if (!relayUrl || !/^wss?:\/\//i.test(relayUrl)) {
+        client.disconnect();
+        if (sharedSyncClient === client) sharedSyncClient = null;
         set({
           status: 'disconnected',
           partyCode: '',
@@ -2024,6 +2119,8 @@ export const usePartyStore = create<PartyStore>((set, get) => ({
         memberName: nickname,
       });
       if (!ok) {
+        client.disconnect();
+        if (sharedSyncClient === client) sharedSyncClient = null;
         set({
           status: 'disconnected',
           partyCode: '',
@@ -2137,6 +2234,8 @@ export const usePartyStore = create<PartyStore>((set, get) => ({
         memberName: nickname,
       });
       if (!ok) {
+        client.disconnect();
+        if (sharedSyncClient === client) sharedSyncClient = null;
         set({
           status: 'disconnected',
           partyCode: '',

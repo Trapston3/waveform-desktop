@@ -18,7 +18,7 @@ import {
 } from '../core/models';
 import { ensurePaletteContrast } from '../core/oklchPalette';
 import { LyricsMeasurer } from './lyricsMeasurer';
-import { setShip3DSceneHint, Ship3DScene } from './ship3dScene';
+import { setActiveShip3DScene, setShip3DSceneHint, Ship3DScene } from './ship3dScene';
 import { mapLegacyStyleId, StyleRegistry } from './styleRegistry';
 import { WebGlEffectLayer, type WebGlEffectParams } from './webGlEffectLayer';
 
@@ -898,6 +898,15 @@ export class LyricStageRenderer {
         this.frameContext.backgroundOpacity,
         this.frameContext.vignetteStrength
       );
+      this.ship3dScene.syncLyricsState(
+        this.frameContext.lyrics,
+        this.frameContext.timeSeconds,
+        this.frameContext.activeLineIndex,
+        this.frameContext.activeWordIndex,
+        this.frameContext.isInstrumentalGap,
+        this.frameContext.didSeekThisFrame
+      );
+      setActiveShip3DScene(this.ship3dScene);
       const focalCenterX =
         this.currentContentInsetLeft > 2
           ? this.currentContentInsetLeft + Math.max(220, this.width - this.currentContentInsetLeft) * 0.5

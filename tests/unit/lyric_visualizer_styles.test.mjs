@@ -1261,4 +1261,165 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
 
     renderer.dispose();
   });
+
+  test('Ship3DScene maintains zero asteroid-to-asteroid collisions across 120 frames and unifies Retro Wireframe hidden-line rendering', async () => {
+    const { Ship3DScene } = await import('../../src/lyricVisualizer/rendering/ship3dScene.ts');
+    const canvas = createMockCanvas();
+    const scene = new Ship3DScene(null);
+    const audio = {
+      rmsLevel: 0.45,
+      bassEnergy: 0.6,
+      midEnergy: 0.4,
+      trebleEnergy: 0.35,
+      beatDetected: true,
+      beatStrength: 0.85,
+      estimatedBpm: 128,
+    };
+
+    for (const variationId of ['deep-space', 'nebula-run', 'retro-wireframe']) {
+      scene.reset();
+      for (let f = 0; f < 40; f++) {
+        scene.render(
+          canvas.ctx2d,
+          1280,
+          720,
+          f * 0.05,
+          0.05,
+          audio,
+          SAMPLE_PALETTE,
+          false,
+          false,
+          variationId,
+          0.95,
+          640,
+          false
+        );
+        const minClearance = scene.getMinAsteroidClearance();
+        assert.ok(
+          minClearance >= 0.4,
+          `Expected positive pairwise asteroid clearance in ${variationId} at frame ${f}, got ${minClearance}`
+        );
+      }
+    }
+
+    const shipSrc = readFileSync(
+      path.join(rootDir, 'src/lyricVisualizer/rendering/ship3dScene.ts'),
+      'utf8'
+    );
+    assert.ok(
+      shipSrc.includes('hiddenLineFillMat') && shipSrc.includes('polygonOffset: true'),
+      'Retro Wireframe must use hiddenLineFillMat with polygonOffset occlusion'
+    );
+    assert.ok(
+      shipSrc.includes('createInfiniteHorizonGridMaterial') && shipSrc.includes('smoothstep('),
+      'Retro Wireframe must use seamless fog-faded infinite horizon grid shader'
+    );
+    scene.dispose();
+  });
+
+  test('StarfieldShip3D collects 3D Lyric Gates on beat, triggers semantic effects, resets on seek, and enters Asteroid Gauntlet on instrumental gaps', async () => {
+    const { getActiveShip3DScene } = await import('../../src/lyricVisualizer/rendering/ship3dScene.ts');
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'StarfieldShip3D',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: false,
+    });
+    renderer.resize(1280, 720, 1);
+
+    const arcadeLyrics = {
+      providerName: 'Arcade Test',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 1.0,
+          endSeconds: 4.5,
+          text: 'Fire rainbow ice slow glitch',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Fire', startSeconds: 1.0, endSeconds: 1.6 },
+            { text: 'rainbow', startSeconds: 1.6, endSeconds: 2.3 },
+            { text: 'ice', startSeconds: 2.3, endSeconds: 3.0 },
+            { text: 'slow', startSeconds: 3.0, endSeconds: 3.7 },
+            { text: 'glitch', startSeconds: 3.7, endSeconds: 4.5 },
+          ],
+        },
+      ],
+    };
+    renderer.setLyrics(arcadeLyrics);
+
+    // Lookahead spawns upcoming 3D Lyric Gates before t=1.0
+    renderer.setSyncState({ timeSeconds: 0.4, activeLineIndex: 0, activeWordIndex: 0, wordProgress: 0 });
+    renderer.renderFrame(1000);
+    const scene = getActiveShip3DScene();
+    assert.ok(scene, 'Expected active Ship3DScene');
+    assert.ok(scene.getProjectedWordGateCount() >= 3, 'Expected upcoming Lyric Gates within 2.8s lookahead');
+
+    // Collect words across 1.0 -> 3.8s and verify score, combo, and semantic triggers
+    const wordSteps = [
+      { t: 1.02, w: 0 },
+      { t: 1.62, w: 1 },
+      { t: 2.32, w: 2 },
+      { t: 3.02, w: 3 },
+      { t: 3.72, w: 4 },
+    ];
+    for (let i = 0; i < wordSteps.length; i++) {
+      canvas.ctx2d.ops.length = 0;
+      renderer.setSyncState({
+        timeSeconds: wordSteps[i].t,
+        activeLineIndex: 0,
+        activeWordIndex: wordSteps[i].w,
+        wordProgress: 0.1,
+      });
+      renderer.renderFrame(1050 + i * 32);
+    }
+
+    const telemetry = scene.getHudTelemetry();
+    assert.ok(telemetry.score >= 500, `Expected score >= 500 after collecting 5 words, got ${telemetry.score}`);
+    assert.equal(telemetry.combo, 5, 'Expected combo x5 after 5 collected words');
+    assert.equal(telemetry.rainbowActive, true, 'Expected rainbow semantic timer active');
+    assert.ok(telemetry.icePulse > 0, 'Expected cryo ice semantic pulse active');
+    assert.equal(telemetry.bulletTimeActive, true, 'Expected slow bullet-time semantic timer active');
+    assert.ok(telemetry.glitchPulse > 0, 'Expected glitch semantic pulse active');
+
+    const hudTexts = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+      .map((op) => String(op[1]));
+    assert.ok(
+      hudTexts.some((t) => t.includes('SCORE ') && t.includes('COMBO x5')),
+      'Expected arcade SCORE and COMBO x5 in HUD header'
+    );
+
+    // Seek reset clears transient semantic timers cleanly
+    scene.syncLyricsState(arcadeLyrics, 0.2, 0, 0, false, true);
+    const resetTel = scene.getHudTelemetry();
+    assert.equal(resetTel.bulletTimeActive, false, 'Seek must reset bulletTimeActive');
+    assert.equal(resetTel.rainbowActive, false, 'Seek must reset rainbowActive');
+
+    // Instrumental gap activates AUTOPILOT // ASTEROID GAUNTLET
+    canvas.ctx2d.ops.length = 0;
+    renderer.setSyncState({
+      timeSeconds: 6.0,
+      activeLineIndex: -1,
+      activeWordIndex: -1,
+      wordProgress: 0,
+      isInstrumentalGap: true,
+      gapProgress: 0.5,
+      timeUntilNextLine: 4.0,
+      hasLyrics: true,
+      lastActiveLineIndex: 0,
+      nextLineIndex: -1,
+    });
+    renderer.renderFrame(1300);
+    const gapTexts = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && op[0] === 'fillText')
+      .map((op) => String(op[1]));
+    assert.ok(
+      gapTexts.some((t) => t.includes('AUTOPILOT // ASTEROID GAUNTLET')),
+      'Expected AUTOPILOT // ASTEROID GAUNTLET badge during instrumental gap'
+    );
+
+    renderer.dispose();
+  });
 });

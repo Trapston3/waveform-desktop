@@ -16,7 +16,7 @@ import {
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
-import { setShip3DSceneHint } from '../ship3dScene';
+import { getActiveShip3DScene, setShip3DSceneHint, type Ship3DHudTelemetry } from '../ship3dScene';
 
 export class StarfieldShip3DStyle implements ILyricVisualStyle {
   readonly id = 'StarfieldShip3D' as const;
@@ -30,7 +30,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'nebula-run') return 1;
-    if (variationId === 'retro-wireframe') return 2;
+    if (variationId === 'retro-wireframe' || variationId === 'retro-vector-wireframe') return 2;
     return 0;
   }
 
@@ -125,7 +125,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     ctx.textBaseline = 'top';
     ctx.fillStyle = frame.palette.textActive;
     ctx.globalAlpha = motion === 0 ? 0.84 : 0.72 + 0.28 * Math.sin(t * 3.0);
-    ctx.fillText(`SIGNAL // INSTRUMENTAL${countdown}`, cx, labelY);
+    ctx.fillText(`SIGNAL // INSTRUMENTAL${countdown}  •  AUTOPILOT // ASTEROID GAUNTLET`, cx, labelY);
 
     const progress =
       typeof frame.gapProgress === 'number' && Number.isFinite(frame.gapProgress)
@@ -186,6 +186,37 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       (bpmVal / 120) *
       (1 + frame.audio.bassEnergy * 2.4 + ((frame.audio.beatStrength ?? 0) > 0.72 ? 0.8 : 0))
     ).toFixed(2);
+    const activeScene = getActiveShip3DScene();
+    const telemetry: Ship3DHudTelemetry | null = activeScene ? activeScene.getHudTelemetry() : null;
+    const scoreStr = String(telemetry ? telemetry.score : 0).padStart(6, '0');
+    const comboVal = telemetry ? telemetry.combo : 0;
+    const wordPop = telemetry && !frame.reduceMotion ? telemetry.wordPop : 0;
+    const icePulse = telemetry ? telemetry.icePulse : 0;
+    const chromaPulse = telemetry && !frame.reduceMotion ? Math.max(telemetry.chromaticPulse, telemetry.glitchPulse) : 0;
+
+    // Draw floating 3D Lyric Gate word tags in the lower 3D flight corridor (below HUD brackets)
+    if (activeScene && !isTransparent) {
+      const gateCount = activeScene.getProjectedWordGateCount();
+      if (gateCount > 0) {
+        ctx.save();
+        ctx.font = `700 11px "JetBrains Mono", monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const minTagY = hudY + hudH + 14;
+        for (let g = gateCount - 1; g >= 0; g--) {
+          const gp = activeScene.getProjectedWordGate(g);
+          if (!gp.text || gp.alpha <= 0.05) continue;
+          if (gp.screenY < minTagY || gp.screenY > height - 24) continue;
+          if (gp.screenX < focal.left + 32 || gp.screenX > focal.left + focalWidth - 32) continue;
+          ctx.globalAlpha = gp.alpha * (gp.isActive ? 0.95 : 0.65);
+          ctx.fillStyle = gp.isActive ? '#ffffff' : frame.palette.accentPrimary;
+          ctx.shadowColor = frame.palette.accentPrimary;
+          ctx.shadowBlur = gp.isActive ? 10 : 4;
+          ctx.fillText(gp.text.toUpperCase(), gp.screenX, gp.screenY);
+        }
+        ctx.restore();
+      }
+    }
 
     ctx.save();
     // WS2: no full-height focal.left clip; translate smoothly into focal stage
@@ -202,8 +233,8 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       ctx.restore();
     }
 
-    ctx.strokeStyle = frame.palette.accentPrimary;
-    ctx.globalAlpha = isTransparent ? 0.36 : 0.58;
+    ctx.strokeStyle = icePulse > 0.1 ? '#7dd3fc' : frame.palette.accentPrimary;
+    ctx.globalAlpha = isTransparent ? 0.36 : 0.58 + (telemetry ? telemetry.collectFlash * 0.25 : 0);
     ctx.lineWidth = varIdx === 2 ? 2.0 : 1.6;
     ctx.beginPath();
     // Top-left bracket
@@ -232,15 +263,15 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.fillStyle = frame.palette.accentSecondary;
-      ctx.globalAlpha = 0.78;
+      ctx.globalAlpha = 0.84;
       ctx.fillText(
-        `HUD [${modeTag}] // WARP ${warpVal}C // ${bpmVal} BPM`,
+        `HUD [${modeTag}] // SCORE ${scoreStr} // COMBO x${comboVal}`,
         hudX + 14,
         hudY + 10
       );
       ctx.textAlign = 'right';
       ctx.fillText(
-        `NAV:AUTO-WEAVE  T+${formatTimestamp(frame.timeSeconds)}`,
+        `NAV:AUTO-WEAVE  WARP ${warpVal}C • ${bpmVal} BPM`,
         hudX + hudW - 14,
         hudY + 10
       );
@@ -253,6 +284,25 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       ctx.moveTo(hudX + 14, hudY + 34);
       ctx.lineTo(hudX + hudW - 14, hudY + 34);
       ctx.stroke();
+
+      // Micro-toast below HUD bottom bracket (never collides with lyrics or top header)
+      if (telemetry && telemetry.toastAlpha > 0.05 && telemetry.toastText) {
+        ctx.save();
+        ctx.font = `700 11px "JetBrains Mono", monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.globalAlpha = Math.min(1, telemetry.toastAlpha);
+        ctx.fillStyle =
+          telemetry.toastColorKind === 'gold'
+            ? '#fbbf24'
+            : telemetry.toastColorKind === 'danger'
+            ? '#fb7185'
+            : telemetry.toastColorKind === 'ice'
+            ? '#7dd3fc'
+            : frame.palette.accentPrimary;
+        ctx.fillText(telemetry.toastText, hudX + hudW * 0.5, hudY + hudH + 8);
+        ctx.restore();
+      }
     }
 
     const manualScroll =
@@ -390,8 +440,30 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
             ? frame.palette.textActive
             : frame.palette.textUpcoming;
           ctx.shadowColor = isCurrent ? frame.palette.accentPrimary : frame.palette.accentSecondary;
-          ctx.shadowBlur = isCurrent ? 20 + frame.audio.bassEnergy * 12 : isPast ? 8 : 0;
-          ctx.fillText(word.text, wx, wy);
+          ctx.shadowBlur = isCurrent ? 20 + frame.audio.bassEnergy * 12 + wordPop * 10 : isPast ? 8 : 0;
+
+          if (isCurrent && (wordPop > 0.04 || chromaPulse > 0.15)) {
+            const popScale = 1.0 + wordPop * 0.18;
+            const halfW = word.width * 0.5;
+            const halfH = fontSize * 0.5;
+            ctx.save();
+            ctx.translate(wx + halfW, wy + halfH);
+            ctx.scale(popScale, popScale);
+            if (chromaPulse > 0.15) {
+              const split = chromaPulse * 2.5;
+              ctx.globalAlpha *= 0.65;
+              ctx.fillStyle = '#ff2e63';
+              ctx.fillText(word.text, -halfW - split, -halfH);
+              ctx.fillStyle = '#00f5d4';
+              ctx.fillText(word.text, -halfW + split, -halfH);
+              ctx.globalAlpha = frame.lineFadeAlpha;
+              ctx.fillStyle = '#ffffff';
+            }
+            ctx.fillText(word.text, -halfW, -halfH);
+            ctx.restore();
+          } else {
+            ctx.fillText(word.text, wx, wy);
+          }
         }
 
         // Secondary translation / original subtitle line inside HUD interior

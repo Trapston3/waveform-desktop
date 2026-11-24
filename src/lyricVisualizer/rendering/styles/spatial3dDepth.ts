@@ -7,6 +7,7 @@
 // non-overlapping vertical lane positions walking outward from the focal line upward & downward.
 
 import type { StyleFrameContext } from '../../core/models';
+import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
 import {
   clamp01,
   drawEmptyState,
@@ -210,29 +211,57 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
       return;
     }
 
+    const isLineBlank = (idx: number): boolean =>
+      idx < 0 ||
+      idx >= layout.lines.length ||
+      isBlankOrInstrumentalLineText(frame.lyrics?.lines[idx]?.text ?? layout.lines[idx].text);
+
+    let firstNonBlankIdx = -1;
+    for (let i = 0; i < layout.lines.length; i++) {
+      if (!isLineBlank(i)) {
+        firstNonBlankIdx = i;
+        break;
+      }
+    }
+    if (firstNonBlankIdx < 0) {
+      drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
+      return;
+    }
+
+    const activeLineIsBlank =
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      isLineBlank(frame.activeLineIndex);
     const hasActiveLine =
-      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      !activeLineIsBlank;
     if (hasActiveLine) {
       this.lastKnownActiveIdx = frame.activeLineIndex;
     }
     const fallbackIdx =
-      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+      typeof frame.lastActiveLineIndex === 'number' &&
+      frame.lastActiveLineIndex >= 0 &&
+      !isLineBlank(frame.lastActiveLineIndex)
         ? frame.lastActiveLineIndex
-        : this.lastKnownActiveIdx >= 0
+        : this.lastKnownActiveIdx >= 0 && !isLineBlank(this.lastKnownActiveIdx)
         ? this.lastKnownActiveIdx
-        : 0;
-    const scrollIdx = Math.max(
+        : firstNonBlankIdx;
+    let scrollIdx = Math.max(
       0,
       Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
     );
+    while (scrollIdx > 0 && isLineBlank(scrollIdx)) scrollIdx--;
+    if (isLineBlank(scrollIdx)) scrollIdx = firstNonBlankIdx;
     const manualScroll =
       typeof frame.manualScrollY === 'number' && Number.isFinite(frame.manualScrollY)
         ? frame.manualScrollY
         : 0;
     const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
 
+    const showInstrumental = Boolean(frame.isInstrumentalGap || activeLineIsBlank);
     const targetPlaneFloat =
-      frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+      showInstrumental && !isBrowsing && !hasActiveLine
         ? Math.min(layout.lines.length - 1, scrollIdx + 0.5)
         : scrollIdx;
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
@@ -336,6 +365,7 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
       const slot = this.drawOrder[k];
       const i = startPlane + slot;
       const line = layout.lines[i];
+      if (isLineBlank(i)) continue;
       const persp = this.lanePersp[slot];
       const planeY = this.laneY[slot];
       const depthDist = Math.abs(this.laneRel[slot]);
@@ -477,7 +507,7 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
 
     ctx.restore();
 
-    if (frame.isInstrumentalGap && !isBrowsing) {
+    if (showInstrumental && !isBrowsing) {
       drawInstrumentalIndicator(ctx, frame, width, height, frame.palette.accentPrimary);
     }
   }

@@ -5,6 +5,7 @@
 //  2: 'trinitron-rgb'       - true opaque #050709 Trinitron glass, aperture-grille RGB chromatic subpixel shift
 
 import type { StyleFrameContext } from '../../core/models';
+import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
 import {
   clamp01,
   drawEmptyState,
@@ -132,21 +133,48 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
       return;
     }
 
+    const isLineBlank = (idx: number): boolean =>
+      idx < 0 ||
+      idx >= layout.lines.length ||
+      isBlankOrInstrumentalLineText(frame.lyrics?.lines[idx]?.text ?? layout.lines[idx].text);
+
+    let firstNonBlankIdx = -1;
+    for (let i = 0; i < layout.lines.length; i++) {
+      if (!isLineBlank(i)) {
+        firstNonBlankIdx = i;
+        break;
+      }
+    }
+    if (firstNonBlankIdx < 0) {
+      drawInstrumentalIndicator(ctx, frame, width, height, phosphor);
+      return;
+    }
+
+    const activeLineIsBlank =
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      isLineBlank(frame.activeLineIndex);
     const hasActiveLine =
-      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      !activeLineIsBlank;
     if (hasActiveLine) {
       this.lastKnownActiveIdx = frame.activeLineIndex;
     }
     const fallbackIdx =
-      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+      typeof frame.lastActiveLineIndex === 'number' &&
+      frame.lastActiveLineIndex >= 0 &&
+      !isLineBlank(frame.lastActiveLineIndex)
         ? frame.lastActiveLineIndex
-        : this.lastKnownActiveIdx >= 0
+        : this.lastKnownActiveIdx >= 0 && !isLineBlank(this.lastKnownActiveIdx)
         ? this.lastKnownActiveIdx
-        : 0;
-    const scrollIdx = Math.max(
+        : firstNonBlankIdx;
+    let scrollIdx = Math.max(
       0,
       Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
     );
+    while (scrollIdx > 0 && isLineBlank(scrollIdx)) scrollIdx--;
+    if (isLineBlank(scrollIdx)) scrollIdx = firstNonBlankIdx;
     const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
@@ -203,11 +231,13 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
       );
     }
 
+    const showInstrumental = Boolean(frame.isInstrumentalGap || activeLineIsBlank);
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
+      if (isLineBlank(i)) continue;
       const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
       const gapOffset =
-        frame.isInstrumentalGap && !isBrowsing && !hasActiveLine
+        showInstrumental && !isBrowsing && !hasActiveLine
           ? i <= scrollIdx
             ? -58
             : 58
@@ -318,7 +348,7 @@ export class CRTScanlineStyle implements ILyricVisualStyle {
 
     ctx.restore();
 
-    if (frame.isInstrumentalGap && !isBrowsing) {
+    if (showInstrumental && !isBrowsing) {
       drawInstrumentalIndicator(ctx, frame, width, height, phosphor);
     }
   }

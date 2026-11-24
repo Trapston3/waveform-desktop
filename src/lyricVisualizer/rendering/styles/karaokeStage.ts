@@ -4,6 +4,7 @@
 //  1: 'club-neon'              - deep club stage with dual neon spotlight cones & electric fill-wipe
 
 import type { StyleFrameContext } from '../../core/models';
+import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
 import {
   clamp01,
   drawEmptyState,
@@ -136,21 +137,48 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
       return;
     }
 
+    const isLineBlank = (idx: number): boolean =>
+      idx < 0 ||
+      idx >= layout.lines.length ||
+      isBlankOrInstrumentalLineText(frame.lyrics?.lines[idx]?.text ?? layout.lines[idx].text);
+
+    let firstNonBlankIdx = -1;
+    for (let i = 0; i < layout.lines.length; i++) {
+      if (!isLineBlank(i)) {
+        firstNonBlankIdx = i;
+        break;
+      }
+    }
+    if (firstNonBlankIdx < 0) {
+      drawInstrumentalIndicator(ctx, frame, width, height, fillAccent);
+      return;
+    }
+
+    const activeLineIsBlank =
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      isLineBlank(frame.activeLineIndex);
     const hasActiveLine =
-      frame.activeLineIndex >= 0 && frame.activeLineIndex < layout.lines.length;
+      frame.activeLineIndex >= 0 &&
+      frame.activeLineIndex < layout.lines.length &&
+      !activeLineIsBlank;
     if (hasActiveLine) {
       this.lastKnownActiveIdx = frame.activeLineIndex;
     }
     const fallbackIdx =
-      typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0
+      typeof frame.lastActiveLineIndex === 'number' &&
+      frame.lastActiveLineIndex >= 0 &&
+      !isLineBlank(frame.lastActiveLineIndex)
         ? frame.lastActiveLineIndex
-        : this.lastKnownActiveIdx >= 0
+        : this.lastKnownActiveIdx >= 0 && !isLineBlank(this.lastKnownActiveIdx)
         ? this.lastKnownActiveIdx
-        : 0;
-    const scrollIdx = Math.max(
+        : firstNonBlankIdx;
+    let scrollIdx = Math.max(
       0,
       Math.min(layout.lines.length - 1, hasActiveLine ? frame.activeLineIndex : fallbackIdx)
     );
+    while (scrollIdx > 0 && isLineBlank(scrollIdx)) scrollIdx--;
+    if (isLineBlank(scrollIdx)) scrollIdx = firstNonBlankIdx;
     const activeLine = layout.lines[scrollIdx];
     const targetScrollY = activeLine.y + activeLine.height * 0.5;
 
@@ -169,7 +197,7 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
     const effectiveScrollY = this.scrollY + manualScroll;
     const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualScroll) > 3;
 
-    if (frame.isInstrumentalGap && !isBrowsing && !hasActiveLine) {
+    if ((frame.isInstrumentalGap || activeLineIsBlank) && !isBrowsing && !hasActiveLine) {
       drawInstrumentalIndicator(ctx, frame, width, height, fillAccent);
       return;
     }
@@ -201,13 +229,22 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
       : null;
     const activeSecText = activeLine.secondaryText ?? activeResolved?.secondaryText ?? null;
 
+    let nextNonBlankIdx = -1;
+    for (let n = scrollIdx + 1; n < layout.lines.length; n++) {
+      if (!isLineBlank(n)) {
+        nextNonBlankIdx = n;
+        break;
+      }
+    }
+
     for (let i = 0; i < layout.lines.length; i++) {
       const line = layout.lines[i];
+      if (isLineBlank(i)) continue;
       const lineCenterOffset = line.y + line.height * 0.5 - effectiveScrollY;
       const startY = cy + lineCenterOffset - line.height * 0.5;
 
       if (startY + line.height < -60 || startY > height + 60) continue;
-      if (!isBrowsing && i !== scrollIdx && i !== scrollIdx + 1) continue;
+      if (!isBrowsing && i !== scrollIdx && i !== nextNonBlankIdx) continue;
 
       const isActive = hasActiveLine && i === frame.activeLineIndex;
       const isHovered = i === hoveredIdx;
@@ -307,11 +344,13 @@ export class KaraokeStageStyle implements ILyricVisualStyle {
         drawRoundedRectPath(ctx, barX, barY, Math.max(6, barW * overallLineProgress), barH, 3);
         ctx.fillStyle = fillAccent;
         ctx.fill();
-      } else if (!isBrowsing && i === scrollIdx + 1) {
+      } else if (!isBrowsing && i === nextNonBlankIdx) {
         // Upcoming line preview pill
+        const nextText = (line.text || resolved?.primaryText || '').trim();
+        if (!nextText || isBlankOrInstrumentalLineText(nextText)) continue;
         const pillFont = Math.max(13, Math.round(fontSize * 0.44));
         ctx.font = `600 ${pillFont}px ${frame.fontFamily}`;
-        const label = `NEXT  ${line.text || resolved?.primaryText || ''}`;
+        const label = `NEXT  ${nextText}`;
         const labelW = Math.min(
           focalWidth * 0.78,
           (ctx.measureText(label).width || label.length * pillFont * 0.55) + 34

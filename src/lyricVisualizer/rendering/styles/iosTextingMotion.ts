@@ -13,10 +13,9 @@ import type {
   MeasuredLineLayout,
   StyleFrameContext,
 } from '../../core/models';
+import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
 import {
   clamp01,
-  drawEmptyState,
-  drawInstrumentalIndicator,
   drawRoundedRectPath,
   easeOutBack,
   formatTimestamp,
@@ -135,9 +134,8 @@ function tapbackSpringRotRad(t: number): number {
 }
 
 function getCardHeight(card: LyricEmbedCard | null): number {
-  if (!card) return 0;
+  if (!card || card.kind === 'voiceMemo') return 0;
   if (card.kind === 'maps') return 84;
-  if (card.kind === 'voiceMemo') return 56;
   if (card.kind === 'missedCall') return 42;
   if (card.kind === 'linkPreview') return 66;
   return 48;
@@ -210,6 +208,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
   private cachedTrackId = '';
   private cachedScriptMode: LyricsScriptMode = 'auto';
   private bubbles: PrecomputedBubble[] = [];
+  private lineToBubbleIdx: Int32Array = new Int32Array(0);
   private totalThreadHeight = 0;
 
   // Preallocated zero-GC scratch buffers
@@ -220,6 +219,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
   private scrollY = 0;
   private scrollVel = 0;
   private lastKnownActiveIdx = -1;
+  private gapShiftPx = 0;
+  private gapSplitBubbleIdx = -1;
+  private lastRenderTimeSec = 0;
   private initialized = false;
 
   getVariationIndex(variationId: string): number {
@@ -247,10 +249,14 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     this.cachedTrackId = '';
     this.cachedScriptMode = 'auto';
     this.bubbles = [];
+    this.lineToBubbleIdx = new Int32Array(0);
     this.totalThreadHeight = 0;
     this.scrollY = 0;
     this.scrollVel = 0;
     this.lastKnownActiveIdx = -1;
+    this.gapShiftPx = 0;
+    this.gapSplitBubbleIdx = -1;
+    this.lastRenderTimeSec = 0;
     this.initialized = false;
   }
 
@@ -278,11 +284,28 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     this.cachedTrackId = trackId;
     this.cachedScriptMode = scriptMode;
     this.lastKnownActiveIdx = -1;
+    this.gapShiftPx = 0;
+    this.gapSplitBubbleIdx = -1;
     preloadAppleEmojis(IOS18_TAPBACK_LIBRARY);
 
     const trackSeed = hashStringSeed(trackId || lyrics.providerName || 'waveform-ios');
     const count = Math.min(lyrics.lines.length, layout.lines.length);
-    const result: PrecomputedBubble[] = new Array(count);
+    const lineToBubbleIdx = new Int32Array(count);
+    lineToBubbleIdx.fill(-1);
+
+    // Filter out blank/whitespace/instrumental lines so no empty bubbles are ever created
+    const nonBlankIndices: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const line = lyrics.lines[i];
+      if (isBlankOrInstrumentalLineText(line.text)) continue;
+      const resolved = resolveDisplayLine(line, scriptMode, this.id);
+      if (isBlankOrInstrumentalLineText(resolved.primaryText)) continue;
+      lineToBubbleIdx[i] = nonBlankIndices.length;
+      nonBlankIndices.push(i);
+    }
+
+    const nbCount = nonBlankIndices.length;
+    const result: PrecomputedBubble[] = new Array(nbCount);
     const padX = Math.max(16, Math.round(layout.fontSizePx * 0.72));
     const padY = Math.max(11, Math.round(layout.fontSizePx * 0.48));
     const minBubbleW = Math.max(76, Math.round(layout.fontSizePx * 3.2));
@@ -293,18 +316,19 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     let cursorY = 0;
 
     // Pass 1: reliable 2-person alternation (#262629 left / #0A84FF right), embed cards, timestamps
-    const sides: BubbleSide[] = new Array(count);
-    const cards: (LyricEmbedCard | null)[] = new Array(count);
-    const timestamps: (string | null)[] = new Array(count);
+    const sides: BubbleSide[] = new Array(nbCount);
+    const cards: (LyricEmbedCard | null)[] = new Array(nbCount);
+    const timestamps: (string | null)[] = new Array(nbCount);
 
-    for (let i = 0; i < count; i++) {
-      const line = lyrics.lines[i];
-      if (i === 0) {
+    for (let bIdx = 0; bIdx < nbCount; bIdx++) {
+      const lineIdx = nonBlankIndices[bIdx];
+      const line = lyrics.lines[lineIdx];
+      if (bIdx === 0) {
         currentSide = isParentheticalLine(line.text) ? 'left' : 'right';
         consecutiveSameSide = 1;
-        timestamps[i] = 'Today  9:41 PM';
+        timestamps[bIdx] = 'Today  9:41 PM';
       } else {
-        const prev = lyrics.lines[i - 1];
+        const prev = lyrics.lines[nonBlankIndices[bIdx - 1]];
         const prevVocalEnd =
           prev.words.length > 0 ? Math.min(prev.endSeconds, prev.words[prev.words.length - 1].endSeconds) : prev.endSeconds;
         const gap = line.startSeconds - prevVocalEnd;
@@ -327,33 +351,38 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
           consecutiveSameSide++;
         }
 
-        timestamps[i] = gap > 1.8 || i % 6 === 0 ? formatTimestamp(line.startSeconds) : null;
+        timestamps[bIdx] = gap > 1.8 || bIdx % 6 === 0 ? formatTimestamp(line.startSeconds) : null;
       }
 
-      sides[i] = currentSide;
+      sides[bIdx] = currentSide;
       const detectedCard = detectLyricEmbedCard(line.text);
-      if (detectedCard && i > 0 && cards[i - 1]?.kind === detectedCard.kind) {
-        cards[i] = null;
+      if (detectedCard?.kind === 'voiceMemo') {
+        cards[bIdx] = null;
+      } else if (detectedCard && bIdx > 0 && cards[bIdx - 1]?.kind === detectedCard.kind) {
+        cards[bIdx] = null;
       } else {
-        cards[i] = detectedCard;
+        cards[bIdx] = detectedCard;
       }
     }
 
     // Pass 2: compute bubble geometry, 15 Magic Word effects, weighted semantic emojis, and vertical layout
-    for (let i = 0; i < count; i++) {
-      const line = lyrics.lines[i];
-      const measured: MeasuredLineLayout = layout.lines[i];
+    for (let bIdx = 0; bIdx < nbCount; bIdx++) {
+      const lineIdx = nonBlankIndices[bIdx];
+      const line = lyrics.lines[lineIdx];
+      const measured: MeasuredLineLayout = layout.lines[lineIdx];
       const resolved = resolveDisplayLine(line, scriptMode, this.id);
       const secondaryText = measured.secondaryText ?? resolved.secondaryText;
-      const side = sides[i];
+      const side = sides[bIdx];
+      const nextLineStart =
+        bIdx + 1 < nbCount ? lyrics.lines[nonBlankIndices[bIdx + 1]].startSeconds : Number.POSITIVE_INFINITY;
       const nextSameSpeaker =
-        i + 1 < count &&
-        sides[i + 1] === side &&
-        lyrics.lines[i + 1].startSeconds - line.endSeconds <= 0.55 &&
-        !timestamps[i + 1];
+        bIdx + 1 < nbCount &&
+        sides[bIdx + 1] === side &&
+        nextLineStart - line.endSeconds <= 0.55 &&
+        !timestamps[bIdx + 1];
       const showTail = !nextSameSpeaker;
 
-      const timestampPad = timestamps[i] ? 26 : 0;
+      const timestampPad = timestamps[bIdx] ? 26 : 0;
       cursorY += timestampPad;
 
       const wordCount = measured.words.length;
@@ -362,11 +391,11 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       for (let w = 0; w < wordCount; w++) {
         const wText = measured.words[w].text;
         wordEffects[w] = detectMagicWordEffect(wText);
-        wordEmojis[w] = resolveContextualEmoji(wText, trackSeed + i * 31 + w * 17);
+        wordEmojis[w] = resolveContextualEmoji(wText, trackSeed + bIdx * 31 + w * 17);
       }
 
       const semanticText = resolved.primaryText || line.text;
-      const lineEmoji = resolveContextualEmoji(semanticText, trackSeed + i * 37);
+      const lineEmoji = resolveContextualEmoji(semanticText, trackSeed + bIdx * 37);
       let emojiWordIndex = -1;
       if (lineEmoji) {
         for (let w = 0; w < wordCount; w++) {
@@ -384,11 +413,11 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
           }
         }
       }
-      let tapback = chooseSmartTapback(line, i, side, trackSeed);
-      const card = cards[i];
+      let tapback = chooseSmartTapback(line, bIdx, side, trackSeed);
+      const card = cards[bIdx];
 
       // Deterministically alternate presentation across lines: Embed Card, Tapback Reaction, Inline Suffix
-      const modeSlot = (i + (trackSeed % 3)) % 3;
+      const modeSlot = (bIdx + (trackSeed % 3)) % 3;
       let presentationMode: PresentationMode = 'tapback';
       let inlineEmoji: string | null = null;
       if (card) {
@@ -427,11 +456,11 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       const cardGap = cardH > 0 ? 6 : 0;
       const rowTotalH = bubbleH + cardGap + cardH;
 
-      result[i] = {
-        lineIndex: i,
+      result[bIdx] = {
+        lineIndex: lineIdx,
         side,
         showTail,
-        timestampLabel: timestamps[i],
+        timestampLabel: timestamps[bIdx],
         tapback,
         embedCard: card,
         inlineEmoji,
@@ -452,6 +481,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     }
 
     this.bubbles = result;
+    this.lineToBubbleIdx = lineToBubbleIdx;
     this.totalThreadHeight = Math.max(1, cursorY);
   }
 
@@ -1081,10 +1111,16 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.fillStyle = IMSG_BLUE;
     ctx.fillText('♪', x + 20, y + h * 0.5 + noteBob);
 
-    // 14-bar iOS Voice Note FFT waveform
+    // 14-bar iOS Voice Note FFT waveform lighting left-to-right dynamically
     const barsX = x + 36;
     const barCount = 14;
     const step = 8.4;
+    const sweepProgress =
+      typeof frame.gapProgress === 'number' && Number.isFinite(frame.gapProgress) && frame.gapProgress > 0
+        ? clamp01(frame.gapProgress)
+        : motionScale === 0
+        ? 0.5
+        : (t * 0.32) % 1.0;
     for (let b = 0; b < barCount; b++) {
       const band = b < 5 ? bass : b < 10 ? mid : treble;
       const wave =
@@ -1095,7 +1131,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       const bh = Math.max(4, Math.round(22 * amp));
       const bx = barsX + b * step;
       const by = y + h * 0.5 - bh * 0.5;
-      ctx.fillStyle = b / barCount < 0.65 ? '#e2e8f0' : 'rgba(226, 232, 240, 0.45)';
+      ctx.fillStyle = (b + 0.5) / barCount <= sweepProgress ? '#e2e8f0' : 'rgba(226, 232, 240, 0.35)';
       drawRoundedRectPath(ctx, bx, by, 4, bh, 2);
       ctx.fill();
     }
@@ -1105,6 +1141,51 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.fillStyle = '#94a3b8';
     ctx.font = `600 11px ${IOS_FONT_STACK}`;
     ctx.fillText('♫', x + w - 18, y + h * 0.5 + note2Bob);
+    ctx.restore();
+  }
+
+  private drawShortPauseNoteBubble(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    frame: StyleFrameContext,
+    motionScale: number,
+    alpha: number
+  ): void {
+    const w = 64;
+    const h = 40;
+    const t = frame.timeSeconds || 0;
+    const bass = frame.audio.bassEnergy ?? 0;
+    const beatBob =
+      motionScale === 0
+        ? 0
+        : Math.sin(t * 4.5) * 2.2 * Math.min(1.2, motionScale) -
+          (frame.audio.beatDetected ? 1.4 * Math.min(1.2, motionScale) : 0);
+    const pulseScale =
+      motionScale > 0 && frame.audio.beatDetected
+        ? 1.08
+        : 1.0 + bass * 0.06 * Math.min(1, motionScale);
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    drawBubbleWithTail(ctx, x, y, w, h, 18, 'left', true);
+    ctx.fillStyle = IMSG_CHARCOAL;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    const cx = x + w * 0.5;
+    const cy = y + h * 0.5 + beatBob;
+    const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, 16);
+    glow.addColorStop(0, 'rgba(10, 132, 255, 0.42)');
+    glow.addColorStop(1, 'rgba(10, 132, 255, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+    ctx.fill();
+
+    drawAppleEmoji(ctx, '🎵', cx, cy, 20 * pulseScale);
     ctx.restore();
   }
 
@@ -1203,56 +1284,189 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.restore();
     }
 
+    const focal = getFocalRect(frame, width);
+    const focalWidth = focal.width;
     const lyrics = frame.lyrics;
     const layout = frame.layout;
     if (!lyrics || !layout || lyrics.lines.length === 0 || layout.lines.length === 0) {
-      drawInstrumentalIndicator(ctx, frame, width, height, IMSG_BLUE, '♪  Instrumental');
+      this.drawVoiceNoteGapBubble(ctx, focal.left + focalWidth * 0.5 - 99, height * 0.5 - 22, frame, motionScale, 1.0);
       return;
     }
 
-    const focal = getFocalRect(frame, width);
-    const focalWidth = focal.width;
     const trackId = frame.trackMetadata?.id ?? lyrics.providerName ?? '';
     const scriptMode: LyricsScriptMode = frame.scriptMode ?? 'auto';
     this.ensurePrecomputed(ctx, lyrics, layout, focalWidth, trackId, scriptMode);
     if (this.bubbles.length === 0) {
-      drawEmptyState(ctx, frame, width, height);
+      this.drawVoiceNoteGapBubble(ctx, focal.left + focalWidth * 0.5 - 99, height * 0.5 - 22, frame, motionScale, 1.0);
       return;
     }
 
-    // WS6: preserve lastActiveLineIndex across gaps instead of clamping -1 -> 0
-    let resolvedActiveIdx = frame.activeLineIndex;
-    if (resolvedActiveIdx >= 0) {
-      this.lastKnownActiveIdx = Math.min(this.bubbles.length - 1, resolvedActiveIdx);
-    } else if (typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0) {
-      resolvedActiveIdx = frame.lastActiveLineIndex;
-    } else if (this.lastKnownActiveIdx >= 0) {
-      resolvedActiveIdx = this.lastKnownActiveIdx;
-    } else {
-      resolvedActiveIdx = 0;
-      for (let i = 0; i < lyrics.lines.length; i++) {
-        if (lyrics.lines[i].startSeconds <= frame.timeSeconds) {
-          resolvedActiveIdx = i;
+    // Map frame activeLineIndex / lastActiveLineIndex into non-blank bubble index
+    let resolvedBubbleIdx = -1;
+    if (frame.activeLineIndex >= 0 && frame.activeLineIndex < this.lineToBubbleIdx.length) {
+      const mapped = this.lineToBubbleIdx[frame.activeLineIndex];
+      if (mapped >= 0) {
+        resolvedBubbleIdx = mapped;
+        this.lastKnownActiveIdx = mapped;
+      }
+    }
+    if (resolvedBubbleIdx < 0 && typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0) {
+      for (let li = Math.min(this.lineToBubbleIdx.length - 1, frame.lastActiveLineIndex); li >= 0; li--) {
+        if (this.lineToBubbleIdx[li] >= 0) {
+          resolvedBubbleIdx = this.lineToBubbleIdx[li];
+          break;
+        }
+      }
+    }
+    if (resolvedBubbleIdx < 0 && this.lastKnownActiveIdx >= 0) {
+      resolvedBubbleIdx = this.lastKnownActiveIdx;
+    }
+    if (resolvedBubbleIdx < 0) {
+      resolvedBubbleIdx = 0;
+      for (let bIdx = 0; bIdx < this.bubbles.length; bIdx++) {
+        if (lyrics.lines[this.bubbles[bIdx].lineIndex].startSeconds <= frame.timeSeconds) {
+          resolvedBubbleIdx = bIdx;
         } else {
           break;
         }
       }
     }
-    const activeIdx = Math.max(0, Math.min(this.bubbles.length - 1, resolvedActiveIdx));
+    const activeIdx = Math.max(0, Math.min(this.bubbles.length - 1, resolvedBubbleIdx));
     const activeBubble = this.bubbles[activeIdx];
-    const targetScrollY = activeBubble.centerY;
+    const activeLineIsBlank =
+      frame.activeLineIndex >= 0 &&
+      (frame.activeLineIndex >= this.lineToBubbleIdx.length ||
+        this.lineToBubbleIdx[frame.activeLineIndex] < 0);
+
+    // Resolve next non-blank bubble & gap telemetry BEFORE computing scrollY & bubble positions
+    let nextLineIdx =
+      typeof frame.nextLineIndex === 'number' &&
+      frame.nextLineIndex >= 0 &&
+      frame.nextLineIndex < this.lineToBubbleIdx.length &&
+      this.lineToBubbleIdx[frame.nextLineIndex] >= 0
+        ? frame.nextLineIndex
+        : -1;
+    if (nextLineIdx < 0) {
+      for (let bIdx = 0; bIdx < this.bubbles.length; bIdx++) {
+        const li = this.bubbles[bIdx].lineIndex;
+        if (lyrics.lines[li].startSeconds > frame.timeSeconds) {
+          nextLineIdx = li;
+          break;
+        }
+      }
+    }
+    const nextBubbleIdx = nextLineIdx >= 0 ? this.lineToBubbleIdx[nextLineIdx] : -1;
+    const prevBubbleIdx =
+      nextBubbleIdx > 0 ? nextBubbleIdx - 1 : nextBubbleIdx < 0 ? this.bubbles.length - 1 : -1;
+    const nextLine = nextLineIdx >= 0 ? lyrics.lines[nextLineIdx] : null;
+    const prevLineObj =
+      prevBubbleIdx >= 0 ? lyrics.lines[this.bubbles[prevBubbleIdx].lineIndex] : null;
+    const prevEnd = prevLineObj
+      ? prevLineObj.words.length > 0
+        ? Math.min(prevLineObj.endSeconds, prevLineObj.words[prevLineObj.words.length - 1].endSeconds)
+        : prevLineObj.endSeconds
+      : 0;
+    const timeUntilNext =
+      nextLine
+        ? typeof frame.timeUntilNextLine === 'number' && Number.isFinite(frame.timeUntilNextLine)
+          ? frame.timeUntilNextLine
+          : Math.max(0, nextLine.startSeconds - frame.timeSeconds)
+        : Number.POSITIVE_INFINITY;
+    const gapDur = nextLine ? Math.max(0, nextLine.startSeconds - prevEnd) : Number.POSITIVE_INFINITY;
+
+    const inGapWindow =
+      frame.activeLineIndex < 0 ||
+      activeLineIsBlank ||
+      Boolean(frame.isInstrumentalGap) ||
+      (nextBubbleIdx > 0 && frame.timeSeconds >= prevEnd) ||
+      (nextBubbleIdx < 0 && frame.timeSeconds >= prevEnd);
+
+    let gapMode: 'none' | 'voiceNote' | 'shortPause' | 'typing' = 'none';
+    let gapAlpha = 1.0;
+
+    if (inGapWindow) {
+      if (nextBubbleIdx < 0) {
+        gapMode = 'voiceNote';
+        gapAlpha = 1.0;
+      } else if (gapDur >= 4.0) {
+        if (timeUntilNext > 1.5) {
+          gapMode = 'voiceNote';
+          gapAlpha = 1.0;
+        } else if (timeUntilNext > 1.25) {
+          gapMode = 'voiceNote';
+          gapAlpha = clamp01((timeUntilNext - 1.25) / 0.25);
+        } else if (timeUntilNext > 0) {
+          gapMode = 'typing';
+          gapAlpha = clamp01((1.25 - timeUntilNext) / 0.12);
+        }
+      } else if (gapDur > 1.5) {
+        if (timeUntilNext > 1.5) {
+          gapMode = 'shortPause';
+          gapAlpha = 1.0;
+        } else if (timeUntilNext > 1.25) {
+          gapMode = 'shortPause';
+          gapAlpha = clamp01((timeUntilNext - 1.25) / 0.25);
+        } else if (timeUntilNext > 0) {
+          gapMode = 'typing';
+          gapAlpha = clamp01((1.25 - timeUntilNext) / 0.12);
+        }
+      } else if (gapDur >= 0.5) {
+        if (timeUntilNext > 0 && timeUntilNext <= 1.5) {
+          gapMode = 'typing';
+          gapAlpha = 1.0;
+        }
+      } else if (frame.isInstrumentalGap) {
+        gapMode = 'shortPause';
+        gapAlpha = 1.0;
+      }
+    }
+
+    const hasActiveGapSlot = gapMode !== 'none';
+    const gapSlotH = 58;
+    const targetGapShift = hasActiveGapSlot ? gapSlotH : 0;
+    if (hasActiveGapSlot) {
+      this.gapSplitBubbleIdx = nextBubbleIdx >= 0 ? nextBubbleIdx : this.bubbles.length;
+    }
+
+    let targetScrollY = activeBubble.centerY;
+    if (hasActiveGapSlot) {
+      if (nextBubbleIdx === 0) {
+        targetScrollY = this.bubbles[0].topY - 10;
+      } else if (prevBubbleIdx >= 0) {
+        const prevB = this.bubbles[prevBubbleIdx];
+        const prevBottom = prevB.topY + prevB.bubbleH + (prevB.cardH > 0 ? prevB.cardH + 6 : 0);
+        targetScrollY = prevBottom + 34;
+      }
+    }
+
+    const dt = Math.max(0.001, Math.min(0.05, frame.deltaSeconds));
+    const isTimeJump =
+      !this.initialized ||
+      frame.didSeekThisFrame ||
+      frame.reduceMotion ||
+      Math.abs(frame.timeSeconds - this.lastRenderTimeSec) > 0.35;
+    this.lastRenderTimeSec = frame.timeSeconds;
 
     if (!this.initialized || frame.didSeekThisFrame || frame.reduceMotion) {
       this.scrollY = targetScrollY;
       this.scrollVel = 0;
+      this.gapShiftPx = targetGapShift;
       this.initialized = true;
     } else {
-      const dt = Math.max(0.001, Math.min(0.05, frame.deltaSeconds));
       const stiffness = 110 * (0.6 + motionScale * 0.4);
       const damping = 18;
       const force = (targetScrollY - this.scrollY) * stiffness;
       this.scrollVel += (force - this.scrollVel * damping) * dt;
       this.scrollY += this.scrollVel * dt;
+      if (isTimeJump) {
+        this.gapShiftPx = targetGapShift;
+      } else {
+        this.gapShiftPx += (targetGapShift - this.gapShiftPx) * (1 - Math.exp(-dt * 12));
+      }
+    }
+    if (!hasActiveGapSlot && this.gapShiftPx < 0.4) {
+      this.gapShiftPx = 0;
+      this.gapSplitBubbleIdx = -1;
     }
 
     const manualOffset = Number.isFinite(frame.manualScrollY) ? (frame.manualScrollY ?? 0) : 0;
@@ -1314,21 +1528,25 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
 
     for (let i = 0; i < this.bubbles.length; i++) {
       const b = this.bubbles[i];
-      const measured = layout.lines[i];
-      const screenY = anchorY + (b.topY - effectiveScrollY);
+      const lineIdx = b.lineIndex;
+      const lineObj = lyrics.lines[lineIdx];
+      const measured = layout.lines[lineIdx];
+      const slotShift = this.gapSplitBubbleIdx >= 0 && i >= this.gapSplitBubbleIdx ? this.gapShiftPx : 0;
+      const screenY = anchorY + (b.topY - effectiveScrollY) + slotShift;
       const totalH = b.bubbleH + (b.cardH > 0 ? b.cardH + 6 : 0);
       if (screenY + totalH < minY || screenY > maxY) continue;
 
-      const isActive = i === activeIdx && frame.activeLineIndex >= 0;
-      const isHovered = i === hoveredIdx;
+      const isActive =
+        !activeLineIsBlank && frame.activeLineIndex >= 0 && lineIdx === frame.activeLineIndex;
+      const isHovered = lineIdx === hoveredIdx;
       const isPast =
         i < activeIdx ||
-        (frame.activeLineIndex < 0 && lyrics.lines[i].endSeconds < frame.timeSeconds);
+        ((frame.activeLineIndex < 0 || activeLineIsBlank) && lineObj.endSeconds < frame.timeSeconds);
       const dist = Math.abs(i - activeIdx);
 
       // Record hit rectangle in canvas coordinate space (spanning bubble row for responsive click-to-seek)
       frame.recordHitRect?.(
-        i,
+        lineIdx,
         focal.left + marginSide,
         screenY - 4,
         Math.max(b.bubbleW, focalWidth - marginSide * 2),
@@ -1357,7 +1575,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ? Math.max(0.42, 0.82 - dist * 0.14)
         : Math.max(0.18, 0.34 - dist * 0.06);
 
-      const lineElapsed = Math.max(0, frame.timeSeconds - lyrics.lines[i].startSeconds);
+      const lineElapsed = Math.max(0, frame.timeSeconds - lineObj.startSeconds);
       const emojiWord =
         b.emojiWordIndex >= 0 && b.emojiWordIndex < measured.words.length
           ? measured.words[b.emojiWordIndex]
@@ -1629,91 +1847,38 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
     }
 
-    // WS6: Instrumental Gap (Voice Note / Musical Notes) & Typing Indicator morph in final 1.6s
-    let nextLineIdx =
-      typeof frame.nextLineIndex === 'number' ? frame.nextLineIndex : -1;
-    if (nextLineIdx < 0) {
-      for (let i = 0; i < lyrics.lines.length; i++) {
-        if (lyrics.lines[i].startSeconds > frame.timeSeconds) {
-          nextLineIdx = i;
-          break;
-        }
-      }
-    }
-
-    const nextLine =
-      nextLineIdx >= 0 && nextLineIdx < lyrics.lines.length ? lyrics.lines[nextLineIdx] : null;
-    const prevEnd =
-      nextLineIdx > 0
-        ? Math.min(
-            lyrics.lines[nextLineIdx - 1].endSeconds,
-            lyrics.lines[nextLineIdx - 1].words.length > 0
-              ? lyrics.lines[nextLineIdx - 1].words[lyrics.lines[nextLineIdx - 1].words.length - 1].endSeconds
-              : lyrics.lines[nextLineIdx - 1].endSeconds
-          )
-        : 0;
-    const timeUntilNext =
-      typeof frame.timeUntilNextLine === 'number'
-        ? frame.timeUntilNextLine
-        : nextLine
-        ? Math.max(0, nextLine.startSeconds - frame.timeSeconds)
-        : Number.POSITIVE_INFINITY;
-    const gapDur = nextLine ? nextLine.startSeconds - prevEnd : 0;
-    const isGap =
-      typeof frame.isInstrumentalGap === 'boolean'
-        ? frame.isInstrumentalGap
-        : frame.activeLineIndex < 0 &&
-          ((nextLineIdx === 0 && nextLine!.startSeconds > 3.0) ||
-            (nextLineIdx > 0 && gapDur >= 3.5) ||
-            nextLineIdx < 0);
-
-    if (isGap) {
+    // Unified non-overlapping gap / short-pause / typing slot rendering
+    if (hasActiveGapSlot && gapAlpha > 0.01) {
       const gapY =
-        nextLineIdx === 0
-          ? anchorY - 22
-          : Math.min(
-              height - 76,
-              anchorY + (activeBubble.topY + activeBubble.bubbleH + 14 - effectiveScrollY)
-            );
-      if (gapY > minY && gapY < maxY) {
-        if (nextLineIdx >= 0 && nextLineIdx < this.bubbles.length && timeUntilNext <= 1.6) {
-          const nextBubble = this.bubbles[nextLineIdx];
-          const morph = clamp01((1.6 - timeUntilNext) / 0.45);
-          const typingX = nextBubble.side === 'right' ? focalWidth - marginSide - 68 : marginSide;
-          if (morph < 0.98) {
-            this.drawVoiceNoteGapBubble(ctx, marginSide, gapY, frame, motionScale, 1 - morph);
-          }
-          if (morph > 0.02) {
-            this.drawTypingIndicator(
-              ctx,
-              nextBubble.side,
-              typingX,
-              gapY,
-              frame,
-              motionScale,
-              variationIdx,
-              morph
-            );
-          }
-        } else {
-          this.drawVoiceNoteGapBubble(ctx, marginSide, gapY, frame, motionScale, 1.0);
-        }
-      }
-    } else if (nextLineIdx >= 0 && nextLineIdx < this.bubbles.length) {
-      if (gapDur >= 0.5 && gapDur <= 1.6 && timeUntilNext >= 0 && timeUntilNext <= 1.6) {
-        const nextBubble = this.bubbles[nextLineIdx];
-        const indicatorX =
-          nextBubble.side === 'right' ? focalWidth - marginSide - 68 : marginSide;
-        const indicatorY = anchorY + (nextBubble.topY - effectiveScrollY) - 4;
-        if (indicatorY > minY && indicatorY < maxY) {
+        nextBubbleIdx === 0
+          ? anchorY + (this.bubbles[0].topY - 32 - effectiveScrollY)
+          : (() => {
+              const prevB = this.bubbles[prevBubbleIdx >= 0 ? prevBubbleIdx : activeIdx];
+              const prevBottom = prevB.topY + prevB.bubbleH + (prevB.cardH > 0 ? prevB.cardH + 6 : 0);
+              return anchorY + (prevBottom + 12 - effectiveScrollY);
+            })();
+
+      if (gapY + 44 > minY && gapY < maxY) {
+        if (gapMode === 'voiceNote') {
+          this.drawVoiceNoteGapBubble(ctx, marginSide, gapY, frame, motionScale, gapAlpha);
+        } else if (gapMode === 'shortPause') {
+          this.drawShortPauseNoteBubble(ctx, marginSide, gapY, frame, motionScale, gapAlpha);
+        } else if (gapMode === 'typing') {
+          const nextBubble =
+            nextBubbleIdx >= 0 && nextBubbleIdx < this.bubbles.length
+              ? this.bubbles[nextBubbleIdx]
+              : null;
+          const typingSide: BubbleSide = nextBubble ? nextBubble.side : 'left';
+          const typingX = typingSide === 'right' ? focalWidth - marginSide - 68 : marginSide;
           this.drawTypingIndicator(
             ctx,
-            nextBubble.side,
-            indicatorX,
-            indicatorY,
+            typingSide,
+            typingX,
+            gapY + 4,
             frame,
             motionScale,
-            variationIdx
+            variationIdx,
+            gapAlpha
           );
         }
       }

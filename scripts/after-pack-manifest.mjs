@@ -17,6 +17,31 @@ function normalizeWinRelPath(relPath) {
   return relPath.replace(/\//g, '\\').replace(/^\\+/, '');
 }
 
+/**
+ * Compares two SemVer strings (e.g. "1.1.0" vs "v1.2.0").
+ * Returns -1 if a < b, 0 if a === b, 1 if a > b.
+ */
+export function compareSemVer(a, b) {
+  const parse = (v) => {
+    const cleaned = String(v || '')
+      .trim()
+      .replace(/^v/i, '')
+      .split('-')[0];
+    const parts = cleaned.split('.').map((n) => {
+      const parsed = parseInt(n, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    });
+    return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] < pb[i]) return -1;
+    if (pa[i] > pb[i]) return 1;
+  }
+  return 0;
+}
+
 function shouldExcludeManifestPath(relPath) {
   const lower = relPath.toLowerCase();
   if (lower === 'resources\\install-manifest.tsv') return true;

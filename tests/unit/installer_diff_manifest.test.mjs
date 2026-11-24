@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  compareSemVer,
   computeFileSha256,
   diffInstallManifests,
   generateInstallManifest,
@@ -107,5 +108,21 @@ describe('Windows NSIS Install Manifest & Diff Engine', () => {
     } finally {
       fs.rmSync(tmpInstall, { recursive: true, force: true });
     }
+  });
+
+  test('compareSemVer accurately orders installed vs installer versions (1.1.0 < 1.2.0, 1.2.0 == 1.2.0, 1.3.0 > 1.2.0)', () => {
+    assert.equal(compareSemVer('1.1.0', '1.2.0'), -1);
+    assert.equal(compareSemVer('1.2.0', '1.2.0'), 0);
+    assert.equal(compareSemVer('1.3.0', '1.2.0'), 1);
+    assert.equal(compareSemVer('v1.2.0', '1.2.0'), 0);
+    assert.equal(compareSemVer('v1.2.1-beta.1', '1.2.0'), 1);
+    assert.equal(compareSemVer('2.0.0', '1.9.9'), 1);
+
+    const nshSrc = fs.readFileSync(path.resolve('build/installer.nsh'), 'utf8');
+    assert.ok(nshSrc.includes('CompareSemVer'), 'installer.nsh must define CompareSemVer');
+    assert.ok(nshSrc.includes('Already Up to Date'), 'installer.nsh must handle Already Up to Date UI');
+    assert.ok(nshSrc.includes('Repair / Verify installation'), 'installer.nsh must offer Repair / Verify installation');
+    assert.ok(nshSrc.includes('Newer Version Already Installed'), 'installer.nsh must handle downgrade protection');
+    assert.ok(nshSrc.includes('api.github.com/repos/Trapston3/waveform-desktop/releases/latest'), 'installer.nsh must include non-blocking GitHub latest release check');
   });
 });

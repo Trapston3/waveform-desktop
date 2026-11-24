@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$NewManifest,
     [Parameter(Mandatory = $true)][string]$ChangedListOut,
     [Parameter(Mandatory = $true)][string]$RemovedListOut,
-    [Parameter(Mandatory = $true)][string]$SummaryOut
+    [Parameter(Mandatory = $true)][string]$SummaryOut,
+    [switch]$VerifyHashes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,7 +64,7 @@ foreach ($kvp in $newMap.GetEnumerator()) {
     $diskPath = Join-Path $InstallDir $rel
     $diskExists = [System.IO.File]::Exists($diskPath)
 
-    if ($hasOldManifest -and $oldMap.Count -gt 0) {
+    if (-not $VerifyHashes -and $hasOldManifest -and $oldMap.Count -gt 0) {
         if ($oldMap.ContainsKey($rel)) {
             $oldMeta = $oldMap[$rel]
             if ($oldMeta.Hash -eq $newMeta.Hash -and $oldMeta.Size -eq $newMeta.Size -and $diskExists) {
@@ -76,7 +77,7 @@ foreach ($kvp in $newMap.GetEnumerator()) {
         }
         $changed.Add($rel)
     } else {
-        # First-time upgrade from legacy install without install-manifest.tsv: hash existing disk files
+        # Repair mode (-VerifyHashes) or legacy install without manifest: hash existing disk files
         if ($diskExists) {
             $diskSize = (Get-Item -LiteralPath $diskPath).Length
             if ($diskSize -eq $newMeta.Size) {

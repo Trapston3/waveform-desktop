@@ -1,19 +1,20 @@
 ; Custom NSIS Installer Script for WaveForm Desktop
 ; Hooks cleanly into electron-builder's assistedInstaller lifecycle:
 ; - Detects existing HKCU / HKLM / LocalAppData installations
-; - Offers Update (changed-files-only) vs Clean Reinstall UI
-; - Gracefully closes running WaveForm.exe before patching
-; - Uses 7za.exe + diff-sync.ps1 to extract ONLY changed/added files and remove obsolete files
+; - Exact SemVer comparison: Upgrade vs Already-Up-To-Date (Close/Repair) vs Downgrade Protection
+; - Non-blocking 2s GitHub latest-release check in interactive mode
+; - Uses 7za.exe + diff-sync.ps1 to extract ONLY changed/added/corrupted files and remove obsolete files
 
 !ifndef WAVEFORM_INSTALLER_NSH_INCLUDED
 !define WAVEFORM_INSTALLER_NSH_INCLUDED
 
 !include "LogicLib.nsh"
-!define WF_INSTALL_REG_KEY "Software\${APP_GUID}"
-!define WF_UNINSTALL_REG_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_APP_KEY}"
 !include "FileFunc.nsh"
 !include "nsDialogs.nsh"
 !include "Sections.nsh"
+
+!define WF_INSTALL_REG_KEY "Software\${APP_GUID}"
+!define WF_UNINSTALL_REG_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_APP_KEY}"
 
 !ifndef BUILD_UNINSTALLER
 
@@ -22,14 +23,160 @@ Var /GLOBAL EXISTING_VER
 Var /GLOBAL EXISTING_SCOPE
 Var /GLOBAL IS_EXISTING_INSTALL
 Var /GLOBAL IS_UPDATE_MODE
+Var /GLOBAL IS_REPAIR_MODE
 Var /GLOBAL FORCE_FRESH_FLAG
+Var /GLOBAL FORCE_UPDATE_FLAG
+Var /GLOBAL VER_CMP_RESULT
+Var /GLOBAL GITHUB_LATEST_VER
 
 Var /GLOBAL ModePageDialog
 Var /GLOBAL RadioUpdate
 Var /GLOBAL RadioFresh
+Var /GLOBAL RadioAlt
+Var /GLOBAL GithubBtn
 
 ; ---------------------------------------------------------------------------
-; 1. Detect Existing Installation & Handle Silent /FRESH Flag
+; SemVer Helper: CompareSemVer(verA, verB) -> pushes -1, 0, or 1
+; ---------------------------------------------------------------------------
+Function CompareSemVer
+  Exch $R1 ; verB
+  Exch
+  Exch $R0 ; verA
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R5
+  Push $R6
+  Push $R7
+  Push $R8
+  Push $R9
+
+  ; Parse verA ($R0) -> $R2 (majA), $R3 (minA), $R4 (patA)
+  StrCpy $R2 0
+  StrCpy $R3 0
+  StrCpy $R4 0
+  StrCpy $R8 0 ; char index
+  StrCpy $R9 0 ; part index
+  StrCpy $0 0  ; accum
+
+  StrCpy $1 $R0 1 0
+  ${If} $1 == "v"
+  ${OrIf} $1 == "V"
+    StrCpy $R8 1
+  ${EndIf}
+
+  loopA:
+    StrCpy $1 $R0 1 $R8
+    ${If} $1 == ""
+    ${OrIf} $1 == "-"
+    ${OrIf} $1 == "+"
+      ${If} $R9 == 0
+        StrCpy $R2 $0
+      ${ElseIf} $R9 == 1
+        StrCpy $R3 $0
+      ${ElseIf} $R9 == 2
+        StrCpy $R4 $0
+      ${EndIf}
+      Goto doneA
+    ${EndIf}
+    ${If} $1 == "."
+      ${If} $R9 == 0
+        StrCpy $R2 $0
+      ${ElseIf} $R9 == 1
+        StrCpy $R3 $0
+      ${EndIf}
+      IntOp $R9 $R9 + 1
+      StrCpy $0 0
+      ${If} $R9 > 2
+        Goto doneA
+      ${EndIf}
+    ${Else}
+      IntOp $0 $0 * 10
+      IntOp $0 $0 + $1
+    ${EndIf}
+    IntOp $R8 $R8 + 1
+    Goto loopA
+  doneA:
+
+  ; Parse verB ($R1) -> $R5 (majB), $R6 (minB), $R7 (patB)
+  StrCpy $R5 0
+  StrCpy $R6 0
+  StrCpy $R7 0
+  StrCpy $R8 0
+  StrCpy $R9 0
+  StrCpy $0 0
+
+  StrCpy $1 $R1 1 0
+  ${If} $1 == "v"
+  ${OrIf} $1 == "V"
+    StrCpy $R8 1
+  ${EndIf}
+
+  loopB:
+    StrCpy $1 $R1 1 $R8
+    ${If} $1 == ""
+    ${OrIf} $1 == "-"
+    ${OrIf} $1 == "+"
+      ${If} $R9 == 0
+        StrCpy $R5 $0
+      ${ElseIf} $R9 == 1
+        StrCpy $R6 $0
+      ${ElseIf} $R9 == 2
+        StrCpy $R7 $0
+      ${EndIf}
+      Goto doneB
+    ${EndIf}
+    ${If} $1 == "."
+      ${If} $R9 == 0
+        StrCpy $R5 $0
+      ${ElseIf} $R9 == 1
+        StrCpy $R6 $0
+      ${EndIf}
+      IntOp $R9 $R9 + 1
+      StrCpy $0 0
+      ${If} $R9 > 2
+        Goto doneB
+      ${EndIf}
+    ${Else}
+      IntOp $0 $0 * 10
+      IntOp $0 $0 + $1
+    ${EndIf}
+    IntOp $R8 $R8 + 1
+    Goto loopB
+  doneB:
+
+  ; Compare major, minor, patch
+  IntCmp $R2 $R5 cmpMin lessCmp greaterCmp
+  cmpMin:
+  IntCmp $R3 $R6 cmpPat lessCmp greaterCmp
+  cmpPat:
+  IntCmp $R4 $R7 equalCmp lessCmp greaterCmp
+
+  lessCmp:
+    StrCpy $R0 "-1"
+    Goto cmpDone
+  greaterCmp:
+    StrCpy $R0 "1"
+    Goto cmpDone
+  equalCmp:
+    StrCpy $R0 "0"
+
+  cmpDone:
+  Pop $R9
+  Pop $R8
+  Pop $R7
+  Pop $R6
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Exch $R0
+  Exch
+  Pop $R1
+FunctionEnd
+
+; ---------------------------------------------------------------------------
+; 1. Detect Existing Installation, SemVer Compare & Silent Flags (/FRESH, /FORCE)
 ; ---------------------------------------------------------------------------
 !macro customInit
   StrCpy $EXISTING_DIR ""
@@ -37,12 +184,20 @@ Var /GLOBAL RadioFresh
   StrCpy $EXISTING_SCOPE ""
   StrCpy $IS_EXISTING_INSTALL "0"
   StrCpy $IS_UPDATE_MODE "0"
+  StrCpy $IS_REPAIR_MODE "0"
   StrCpy $FORCE_FRESH_FLAG "0"
+  StrCpy $FORCE_UPDATE_FLAG "0"
+  StrCpy $VER_CMP_RESULT "0"
+  StrCpy $GITHUB_LATEST_VER ""
 
   ${GetParameters} $R0
   ${GetOptions} $R0 "/FRESH" $R1
   ${IfNot} ${Errors}
     StrCpy $FORCE_FRESH_FLAG "1"
+  ${EndIf}
+  ${GetOptions} $R0 "/FORCE" $R1
+  ${IfNot} ${Errors}
+    StrCpy $FORCE_UPDATE_FLAG "1"
   ${EndIf}
 
   ; Check HKCU Uninstall / Install registry first
@@ -99,17 +254,33 @@ Var /GLOBAL RadioFresh
       StrCpy $EXISTING_VER "$R2.$R3.$R4"
     ${EndIf}
 
-    ${If} $FORCE_FRESH_FLAG != "1"
-      StrCpy $IS_UPDATE_MODE "1"
-      ${If} ${Silent}
-        SectionSetFlags 0 ${SF_SELECTED}
-        SectionSetFlags 1 0
-      ${Else}
-        SectionSetFlags 0 0
-        SectionSetFlags 1 ${SF_SELECTED}
-      ${EndIf}
-    ${Else}
+    Push "$EXISTING_VER"
+    Push "${VERSION}"
+    Call CompareSemVer
+    Pop $VER_CMP_RESULT
+
+    ${If} $FORCE_FRESH_FLAG == "1"
       StrCpy $IS_UPDATE_MODE "0"
+      SectionSetFlags 0 0
+      SectionSetFlags 1 ${SF_SELECTED}
+    ${ElseIf} ${Silent}
+      ; In /S silent mode without /FORCE: exit 0 cleanly if already up to date or newer
+      ${If} $VER_CMP_RESULT == "0"
+      ${AndIf} $FORCE_UPDATE_FLAG != "1"
+        SetErrorLevel 0
+        Quit
+      ${EndIf}
+      ${If} $VER_CMP_RESULT == "1"
+      ${AndIf} $FORCE_UPDATE_FLAG != "1"
+        SetErrorLevel 0
+        Quit
+      ${EndIf}
+      StrCpy $IS_UPDATE_MODE "1"
+      SectionSetFlags 0 ${SF_SELECTED}
+      SectionSetFlags 1 0
+    ${Else}
+      ; Interactive mode: WaveFormModePageLeave sets final section flags
+      StrCpy $IS_UPDATE_MODE "1"
       SectionSetFlags 0 0
       SectionSetFlags 1 ${SF_SELECTED}
     ${EndIf}
@@ -120,19 +291,73 @@ Var /GLOBAL RadioFresh
 !macroend
 
 ; ---------------------------------------------------------------------------
-; 2. Custom Welcome + Existing Installation Mode Page (Update vs Clean Reinstall)
+; 2. Custom Welcome + Version-Aware Existing Installation Mode Page
 ; ---------------------------------------------------------------------------
 !macro customWelcomePage
   !insertmacro MUI_PAGE_WELCOME
   Page custom WaveFormModePageCreate WaveFormModePageLeave
 
+  Function WaveFormOpenGithubReleases
+    ExecShell "open" "https://github.com/Trapston3/waveform-desktop/releases/latest"
+  FunctionEnd
+
+  Function WaveFormCheckGithubLatest
+    StrCpy $GITHUB_LATEST_VER ""
+    nsExec::ExecToStack 'powershell.exe -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $$req=[System.Net.WebRequest]::Create(\"https://api.github.com/repos/Trapston3/waveform-desktop/releases/latest\"); $$req.Timeout=2000; $$req.UserAgent=\"WaveForm-Installer\"; $$resp=$$req.GetResponse(); $$sr=New-Object System.IO.StreamReader($$resp.GetResponseStream()); $$json=$$sr.ReadToEnd()|ConvertFrom-Json; Write-Output $$json.tag_name } catch { }"'
+    Pop $0
+    Pop $1
+    ${If} $0 == 0
+    ${AndIf} $1 != ""
+      ; Trim trailing CR/LF/whitespace
+      loopTrimGh:
+        StrCpy $2 $1 1 -1
+        ${If} $2 == "$\n"
+        ${OrIf} $2 == "$\r"
+        ${OrIf} $2 == " "
+          StrCpy $1 $1 -1
+          Goto loopTrimGh
+        ${EndIf}
+      ${If} $1 != ""
+        Push $1
+        Push "${VERSION}"
+        Call CompareSemVer
+        Pop $3
+        ${If} $3 == "1"
+          StrCpy $GITHUB_LATEST_VER $1
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  FunctionEnd
+
   Function WaveFormUpdateCtaText
-    ${NSD_GetState} $RadioUpdate $0
     GetDlgItem $1 $HWNDPARENT 1
-    ${If} $0 == ${BST_CHECKED}
-      SendMessage $1 ${WM_SETTEXT} 0 "STR:Update"
+    ${NSD_GetState} $RadioUpdate $0
+    ${If} $VER_CMP_RESULT == "0"
+      ; Already up to date: RadioUpdate = Close, RadioFresh = Repair, RadioAlt = Clean reinstall
+      ${If} $0 == ${BST_CHECKED}
+        SendMessage $1 ${WM_SETTEXT} 0 "STR:Close"
+      ${Else}
+        ${NSD_GetState} $RadioFresh $2
+        ${If} $2 == ${BST_CHECKED}
+          SendMessage $1 ${WM_SETTEXT} 0 "STR:Repair"
+        ${Else}
+          SendMessage $1 ${WM_SETTEXT} 0 "STR:Next >"
+        ${EndIf}
+      ${EndIf}
+    ${ElseIf} $VER_CMP_RESULT == "1"
+      ; Downgrade protection: RadioUpdate = Cancel/Close, RadioFresh = Downgrade / Clean reinstall
+      ${If} $0 == ${BST_CHECKED}
+        SendMessage $1 ${WM_SETTEXT} 0 "STR:Close"
+      ${Else}
+        SendMessage $1 ${WM_SETTEXT} 0 "STR:Next >"
+      ${EndIf}
     ${Else}
-      SendMessage $1 ${WM_SETTEXT} 0 "STR:Next >"
+      ; Upgrade: RadioUpdate = Update, RadioFresh = Clean reinstall
+      ${If} $0 == ${BST_CHECKED}
+        SendMessage $1 ${WM_SETTEXT} 0 "STR:Update"
+      ${Else}
+        SendMessage $1 ${WM_SETTEXT} 0 "STR:Next >"
+      ${EndIf}
     ${EndIf}
   FunctionEnd
 
@@ -141,7 +366,15 @@ Var /GLOBAL RadioFresh
       Abort
     ${EndIf}
 
-    !insertmacro MUI_HEADER_TEXT "Existing WaveForm Installation Detected" "Choose whether to update changed files in-place or perform a clean reinstall."
+    Call WaveFormCheckGithubLatest
+
+    ${If} $VER_CMP_RESULT == "0"
+      !insertmacro MUI_HEADER_TEXT "WaveForm v${VERSION} is Already Up to Date" "You already have the latest version installed at $EXISTING_DIR."
+    ${ElseIf} $VER_CMP_RESULT == "1"
+      !insertmacro MUI_HEADER_TEXT "Newer Version Already Installed" "A newer version (v$EXISTING_VER) is already installed at $EXISTING_DIR."
+    ${Else}
+      !insertmacro MUI_HEADER_TEXT "Existing WaveForm Installation Detected" "Choose whether to update changed files in-place or perform a clean reinstall."
+    ${EndIf}
 
     nsDialogs::Create 1018
     Pop $ModePageDialog
@@ -149,23 +382,67 @@ Var /GLOBAL RadioFresh
       Abort
     ${EndIf}
 
-    ${NSD_CreateLabel} 0u 0u 300u 26u "Installed version: v$EXISTING_VER  ->  New version: v${VERSION}$\r$\nLocation: $EXISTING_DIR"
-    Pop $0
+    ${If} $VER_CMP_RESULT == "0"
+      ${NSD_CreateLabel} 0u 0u 300u 22u "You already have the latest version (v$EXISTING_VER) installed at:$\r$\n$EXISTING_DIR"
+      Pop $0
 
-    ${NSD_CreateRadioButton} 0u 34u 300u 14u "Update existing installation (Recommended)"
-    Pop $RadioUpdate
-    ${NSD_SetState} $RadioUpdate ${BST_CHECKED}
-    ${NSD_OnClick} $RadioUpdate WaveFormUpdateCtaText
+      ${NSD_CreateRadioButton} 0u 26u 300u 14u "Close — Nothing to update"
+      Pop $RadioUpdate
+      ${NSD_SetState} $RadioUpdate ${BST_CHECKED}
+      ${NSD_OnClick} $RadioUpdate WaveFormUpdateCtaText
 
-    ${NSD_CreateLabel} 14u 50u 282u 28u "Only updates changed and new files, removes obsolete files, and preserves your local library cache, settings, and unchanged assets."
-    Pop $0
+      ${NSD_CreateRadioButton} 0u 44u 300u 14u "Repair / Verify installation"
+      Pop $RadioFresh
+      ${NSD_OnClick} $RadioFresh WaveFormUpdateCtaText
 
-    ${NSD_CreateRadioButton} 0u 84u 300u 14u "Clean reinstall / Change install location"
-    Pop $RadioFresh
-    ${NSD_OnClick} $RadioFresh WaveFormUpdateCtaText
+      ${NSD_CreateLabel} 14u 58u 282u 20u "Verifies SHA-256 hashes against the manifest and only re-extracts missing or corrupted files."
+      Pop $0
 
-    ${NSD_CreateLabel} 14u 100u 282u 28u "Removes the existing installation folder and performs a fresh install (your settings and library data in AppData are still preserved)."
-    Pop $0
+      ${NSD_CreateRadioButton} 0u 80u 300u 14u "Clean reinstall / Change install location"
+      Pop $RadioAlt
+      ${NSD_OnClick} $RadioAlt WaveFormUpdateCtaText
+    ${ElseIf} $VER_CMP_RESULT == "1"
+      ${NSD_CreateLabel} 0u 0u 300u 24u "Warning: A newer version (v$EXISTING_VER) is already installed. This installer is v${VERSION}.$\r$\nLocation: $EXISTING_DIR"
+      Pop $0
+
+      ${NSD_CreateRadioButton} 0u 30u 300u 14u "Cancel — Keep newer version (v$EXISTING_VER)"
+      Pop $RadioUpdate
+      ${NSD_SetState} $RadioUpdate ${BST_CHECKED}
+      ${NSD_OnClick} $RadioUpdate WaveFormUpdateCtaText
+
+      ${NSD_CreateRadioButton} 0u 50u 300u 14u "Downgrade / Clean reinstall to v${VERSION}"
+      Pop $RadioFresh
+      ${NSD_OnClick} $RadioFresh WaveFormUpdateCtaText
+
+      ${NSD_CreateLabel} 14u 66u 282u 24u "Replaces the existing installation folder with v${VERSION} (your AppData settings and library remain preserved)."
+      Pop $0
+    ${Else}
+      ${NSD_CreateLabel} 0u 0u 300u 24u "Installed version: v$EXISTING_VER  ->  New version: v${VERSION}$\r$\nLocation: $EXISTING_DIR"
+      Pop $0
+
+      ${NSD_CreateRadioButton} 0u 30u 300u 14u "Update existing installation (Recommended)"
+      Pop $RadioUpdate
+      ${NSD_SetState} $RadioUpdate ${BST_CHECKED}
+      ${NSD_OnClick} $RadioUpdate WaveFormUpdateCtaText
+
+      ${NSD_CreateLabel} 14u 46u 282u 26u "Only updates changed and new files, removes obsolete files, and preserves your local library cache, settings, and unchanged assets."
+      Pop $0
+
+      ${NSD_CreateRadioButton} 0u 76u 300u 14u "Clean reinstall / Change install location"
+      Pop $RadioFresh
+      ${NSD_OnClick} $RadioFresh WaveFormUpdateCtaText
+
+      ${NSD_CreateLabel} 14u 92u 282u 24u "Removes the existing installation folder and performs a fresh install (your settings and library data in AppData are still preserved)."
+      Pop $0
+    ${EndIf}
+
+    ${If} $GITHUB_LATEST_VER != ""
+      ${NSD_CreateLabel} 0u 118u 208u 14u "A newer release ($GITHUB_LATEST_VER) is available on GitHub."
+      Pop $0
+      ${NSD_CreateButton} 212u 116u 86u 15u "Open Releases"
+      Pop $GithubBtn
+      ${NSD_OnClick} $GithubBtn WaveFormOpenGithubReleases
+    ${EndIf}
 
     Call WaveFormUpdateCtaText
     nsDialogs::Show
@@ -173,21 +450,58 @@ Var /GLOBAL RadioFresh
 
   Function WaveFormModePageLeave
     ${NSD_GetState} $RadioUpdate $0
-    ${If} $0 == ${BST_CHECKED}
-      StrCpy $IS_UPDATE_MODE "1"
-      StrCpy $INSTDIR "$EXISTING_DIR"
-      SectionSetFlags 0 ${SF_SELECTED}
-      SectionSetFlags 1 0
+    ${If} $VER_CMP_RESULT == "0"
+      ${If} $0 == ${BST_CHECKED}
+        ; Close — Nothing to update
+        SetErrorLevel 0
+        Quit
+      ${EndIf}
+      ${NSD_GetState} $RadioFresh $2
+      ${If} $2 == ${BST_CHECKED}
+        ; Repair / Verify installation
+        StrCpy $IS_UPDATE_MODE "1"
+        StrCpy $IS_REPAIR_MODE "1"
+        StrCpy $INSTDIR "$EXISTING_DIR"
+        SectionSetFlags 0 ${SF_SELECTED}
+        SectionSetFlags 1 0
+      ${Else}
+        ; Clean reinstall
+        StrCpy $IS_UPDATE_MODE "0"
+        StrCpy $IS_REPAIR_MODE "0"
+        SectionSetFlags 0 0
+        SectionSetFlags 1 ${SF_SELECTED}
+      ${EndIf}
+    ${ElseIf} $VER_CMP_RESULT == "1"
+      ${If} $0 == ${BST_CHECKED}
+        ; Cancel — Keep newer version
+        SetErrorLevel 0
+        Quit
+      ${Else}
+        ; Downgrade / Clean reinstall
+        StrCpy $IS_UPDATE_MODE "0"
+        StrCpy $IS_REPAIR_MODE "0"
+        SectionSetFlags 0 0
+        SectionSetFlags 1 ${SF_SELECTED}
+      ${EndIf}
     ${Else}
-      StrCpy $IS_UPDATE_MODE "0"
-      SectionSetFlags 0 0
-      SectionSetFlags 1 ${SF_SELECTED}
+      ${If} $0 == ${BST_CHECKED}
+        StrCpy $IS_UPDATE_MODE "1"
+        StrCpy $IS_REPAIR_MODE "0"
+        StrCpy $INSTDIR "$EXISTING_DIR"
+        SectionSetFlags 0 ${SF_SELECTED}
+        SectionSetFlags 1 0
+      ${Else}
+        StrCpy $IS_UPDATE_MODE "0"
+        StrCpy $IS_REPAIR_MODE "0"
+        SectionSetFlags 0 0
+        SectionSetFlags 1 ${SF_SELECTED}
+      ${EndIf}
     ${EndIf}
   FunctionEnd
 !macroend
 
 ; ---------------------------------------------------------------------------
-; 3. Selective Changed-Files-Only Update Section (Section 0)
+; 3. Selective Changed-Files-Only Update / Repair Section (Section 0)
 ; ---------------------------------------------------------------------------
 Section "-WaveFormUpdate" SEC_WAVEFORM_UPDATE
   ${If} $IS_UPDATE_MODE != "1"
@@ -203,10 +517,6 @@ Section "-WaveFormUpdate" SEC_WAVEFORM_UPDATE
   Pop $0
   Pop $1
   ${If} $0 == 0
-    StrCpy $2 ""
-    ${ForEach} $3 0 0 + 1
-    ${Next}
-    ; Check if output contains WaveForm.exe
     Push $1
     Push "WaveForm.exe"
     Call StrContainsUpdate
@@ -256,8 +566,13 @@ Section "-WaveFormUpdate" SEC_WAVEFORM_UPDATE
   ${EndIf}
 
   ; Compute changed / unchanged / obsolete lists via diff-sync.ps1
-  DetailPrint "Comparing incoming manifest against installed files..."
-  nsExec::ExecToStack 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\diff-sync.ps1" -InstallDir "$INSTDIR" -NewManifest "$PLUGINSDIR\install-manifest.tsv" -ChangedListOut "$PLUGINSDIR\changed.lst" -RemovedListOut "$PLUGINSDIR\removed.lst" -SummaryOut "$PLUGINSDIR\summary.txt"'
+  ${If} $IS_REPAIR_MODE == "1"
+    DetailPrint "Verifying SHA-256 hashes of all installed files..."
+    nsExec::ExecToStack 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\diff-sync.ps1" -InstallDir "$INSTDIR" -NewManifest "$PLUGINSDIR\install-manifest.tsv" -ChangedListOut "$PLUGINSDIR\changed.lst" -RemovedListOut "$PLUGINSDIR\removed.lst" -SummaryOut "$PLUGINSDIR\summary.txt" -VerifyHashes'
+  ${Else}
+    DetailPrint "Comparing incoming manifest against installed files..."
+    nsExec::ExecToStack 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\diff-sync.ps1" -InstallDir "$INSTDIR" -NewManifest "$PLUGINSDIR\install-manifest.tsv" -ChangedListOut "$PLUGINSDIR\changed.lst" -RemovedListOut "$PLUGINSDIR\removed.lst" -SummaryOut "$PLUGINSDIR\summary.txt"'
+  ${EndIf}
   Pop $0
   Pop $1
   ${If} $0 != 0
@@ -275,7 +590,7 @@ Section "-WaveFormUpdate" SEC_WAVEFORM_UPDATE
     ${EndIf}
   ${EndIf}
 
-  ; Selective extraction of ONLY changed/added files
+  ; Selective extraction of ONLY changed/added/corrupted files
   ${If} ${FileExists} "$PLUGINSDIR\changed.lst"
     FileOpen $4 "$PLUGINSDIR\changed.lst" r
     StrCpy $6 "0"
@@ -309,7 +624,6 @@ Section "-WaveFormUpdate" SEC_WAVEFORM_UPDATE
         ${If} ${Errors}
           Goto doneRemove
         ${EndIf}
-        ; Trim CR/LF
         StrCpy $6 $5 1 -1
         ${If} $6 == "$\n"
           StrCpy $5 $5 -1

@@ -93,7 +93,7 @@ for (const tierDef of tiersToRun) {
   process.stdout.write(`Executing ${tierDef.name}... `);
   const tierStart = Date.now();
 
-  const nodeArgs = ['--test', ...tierDef.files];
+  const nodeArgs = ['--test', '--test-reporter=tap', ...tierDef.files];
   const proc = spawnSync(process.execPath, nodeArgs, {
     cwd: rootDir,
     encoding: 'utf-8',
@@ -103,15 +103,12 @@ for (const tierDef of tiersToRun) {
   const durationMs = Date.now() - tierStart;
   const stdout = proc.stdout || '';
   const stderr = proc.stderr || '';
+  const cleanStdout = stdout.replace(/\x1b\[[0-9;]*m/g, '');
 
-  // Parse pass/fail counts from node:test summary
-  // Example lines:
-  // ℹ tests 135
-  // ℹ pass 135
-  // ℹ fail 0
-  const passMatch = stdout.match(/ℹ\s+pass\s+(\d+)/);
-  const failMatch = stdout.match(/ℹ\s+fail\s+(\d+)/);
-  const totalMatch = stdout.match(/ℹ\s+tests\s+(\d+)/);
+  // Parse pass/fail counts from node:test summary (supports both TAP `#` and spec `ℹ` reporters)
+  const passMatch = cleanStdout.match(/(?:ℹ|#)\s+pass\s+(\d+)/);
+  const failMatch = cleanStdout.match(/(?:ℹ|#)\s+fail\s+(\d+)/);
+  const totalMatch = cleanStdout.match(/(?:ℹ|#)\s+tests\s+(\d+)/);
 
   const passed = passMatch ? parseInt(passMatch[1], 10) : 0;
   const failed = failMatch ? parseInt(failMatch[1], 10) : (proc.status !== 0 ? 1 : 0);

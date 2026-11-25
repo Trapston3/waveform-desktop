@@ -64,6 +64,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const webGlCanvasRef = useRef<HTMLCanvasElement>(null);
+  const shipCanvasRef = useRef<HTMLCanvasElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<LyricStageRenderer | null>(null);
   const syncEngineRef = useRef<SyncEngine>(new SyncEngine());
@@ -153,6 +154,8 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
   const activeLyrics = useLyricVisualizerStore((s) => s.activeLyrics);
   const activePalette = useLyricVisualizerStore((s) => s.activePalette);
   const currentSongOffsetMs = useLyricVisualizerStore((s) => s.currentSongOffsetMs);
+  const currentAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.currentAutoSyncOffsetMs);
+  const vocalSilenceRanges = useLyricVisualizerStore((s) => s.vocalSilenceRanges);
   const isScreenLocked = useLyricVisualizerStore((s) => s.isScreenLocked);
 
   const applyBroadcastPayload = useLyricVisualizerStore((s) => s.applyBroadcastPayload);
@@ -411,6 +414,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
 
       applyBroadcastPayload(payload);
       syncEngineRef.current.setOffsetMs(payload.songOffsetMs ?? 0);
+      syncEngineRef.current.setAutoSyncOffsetMs(payload.autoSyncOffsetMs ?? 0);
       setIpcIsPlaying(Boolean(payload.isPlaying));
       snapshotRef.current = {
         track: payload.track ?? null,
@@ -485,6 +489,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
   useEffect(() => {
     const canvas = canvasRef.current;
     const webGlCanvas = webGlCanvasRef.current;
+    const shipCanvas = shipCanvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
 
@@ -497,6 +502,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
     const renderer = new LyricStageRenderer({
       canvas,
       webGlCanvas,
+      shipCanvas,
       styleId: state.config.styleId,
       variationId: resolveStyleVariationId(state.config.styleId, state.config.variationByStyle),
       fontFamily: getBundledFontCssFamily(state.config.fontId),
@@ -630,6 +636,8 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
     const renderer = rendererRef.current;
     if (!renderer) return;
     syncEngineRef.current.setOffsetMs(currentSongOffsetMs);
+    syncEngineRef.current.setAutoSyncOffsetMs(currentAutoSyncOffsetMs);
+    syncEngineRef.current.setVocalSilenceRanges(vocalSilenceRanges);
     renderer.setStyle(config.styleId);
     renderer.setVariation(activeVariationId);
     renderer.setTypography(getBundledFontCssFamily(config.fontId), config.fontSizeScale);
@@ -829,6 +837,12 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
         className="absolute inset-0 w-full h-full pointer-events-none z-0"
       />
 
+      {/* Three.js 3D Starfighter & Asteroid Layer */}
+      <canvas
+        ref={shipCanvasRef}
+        className="absolute inset-0 w-full h-full pointer-events-none z-[1] bg-transparent"
+      />
+
       {/* Primary 2D Lyric Stage Canvas */}
       <canvas
         ref={canvasRef}
@@ -842,7 +856,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
           cursor: isDraggingStage ? 'grabbing' : isHoveringLine ? 'pointer' : 'default',
           touchAction: 'none',
         }}
-        className="relative z-[1] w-full h-full"
+        className="relative z-[2] w-full h-full"
       />
 
       {/* Theme-adapted Floating "Sync with Playback" button when manually browsing */}

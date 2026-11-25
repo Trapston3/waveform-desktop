@@ -120,16 +120,21 @@ describe('Wave 2 Ticket C: Collapsible Apple Music LeftSidebar & Autocomplete Po
 
 describe('Wave 2 Ticket C: Minimal Mini-Lyrics & 60fps Smooth Lyrics Engine', () => {
   test('RightSidecar and RightInspector remove redundant mini-lyrics header and pass isActive without 1Hz positionMs subscription', () => {
-    for (const file of ['src/ui/layout/RightSidecar.tsx', 'src/ui/layout/RightInspector.tsx']) {
-      const src = readSrc(file);
-      assert.equal(src.includes('Syllable-Synced (Apple Music Style)'), false, `${file} must not contain mini-lyrics header`);
-      assert.equal(src.includes('Line-Synced'), false, `${file} must not contain Line-Synced subheader`);
-      assert.equal(src.includes('Plain Lyrics'), false, `${file} must not contain Plain Lyrics subheader`);
-      assert.equal(src.includes('s.positionMs'), false, `${file} must not subscribe to 1Hz positionMs`);
-      assert.equal(src.includes("isActive={isOpen && activeTab === 'lyrics'}"), true, `${file} must pass isActive to SyllableLyricsEngine`);
-      assert.equal(src.includes('w-[360px]'), true);
-      assert.equal(src.includes('translate3d'), true);
-    }
+    const sidecarSrc = readSrc('src/ui/layout/RightSidecar.tsx');
+    assert.equal(sidecarSrc.includes('Syllable-Synced (Apple Music Style)'), false, 'RightSidecar must not contain mini-lyrics header');
+    assert.equal(sidecarSrc.includes('Line-Synced'), false, 'RightSidecar must not contain Line-Synced subheader');
+    assert.equal(sidecarSrc.includes('Plain Lyrics'), false, 'RightSidecar must not contain Plain Lyrics subheader');
+    assert.equal(sidecarSrc.includes('s.positionMs'), false, 'RightSidecar must not subscribe to 1Hz positionMs');
+    assert.equal(sidecarSrc.includes("isActive={isOpen && activeTab === 'lyrics'}"), true, 'RightSidecar must pass isActive to SyllableLyricsEngine');
+    assert.equal(sidecarSrc.includes('w-[360px]'), true);
+    assert.equal(sidecarSrc.includes('translate3d'), true);
+
+    const inspectorSrc = readSrc('src/ui/layout/RightInspector.tsx');
+    assert.equal(
+      inspectorSrc.includes('./RightSidecar'),
+      true,
+      'src/ui/layout/RightInspector.tsx must delegate directly to RightSidecar'
+    );
   });
 
   test('SyllableLyricsEngine uses requestAnimationFrame currentTime, removes conflicting smooth scroll, and animates only GPU transform/opacity', () => {

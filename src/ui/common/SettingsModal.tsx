@@ -27,6 +27,7 @@ import { useSettingsStore, useUpdateStore } from '../../state/settingsStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
 import {
+  normalizeNowPlayingLayout,
   resolveStyleVariationId,
   VISUAL_STYLE_DEFINITIONS,
   type LyricsScriptMode,
@@ -112,6 +113,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const setVignetteStrength = useLyricVisualizerStore((s) => s.setVignetteStrength);
   const setAlbumArtColorMatch = useLyricVisualizerStore((s) => s.setAlbumArtColorMatch);
   const setTextAlign = useLyricVisualizerStore((s) => s.setTextAlign);
+  const nowPlayingLyricsMode = useLyricVisualizerStore((s) => s.nowPlayingLyricsMode);
+  const setNowPlayingLyricsMode = useLyricVisualizerStore((s) => s.setNowPlayingLyricsMode);
+  const setNowPlayingLayout = useLyricVisualizerStore((s) => s.setNowPlayingLayout);
+  const setOverlayEnabled = useLyricVisualizerStore((s) => s.setOverlayEnabled);
 
   const activeVizStyle =
     VISUAL_STYLE_DEFINITIONS.find((s) => s.id === vizConfig.styleId) ??
@@ -405,29 +410,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     {
       id: 'nowPlayingLayout',
       tab: 'appearance',
-      title: 'Now Playing Layout',
-      description: 'Choose between Split View, Centered Lyrics, or Full Ambient stage',
-      keywords: 'now playing layout split centered ambient lyrics',
+      title: 'Layout',
+      description: 'Choose between Split View, Lyrics Focus, Artwork Focus (Hide Lyrics), or Fullscreen Ambient',
+      keywords: 'now playing layout split lyrics focus artwork focus ambient',
       control: (
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap justify-end gap-1">
           {(
             [
               { id: 'split', label: 'Split View' },
-              { id: 'centered', label: 'Centered Lyrics' },
-              { id: 'ambient', label: 'Full Ambient' },
+              { id: 'lyrics-focus', label: 'Lyrics Focus' },
+              { id: 'artwork-focus', label: 'Artwork Focus' },
+              { id: 'ambient', label: 'Fullscreen Ambient' },
             ] as const
           ).map((opt) => {
-            const active = settings.nowPlayingLayout === opt.id;
+            const currentLayout = normalizeNowPlayingLayout(
+              vizConfig.nowPlayingLayout ?? settings.nowPlayingLayout
+            );
+            const active = currentLayout === opt.id;
             return (
               <button
                 key={opt.id}
                 type="button"
-                onClick={() =>
+                onClick={() => {
+                  setNowPlayingLayout(opt.id);
                   handleUpdate({
                     nowPlayingLayout: opt.id,
                     'appearance.nowPlayingLayout': opt.id,
-                  })
-                }
+                    hideAlbumCover: opt.id === 'lyrics-focus' || opt.id === 'ambient',
+                    'appearance.hideAlbumCover': opt.id === 'lyrics-focus' || opt.id === 'ambient',
+                  });
+                }}
                 className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
                   active
                     ? 'bg-[var(--color-accent)] text-white border-transparent'
@@ -442,23 +454,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       ),
     },
     {
-      id: 'hideAlbumCover',
-      tab: 'appearance',
-      title: 'Hide Album Cover in Now Playing',
-      description: 'Collapse artwork lockup and show auto-fading bottom control dock',
-      keywords: 'hide album cover artwork centered dock',
+      id: 'lyricEngine',
+      tab: 'lyrics',
+      title: 'Lyric Engine',
+      description: 'Choose between Classic Apple Music scrolling lyrics or the GPU Lyric Visualizer',
+      keywords: 'lyric engine classic apple music visualizer desktop overlay',
       control: (
-        <input
-          type="checkbox"
-          checked={Boolean(settings.hideAlbumCover)}
-          onChange={(e) =>
-            handleUpdate({
-              hideAlbumCover: e.target.checked,
-              'appearance.hideAlbumCover': e.target.checked,
-            })
-          }
-          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
-        />
+        <div className="flex items-center gap-1.5">
+          {(
+            [
+              { id: 'classic', label: 'Classic Apple Music' },
+              { id: 'visualizer', label: 'Lyric Visualizer' },
+            ] as const
+          ).map((opt) => {
+            const active = nowPlayingLyricsMode === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => {
+                  setNowPlayingLyricsMode(opt.id);
+                  if (normalizeNowPlayingLayout(vizConfig.nowPlayingLayout) === 'artwork-focus') {
+                    setNowPlayingLayout('split');
+                  }
+                  flashSaved();
+                }}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-[var(--color-accent)] text-white border-transparent'
+                    : 'bg-[var(--color-surface-variant)] text-[var(--color-primary)] border-[var(--color-outline)] hover:border-[var(--color-accent)]'
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => {
+              setOverlayEnabled(!vizConfig.overlayEnabled);
+              flashSaved();
+            }}
+            className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+              vizConfig.overlayEnabled
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/50'
+                : 'bg-[var(--color-surface-variant)] text-[var(--color-primary)] border-[var(--color-outline)] hover:border-[var(--color-accent)]'
+            }`}
+          >
+            Desktop Overlay
+          </button>
+        </div>
       ),
     },
 

@@ -4,7 +4,8 @@
 // and dynamically linked lower album metadata & DesktopTrackTable covering unified local + online albums.
 
 import React, { useState, useMemo, useEffect, memo } from 'react';
-import { Shuffle, Sparkles, HardDrive } from 'lucide-react';
+import { Shuffle, Sparkles, HardDrive, Music } from 'lucide-react';
+import { MlAudioService } from '../../services/MlAudioService';
 import {
   useLibraryStore,
   selectUnifiedSongs,
@@ -136,6 +137,26 @@ export const CoverFlowView: React.FC<CoverFlowViewProps> = memo(({ onOpenContext
     loadTrack(shuffled[0], 'active', true);
   };
 
+  const handlePreviewChorus = async () => {
+    const tracks =
+      selectedAlbum && Array.isArray(selectedAlbum.songs) && selectedAlbum.songs.length > 0
+        ? selectedAlbum.songs
+        : selectedAlbumSongs;
+    if (tracks.length === 0) return;
+    const featured = tracks[0];
+    setContextQueue(tracks, 0);
+    loadTrack(featured, 'active', true);
+    const cached = await MlAudioService.getCachedTrackBeats(featured.videoId).catch(() => null);
+    const dur = featured.durationSec || 180;
+    const targetSec =
+      cached && cached.chorusStartSec > 4
+        ? cached.chorusStartSec
+        : Math.round(Math.min(Math.max(dur * 0.34, 24), Math.max(24, dur - 25)));
+    setTimeout(() => {
+      usePlayerStore.getState().seek(targetSec * 1000);
+    }, 350);
+  };
+
   return (
     <div className="space-y-8 max-w-6xl mx-auto pb-16 select-none animate-in fade-in duration-200">
       {/* 1. Header */}
@@ -214,6 +235,14 @@ export const CoverFlowView: React.FC<CoverFlowViewProps> = memo(({ onOpenContext
               >
                 <Shuffle size={13} />
                 <span>Shuffle</span>
+              </button>
+              <button
+                onClick={() => void handlePreviewChorus()}
+                data-testid="coverflow-preview-chorus-btn"
+                className="spring-press flex items-center gap-1.5 px-4 py-2 rounded-full bg-white/10 hover:bg-white/15 border border-white/15 text-white font-semibold text-xs cursor-pointer transition-all"
+              >
+                <Music size={13} />
+                <span>Preview Chorus</span>
               </button>
             </div>
           </div>

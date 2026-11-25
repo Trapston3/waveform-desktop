@@ -85,12 +85,18 @@ export interface LibraryState {
 export interface LibraryActions {
   initLibrary: (storage?: StorageService) => Promise<void>;
   createPlaylist: (title: string, description?: string) => Promise<Playlist>;
+  createPlaylistWithSongs: (
+    title: string,
+    songs: Song[],
+    options?: { description?: string; thumbnailUrl?: string | null; sourceUrl?: string }
+  ) => Promise<Playlist>;
   addTracksToPlaylist: (playlistId: string, trackIds: string[]) => Promise<void>;
   removeTrackFromPlaylist: (playlistId: string, trackId: string) => Promise<void>;
   deletePlaylist: (playlistId: string) => Promise<boolean>;
   toggleFavorite: (song: Song) => Promise<boolean>;
   isFavorite: (videoId: string) => boolean;
   recordListeningHistory: (song: Song, durationSec: number) => Promise<void>;
+  upsertListeningSession: (entry: RichListeningHistoryEntry) => Promise<void>;
   refreshMonthlyStats: (yearMonth?: string) => Promise<void>;
   refreshYearlyReplayStats: (year?: number) => Promise<void>;
   resetListeningData: () => Promise<void>;
@@ -504,6 +510,22 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
     return created;
   },
 
+  createPlaylistWithSongs: async (
+    rawTitle: string,
+    songs: Song[],
+    options: { description?: string; thumbnailUrl?: string | null; sourceUrl?: string } = {}
+  ): Promise<Playlist> => {
+    const sanitizedTitle = (rawTitle || '').trim().slice(0, 100);
+    if (!sanitizedTitle) {
+      throw new Error('Playlist title cannot be empty');
+    }
+    const { storageService, playlists } = get();
+    const storage = storageService || globalStorageInstance || new StorageService();
+    const created = await storage.createPlaylistWithSongs(sanitizedTitle, songs, options);
+    set({ playlists: [...playlists, created] });
+    return created;
+  },
+
   addTracksToPlaylist: async (playlistId: string, trackIds: string[]) => {
     const { storageService } = get();
     const storage = storageService || new StorageService();
@@ -579,6 +601,52 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
 
   isFavorite: (videoId: string): boolean => {
     return get().favorites.some((f) => f.videoId === videoId);
+  },
+
+  upsertListeningSession: async (entry: RichListeningHistoryEntry) => {
+    if (!entry || !entry.videoId) return;
+    const { storageService, listeningHistory } = get();
+    const storage = storageService || globalStorageInstance || new StorageService();
+    if (typeof (storage as any).upsertListeningSession === 'function') {
+      await (storage as any).upsertListeningSession(entry);
+    } else {
+      await storage.recordListeningHistory(entry as any, entry.listenedSeconds ?? entry.durationSec ?? 0);
+    }
+
+    const idx = listeningHistory.findIndex(
+      (h) => (entry.sessionId && h.sessionId === entry.sessionId) || (h.videoId === entry.videoId && h.timestamp === entry.timestamp)
+    );
+    const nextHistory =
+      idx >= 0
+        ? listeningHistory.map((h, i) => (i === idx ? entry : h))
+        : [entry, ...listeningHistory].slice(0, 200);
+
+    const now = new Date();
+    const targetMonth = formatLocalYearMonth(now);
+    const targetYear = now.getFullYear();
+
+    let nextMonthly = get().monthlyStats;
+    let nextYearly = get().yearlyReplayStats;
+    try {
+      const [m, y] = await Promise.all([
+        typeof (storage as any).getMonthlyListeningHistory === 'function'
+          ? storage.getMonthlyListeningHistory(targetMonth)
+          : Promise.resolve(nextMonthly),
+        typeof (storage as any).getYearlyReplayStats === 'function'
+          ? storage.getYearlyReplayStats(targetYear)
+          : Promise.resolve(computeYearlyReplayStats(nextHistory, targetYear)),
+      ]);
+      nextMonthly = m;
+      nextYearly = y;
+    } catch (err) {
+      console.warn('[libraryStore] Failed to refresh replay stats after session upsert:', err);
+    }
+
+    set({
+      listeningHistory: nextHistory,
+      monthlyStats: nextMonthly,
+      yearlyReplayStats: nextYearly,
+    });
   },
 
   recordListeningHistory: async (rawSong: Song, durationSec: number) => {

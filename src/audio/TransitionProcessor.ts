@@ -9,6 +9,19 @@ export interface TransitionConfig {
   highPassEndHz?: number;
 }
 
+export interface VocalSilenceRange {
+  startSec: number;
+  endSec: number;
+}
+
+export interface DownbeatTransitionWindow {
+  outgoingStartSec: number;
+  incomingStartSec: number;
+  durationSec: number;
+  alignedToDownbeat: boolean;
+  vocalOverlapSec: number;
+}
+
 export class TransitionProcessor {
   public static readonly OPEN_HZ = 20000;
   public static readonly OFF_HZ = 20;
@@ -85,6 +98,94 @@ export class TransitionProcessor {
       out[i] = buffer[srcIdx];
     }
     return out;
+  }
+
+  /**
+   * Aligns an Auto-Mix transition onto neural downbeats while minimizing overlap with active vocals.
+   */
+  public static findBestDownbeatTransitionWindow(
+    outgoingDownbeats: readonly number[],
+    outgoingDurationSec: number,
+    incomingDownbeats: readonly number[],
+    transitionBars = 4,
+    vocalSilenceRanges: readonly VocalSilenceRange[] = [],
+    bpm = 120
+  ): DownbeatTransitionWindow {
+    const durationSec = TransitionProcessor.calculateTransitionDurationSec(transitionBars, bpm);
+    const safeOutDur =
+      Number.isFinite(outgoingDurationSec) && outgoingDurationSec > 0 ? outgoingDurationSec : 180;
+    const defaultStart = Math.max(0, safeOutDur - durationSec);
+
+    const incomingStartSec =
+      Array.isArray(incomingDownbeats) && incomingDownbeats.length > 0
+        ? incomingDownbeats.find((t) => Number.isFinite(t) && t >= 0 && t <= 12) ?? 0
+        : 0;
+
+    if (!Array.isArray(outgoingDownbeats) || outgoingDownbeats.length === 0) {
+      return {
+        outgoingStartSec: defaultStart,
+        incomingStartSec,
+        durationSec,
+        alignedToDownbeat: false,
+        vocalOverlapSec: durationSec,
+      };
+    }
+
+    const searchMin = Math.max(safeOutDur * 0.65, safeOutDur - Math.max(24, durationSec * 2.5));
+    const searchMax = Math.max(searchMin + 0.5, safeOutDur - Math.min(2.0, durationSec * 0.45));
+    const candidates = outgoingDownbeats.filter(
+      (t) => Number.isFinite(t) && t >= searchMin && t <= searchMax
+    );
+    const pool =
+      candidates.length > 0
+        ? candidates
+        : [
+            outgoingDownbeats.reduce((best, curr) =>
+              Math.abs(curr - defaultStart) < Math.abs(best - defaultStart) ? curr : best
+            ),
+          ];
+
+    const measureVocalOverlap = (startSec: number, endSec: number): number => {
+      if (!vocalSilenceRanges || vocalSilenceRanges.length === 0) {
+        return Math.max(0, endSec - startSec);
+      }
+      let silentCovered = 0;
+      for (const seg of vocalSilenceRanges) {
+        if (!seg || !Number.isFinite(seg.startSec) || !Number.isFinite(seg.endSec)) continue;
+        const ovStart = Math.max(startSec, seg.startSec);
+        const ovEnd = Math.min(endSec, seg.endSec);
+        if (ovEnd > ovStart) {
+          silentCovered += ovEnd - ovStart;
+        }
+      }
+      return Math.max(0, endSec - startSec - silentCovered);
+    };
+
+    let bestStart = pool[0];
+    let bestCost = Number.POSITIVE_INFINITY;
+    let bestVocalOverlap = durationSec;
+
+    for (const start of pool) {
+      const end = Math.min(safeOutDur, start + durationSec);
+      const effectiveDur = Math.max(0.5, end - start);
+      const vocalOverlap = measureVocalOverlap(start, end);
+      const tailPenalty = Math.abs(start - defaultStart) * 0.15;
+      const truncatedPenalty = effectiveDur < durationSec * 0.6 ? (durationSec - effectiveDur) * 0.5 : 0;
+      const cost = vocalOverlap + tailPenalty + truncatedPenalty;
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestStart = start;
+        bestVocalOverlap = vocalOverlap;
+      }
+    }
+
+    return {
+      outgoingStartSec: Number(bestStart.toFixed(3)),
+      incomingStartSec: Number(incomingStartSec.toFixed(3)),
+      durationSec,
+      alignedToDownbeat: true,
+      vocalOverlapSec: Number(bestVocalOverlap.toFixed(3)),
+    };
   }
 
   /**

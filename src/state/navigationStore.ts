@@ -33,6 +33,7 @@ export interface NavigationState {
   forwardStack: NavigationTarget[];
   isSettingsOpen: boolean;
   isCreatePlaylistOpen: boolean;
+  isImportPlaylistOpen: boolean;
   isReplayOpen: boolean;
   isEqualizerOpen: boolean;
   isLyricsDrawerOpen: boolean;
@@ -54,6 +55,7 @@ export interface NavigationActions {
 
   setSettingsOpen: (open: boolean) => void;
   setCreatePlaylistOpen: (open: boolean) => void;
+  setImportPlaylistOpen: (open: boolean) => void;
   setReplayOpen: (open: boolean) => void;
   setEqualizerOpen: (open: boolean) => void;
   toggleEqualizer: () => void;
@@ -74,6 +76,7 @@ export const useNavigationStore = create<NavigationStore>((set, get) => ({
   forwardStack: [],
   isSettingsOpen: false,
   isCreatePlaylistOpen: false,
+  isImportPlaylistOpen: false,
   isReplayOpen: false,
   isEqualizerOpen: false,
   isLyricsDrawerOpen: false,
@@ -140,6 +143,7 @@ export const useNavigationStore = create<NavigationStore>((set, get) => ({
 
   setSettingsOpen: (open: boolean) => set({ isSettingsOpen: open }),
   setCreatePlaylistOpen: (open: boolean) => set({ isCreatePlaylistOpen: open }),
+  setImportPlaylistOpen: (open: boolean) => set({ isImportPlaylistOpen: open }),
   setReplayOpen: (open: boolean) => set({ isReplayOpen: open }),
   setEqualizerOpen: (open: boolean) => set({ isEqualizerOpen: open }),
   toggleEqualizer: () => set((state) => ({ isEqualizerOpen: !state.isEqualizerOpen })),

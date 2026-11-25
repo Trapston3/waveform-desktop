@@ -14,10 +14,12 @@ import {
   ChevronRight,
   User,
   Disc,
+  Radio,
+  Trash2,
 } from 'lucide-react';
 import type { Song } from '../../models/Song';
 import { usePlayerStore } from '../../state/playerStore';
-import { useQueueStore } from '../../state/queueStore';
+import { useQueueStore, type QueueTierType } from '../../state/queueStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { useNavigationStore } from '../../state/navigationStore';
 import { resolveArtistTarget } from '../../utils/artistCredits';
@@ -27,15 +29,23 @@ export interface ContextMenuProps {
   x: number;
   y: number;
   track: Song | null;
+  queueContext?: { tier: QueueTierType; index: number } | null;
   onClose: () => void;
 }
 
-export const ContextMenu: React.FC<ContextMenuProps> = ({ isOpen, x, y, track: rawTrack, onClose }) => {
+export const ContextMenu: React.FC<ContextMenuProps> = ({
+  isOpen,
+  x,
+  y,
+  track: rawTrack,
+  queueContext,
+  onClose,
+}) => {
   const [showPlaylistSubmenu, setShowPlaylistSubmenu] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const { loadTrack } = usePlayerStore();
-  const { playNext, addToUserQueue } = useQueueStore();
+  const { playNext, addToUserQueue, startSongRadio, removeFromQueue } = useQueueStore();
   const { playlists, addTracksToPlaylist, toggleFavorite, isFavorite } = useLibraryStore();
   const { navigateToArtist, navigateToRelease } = useNavigationStore();
 
@@ -85,6 +95,18 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ isOpen, x, y, track: r
 
   const handleAddToQueue = () => {
     addToUserQueue(track);
+    onClose();
+  };
+
+  const handleStartRadio = () => {
+    void startSongRadio(track);
+    onClose();
+  };
+
+  const handleRemoveFromQueue = () => {
+    if (queueContext) {
+      removeFromQueue(queueContext.tier, queueContext.index);
+    }
     onClose();
   };
 
@@ -145,6 +167,24 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ isOpen, x, y, track: r
         <ListPlus size={14} />
         <span>Add to Queue</span>
       </button>
+
+      <button
+        onClick={handleStartRadio}
+        className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-white/10 hover:text-[var(--color-accent)] transition-colors text-left cursor-pointer"
+      >
+        <Radio size={14} />
+        <span>Start Song Radio</span>
+      </button>
+
+      {queueContext && (
+        <button
+          onClick={handleRemoveFromQueue}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-red-500/15 hover:text-red-400 transition-colors text-left cursor-pointer"
+        >
+          <Trash2 size={14} />
+          <span>Remove from Queue</span>
+        </button>
+      )}
 
       <div className="h-[1px] bg-white/10 my-1" />
 

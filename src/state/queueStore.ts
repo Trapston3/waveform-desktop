@@ -7,6 +7,9 @@ import { normalizeSong } from '../models/Song';
 import type { PlaybackContext } from '../models/Queue';
 import { usePlayerStore } from './playerStore';
 import { loadSyncSession } from '../utils/sessionPersistence';
+import { MusicService } from '../services/MusicService';
+
+const sharedRadioService = new MusicService();
 
 export interface QueueTiers {
   USER_QUEUE: Song[];
@@ -24,6 +27,8 @@ export interface QueueState {
   history: Song[];
   context: PlaybackContext | null;
   isAutoplayLoading: boolean;
+  autoplayEnabled: boolean;
+  radioRequestToken: number;
 }
 
 export interface QueueActions {
@@ -32,10 +37,17 @@ export interface QueueActions {
   playNext: (song: Song) => void;
   setContextQueue: (songs: Song[], startIndex?: number, context?: PlaybackContext) => void;
   setAutoplayQueue: (songs: Song[]) => void;
+  playSingleWithRadio: (song: Song) => Promise<void>;
+  startSongRadio: (song: Song) => Promise<void>;
+  refreshAutoplayRadio: (seed: Song, append?: boolean) => Promise<void>;
+  toggleAutoplay: (enabled?: boolean) => void;
 
   // Queue Item Manipulation
   removeFromQueue: (tier: QueueTierType, index: number) => void;
   reorderQueue: (tier: QueueTierType, fromIndex: number, toIndex: number) => void;
+  moveTrackUp: (tier: QueueTierType, index: number) => void;
+  moveTrackDown: (tier: QueueTierType, index: number) => void;
+  shuffleUpNext: () => void;
   clearQueue: (tier?: QueueTierType) => void;
 
   // Aliases
@@ -67,6 +79,8 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
   history: initialQueue?.history || [],
   context: initialQueue?.context || null,
   isAutoplayLoading: false,
+  autoplayEnabled: true,
+  radioRequestToken: 0,
 
   addToUserQueue: (rawSong: Song) => {
     const song = normalizeSong(rawSong as any);
@@ -115,6 +129,116 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
       tiers: {
         ...state.tiers,
         AUTOPLAY: songs,
+      },
+    }));
+  },
+
+  toggleAutoplay: (enabled?: boolean) => {
+    set((state) => {
+      const next = typeof enabled === 'boolean' ? enabled : !state.autoplayEnabled;
+      return { autoplayEnabled: next };
+    });
+    const st = get();
+    if (st.autoplayEnabled && st.tiers.AUTOPLAY.length === 0 && st.currentSong) {
+      void st.refreshAutoplayRadio(st.currentSong, false);
+    }
+  },
+
+  refreshAutoplayRadio: async (rawSeed: Song, append = false) => {
+    const seed = normalizeSong(rawSeed as any);
+    const token = get().radioRequestToken + 1;
+    set({ radioRequestToken: token, isAutoplayLoading: true });
+    try {
+      const { tiers, history } = get();
+      const exclude = new Set<string>([
+        seed.videoId,
+        ...tiers.USER_QUEUE.map((s) => s.videoId),
+        ...tiers.CONTEXT.map((s) => s.videoId),
+        ...(append ? tiers.AUTOPLAY.map((s) => s.videoId) : []),
+        ...history.slice(0, 10).map((s) => s.videoId),
+      ]);
+      const radioSongs = (await sharedRadioService.getUpNextRadio(seed, exclude)).map((s) =>
+        normalizeSong(s as any)
+      );
+      if (get().radioRequestToken !== token) return;
+      set((state) => ({
+        tiers: {
+          ...state.tiers,
+          AUTOPLAY: append ? [...state.tiers.AUTOPLAY, ...radioSongs] : radioSongs,
+        },
+        isAutoplayLoading: false,
+      }));
+    } catch {
+      if (get().radioRequestToken === token) {
+        set({ isAutoplayLoading: false });
+      }
+    }
+  },
+
+  playSingleWithRadio: async (rawSong: Song) => {
+    const song = normalizeSong(rawSong as any);
+    const prevSong = get().currentSong;
+    const nextHistory = prevSong ? [prevSong, ...get().history].slice(0, 50) : get().history;
+    const nextToken = get().radioRequestToken + 1;
+
+    set((state) => ({
+      tiers: {
+        ...state.tiers,
+        CONTEXT: [],
+        AUTOPLAY: [],
+      },
+      currentSong: song,
+      currentTier: 'CONTEXT',
+      currentIndex: 0,
+      history: nextHistory,
+      context: { id: `radio_${song.videoId}`, title: `${song.title} Radio`, type: 'radio', currentIndex: 0 } as any,
+      radioRequestToken: nextToken,
+    }));
+
+    void usePlayerStore.getState().loadTrack(song, 'active', true);
+
+    if (get().autoplayEnabled) {
+      await get().refreshAutoplayRadio(song, false);
+    }
+  },
+
+  startSongRadio: async (rawSong: Song) => {
+    await get().playSingleWithRadio(rawSong);
+  },
+
+  moveTrackUp: (tier: QueueTierType, index: number) => {
+    if (index > 0) {
+      get().reorderQueue(tier, index, index - 1);
+    }
+  },
+
+  moveTrackDown: (tier: QueueTierType, index: number) => {
+    const len = get().tiers[tier].length;
+    if (index >= 0 && index < len - 1) {
+      get().reorderQueue(tier, index, index + 1);
+    }
+  },
+
+  shuffleUpNext: () => {
+    const shuffleArr = <T,>(arr: T[]): T[] => {
+      const copy = [...arr];
+      for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+      }
+      return copy;
+    };
+    set((state) => ({
+      tiers: {
+        USER_QUEUE: shuffleArr(state.tiers.USER_QUEUE),
+        CONTEXT:
+          state.currentTier === 'CONTEXT' && state.currentIndex >= 0
+            ? [
+                ...state.tiers.CONTEXT.slice(0, state.currentIndex + 1),
+                ...shuffleArr(state.tiers.CONTEXT.slice(state.currentIndex + 1)),
+              ]
+            : shuffleArr(state.tiers.CONTEXT),
+        AUTOPLAY: shuffleArr(state.tiers.AUTOPLAY),
       },
     }));
   },
@@ -247,7 +371,7 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
     }
 
     // 4. Check Tier 3: AUTOPLAY
-    if (tiers.AUTOPLAY.length > 0) {
+    if (get().autoplayEnabled && tiers.AUTOPLAY.length > 0) {
       const [nextSong, ...remainingAutoplay] = tiers.AUTOPLAY;
       set({
         tiers: {
@@ -259,6 +383,9 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
         history: nextHistory,
       });
       usePlayerStore.getState().loadTrack(nextSong, 'active', true);
+      if (remainingAutoplay.length <= 2) {
+        void get().refreshAutoplayRadio(nextSong, true);
+      }
       return nextSong;
     }
 

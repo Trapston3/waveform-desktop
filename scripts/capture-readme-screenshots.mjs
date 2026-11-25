@@ -1010,13 +1010,13 @@ async function runElectronScreenshotHarness() {
   ]);
   await capturePng('04-visualizer-spaceship-3d.png', '04-visualizer-spaceship-3d');
 
-  // 5. 05-centered-lyrics-mode.png (Centered Lyric Mode with hidden album cover & minimal bottom dock)
+  // 5. 05-centered-lyrics-mode.png (Lyrics Focus Mode with hidden album cover & minimal bottom dock)
   await configureSceneAndReload({
     trackIndex: 4,
     positionMs: 20000,
     nowPlayingLyricsMode: 'classic',
     styleId: 'AppleMusicFlow',
-    nowPlayingLayout: 'centered',
+    nowPlayingLayout: 'lyrics-focus',
     hideAlbumCover: true,
     textAlign: 'center',
   });

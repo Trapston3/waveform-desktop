@@ -3,12 +3,24 @@ import { isBlankOrInstrumentalLineText } from './lrcParser';
 
 export const MIN_OFFSET_MS = -2000;
 export const MAX_OFFSET_MS = 2000;
+export const MIN_AUTO_SYNC_OFFSET_MS = -15000;
+export const MAX_AUTO_SYNC_OFFSET_MS = 15000;
 export const INSTRUMENTAL_FADE_THRESHOLD_SECONDS = 12;
 export const INSTRUMENTAL_FADE_DURATION_SECONDS = 1.5;
+
+export interface VocalSilenceInterval {
+  readonly startSec: number;
+  readonly endSec: number;
+}
 
 export function clampOffsetMs(offsetMs: number): number {
   if (!Number.isFinite(offsetMs)) return 0;
   return Math.max(MIN_OFFSET_MS, Math.min(MAX_OFFSET_MS, Math.round(offsetMs)));
+}
+
+export function clampAutoSyncOffsetMs(offsetMs: number): number {
+  if (!Number.isFinite(offsetMs)) return 0;
+  return Math.max(MIN_AUTO_SYNC_OFFSET_MS, Math.min(MAX_AUTO_SYNC_OFFSET_MS, Math.round(offsetMs)));
 }
 
 export interface SyncFrameResult {
@@ -169,6 +181,8 @@ export function snapAllSyncEngines(positionSeconds: number, lyrics: Lyrics | nul
 
 export class SyncEngine {
   private offsetMs = 0;
+  private autoSyncOffsetMs = 0;
+  private vocalSilenceRanges: VocalSilenceInterval[] = [];
   private lastTrackId: string | null = null;
   private lastSnapshotTimestampMs = -1;
   private lastSnapshotPosition = 0;
@@ -185,6 +199,14 @@ export class SyncEngine {
     return this.offsetMs;
   }
 
+  getAutoSyncOffsetMs(): number {
+    return this.autoSyncOffsetMs;
+  }
+
+  getEffectiveOffsetMs(): number {
+    return this.offsetMs + this.autoSyncOffsetMs;
+  }
+
   getLastLineIndex(): number {
     return this.lastLineIndex;
   }
@@ -197,12 +219,26 @@ export class SyncEngine {
     }
   }
 
+  setAutoSyncOffsetMs(offsetMs: number): void {
+    const clamped = clampAutoSyncOffsetMs(offsetMs);
+    if (clamped !== this.autoSyncOffsetMs) {
+      this.autoSyncOffsetMs = clamped;
+      this.pendingSeekFlag = true;
+    }
+  }
+
+  setVocalSilenceRanges(ranges: readonly VocalSilenceInterval[]): void {
+    this.vocalSilenceRanges = Array.isArray(ranges)
+      ? ranges.filter((r) => r && Number.isFinite(r.startSec) && Number.isFinite(r.endSec) && r.endSec > r.startSec)
+      : [];
+  }
+
   snapToTime(positionSeconds: number, lyrics: Lyrics | null = null): void {
     const safeSec = Number.isFinite(positionSeconds) ? Math.max(0, positionSeconds) : 0;
     this.lastSnapshotPosition = safeSec;
     this.lastSnapshotTimestampMs =
       typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const effectiveSec = Math.max(0, safeSec + this.offsetMs / 1000);
+    const effectiveSec = Math.max(0, safeSec + this.getEffectiveOffsetMs() / 1000);
     this.lastOutputTime = effectiveSec;
     this.pendingSeekFlag = true;
     if (lyrics && lyrics.lines.length > 0) {
@@ -214,6 +250,7 @@ export class SyncEngine {
 
   reset(): void {
     this.lastTrackId = null;
+    this.vocalSilenceRanges = [];
     this.lastSnapshotTimestampMs = -1;
     this.lastSnapshotPosition = 0;
     this.lastOutputTime = 0;
@@ -243,6 +280,7 @@ export class SyncEngine {
 
     if (trackId !== this.lastTrackId) {
       this.lastTrackId = trackId;
+      this.vocalSilenceRanges = [];
       this.lastSnapshotTimestampMs = snapshot.timestampMs;
       this.lastSnapshotPosition = snapshot.positionSeconds;
       this.lastOutputTime = 0;
@@ -274,7 +312,7 @@ export class SyncEngine {
     this.lastSnapshotTimestampMs = snapshot.timestampMs;
     this.lastSnapshotPosition = snapshot.positionSeconds;
 
-    const effectiveRaw = Math.max(0, rawExtrapolated + this.offsetMs / 1000);
+    const effectiveRaw = Math.max(0, rawExtrapolated + this.getEffectiveOffsetMs() / 1000);
 
     // If effective time jumped backward by >0.35s (e.g., stream reset to 0 or drift snap), treat as seek
     if (!didSeekThisFrame && this.lastOutputTime - effectiveRaw > 0.35) {
@@ -427,6 +465,19 @@ export class SyncEngine {
           isInstrumentalGap = true;
           gapProgress = 1;
           gapDuration = Number.POSITIVE_INFINITY;
+        }
+      }
+    }
+
+    // Refine instrumental gap detection using neural vocal-silence ranges when available
+    if (!isInstrumentalGap && activeLineIndex < 0 && this.vocalSilenceRanges.length > 0) {
+      for (const seg of this.vocalSilenceRanges) {
+        const segDur = seg.endSec - seg.startSec;
+        if (segDur >= 2.5 && rawExtrapolated >= seg.startSec && rawExtrapolated <= seg.endSec) {
+          isInstrumentalGap = true;
+          gapDuration = Math.max(gapDuration, segDur);
+          gapProgress = clamp01((rawExtrapolated - seg.startSec) / Math.max(0.001, segDur));
+          break;
         }
       }
     }

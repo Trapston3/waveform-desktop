@@ -11,6 +11,7 @@
 import React, { useState, useMemo, useEffect, memo } from 'react';
 import {
   Plus,
+  Link2,
   Heart,
   Users2,
   ListMusic,
@@ -172,6 +173,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
   const { setContextQueue } = useQueueStore();
   const {
     setCreatePlaylistOpen,
+    setImportPlaylistOpen,
     navigateToTab,
     navigateToRelease,
     navigateToArtist,
@@ -950,13 +952,23 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
             <span className="text-xs font-bold uppercase tracking-wider text-[#8E8E93]">
               Playlists ({playlists.length})
             </span>
-            <button
-              onClick={() => setCreatePlaylistOpen(true)}
-              className="spring-press flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/[0.06] hover:bg-white/[0.10] border border-white/10 text-xs font-semibold text-[#FA2D48] cursor-pointer transition-colors"
-            >
-              <Plus size={14} />
-              <span>New Playlist</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setImportPlaylistOpen(true)}
+                data-testid="library-import-playlist-btn"
+                className="spring-press flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/[0.06] hover:bg-white/[0.10] border border-white/10 text-xs font-semibold text-white/90 cursor-pointer transition-colors"
+              >
+                <Link2 size={14} className="text-[#FA2D48]" />
+                <span>Import from URL</span>
+              </button>
+              <button
+                onClick={() => setCreatePlaylistOpen(true)}
+                className="spring-press flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/[0.06] hover:bg-white/[0.10] border border-white/10 text-xs font-semibold text-[#FA2D48] cursor-pointer transition-colors"
+              >
+                <Plus size={14} />
+                <span>New Playlist</span>
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">

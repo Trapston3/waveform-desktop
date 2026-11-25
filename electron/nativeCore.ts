@@ -117,6 +117,37 @@ export interface NativeVocalsMaskResult {
   error: string | null;
 }
 
+export interface NativeTimeRange {
+  startSec: number;
+  endSec: number;
+}
+
+export interface NativeTrackBeatAnalysisResult {
+  usedOnnx: boolean;
+  bpm: number;
+  beats: number[];
+  downbeats: number[];
+  chorusStartSec: number;
+  vocalSilenceRanges: NativeTimeRange[];
+  vocalEnvelope: number[];
+  envelopeFps: number;
+  durationSec: number;
+  error: string | null;
+}
+
+export interface NativeVocalSeparationResult {
+  usedOnnx: boolean;
+  vocalsLeft: Float32Array;
+  vocalsRight: Float32Array;
+  sampleRate: number;
+  error: string | null;
+}
+
+export interface NativeLyricAutoSyncResult {
+  offsetMs: number;
+  confidence: number;
+}
+
 export interface NativeCoreBindings {
   nativeCoreVersion(): string;
   autoeqInit(candidatePaths?: string[]): NativeAutoEqStatus;
@@ -159,6 +190,21 @@ export interface NativeCoreBindings {
     mixMagnitude: Float32Array,
     frames?: number
   ): NativeVocalsMaskResult;
+  onnxAnalyzeTrackBeatsPcm(
+    leftPcm: Float32Array,
+    rightPcm: Float32Array | null | undefined,
+    sampleRate: number
+  ): Promise<NativeTrackBeatAnalysisResult>;
+  onnxSeparateVocalsPcm(
+    leftPcm: Float32Array,
+    rightPcm: Float32Array,
+    sampleRate: number
+  ): Promise<NativeVocalSeparationResult>;
+  estimateLyricOffsetMs(
+    vocalEnvelope: Float32Array,
+    envelopeFps: number,
+    lineStartTimesSec: number[]
+  ): NativeLyricAutoSyncResult;
 }
 
 export interface NativeCoreInfo {

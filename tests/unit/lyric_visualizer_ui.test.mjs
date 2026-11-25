@@ -378,6 +378,10 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     assert.strictEqual(useLyricVisualizerStore.getState().config.variationByStyle?.GenerativeParticleInk, 'spectrum-ribbon');
 
     store.setNowPlayingLayout('centered');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.nowPlayingLayout, 'lyrics-focus');
+    store.setNowPlayingLayout('artwork-focus');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.nowPlayingLayout, 'artwork-focus');
+    store.setNowPlayingLayout('centered');
     store.setHideAlbumCover(true);
     store.setBackgroundOpacity(0.05);
     assert.strictEqual(useLyricVisualizerStore.getState().config.backgroundOpacity, MIN_BACKGROUND_OPACITY);
@@ -391,7 +395,7 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     store.setTextAlign('invalid');
     assert.strictEqual(useLyricVisualizerStore.getState().config.textAlign, 'left');
     const persisted = JSON.parse(activeStorage.getItem('waveform.lyricVisualizer.v1'));
-    assert.strictEqual(persisted.config.nowPlayingLayout, 'centered');
+    assert.strictEqual(persisted.config.nowPlayingLayout, 'lyrics-focus');
     assert.strictEqual(persisted.config.hideAlbumCover, true);
     assert.strictEqual(persisted.config.backgroundOpacity, MAX_BACKGROUND_OPACITY);
     assert.strictEqual(persisted.config.vignetteStrength, MAX_VIGNETTE_STRENGTH);
@@ -427,6 +431,14 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     store.resetSongOffsetMs();
     assert.strictEqual(useLyricVisualizerStore.getState().currentSongOffsetMs, 0);
     assert.ok(ipcCalls.songOffsets.some((c) => c.key === 'song-alpha' && c.offset === 0));
+
+    // Separate Auto-Sync offset clamping [-15000, +15000]
+    store.setAutoSyncOffsetMs(6200);
+    assert.strictEqual(useLyricVisualizerStore.getState().currentAutoSyncOffsetMs, 6200);
+    store.setAutoSyncOffsetMs(25000);
+    assert.strictEqual(useLyricVisualizerStore.getState().currentAutoSyncOffsetMs, 15000);
+    store.resetAutoSyncOffsetMs();
+    assert.strictEqual(useLyricVisualizerStore.getState().currentAutoSyncOffsetMs, 0);
 
     // Remote IPC offset loading
     await store.setCurrentSongKey('remote-song');

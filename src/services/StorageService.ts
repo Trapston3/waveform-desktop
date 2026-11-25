@@ -179,9 +179,225 @@ export async function readJsonSafe<T>(filePath: string, fallback: T): Promise<T>
 }
 
 export interface RichListeningHistoryEntry extends ListeningHistoryEntry {
+  sessionId?: string;
+  startedAt?: number;
+  listenedSeconds?: number;
+  trackDurationSec?: number;
+  countedPlay?: boolean;
   albumName?: string;
   artworkUrl?: string;
   qualityLabel?: string;
+}
+
+export function getListeningEntryKey(entry: Partial<RichListeningHistoryEntry>): string {
+  if (entry.sessionId && typeof entry.sessionId === 'string' && entry.sessionId.trim()) {
+    return `sid:${entry.sessionId.trim()}`;
+  }
+  const vid = String(entry.videoId || '').trim();
+  const ts =
+    typeof entry.startedAt === 'number' && Number.isFinite(entry.startedAt)
+      ? Math.round(entry.startedAt)
+      : typeof entry.timestamp === 'number' && Number.isFinite(entry.timestamp)
+      ? Math.round(entry.timestamp)
+      : 0;
+  return `vt:${vid}|${ts}`;
+}
+
+export function mergeListeningEntries(
+  existing: RichListeningHistoryEntry[],
+  incoming: RichListeningHistoryEntry[]
+): RichListeningHistoryEntry[] {
+  const byKey = new Map<string, RichListeningHistoryEntry>();
+  const ingest = (raw: RichListeningHistoryEntry) => {
+    if (!raw || typeof raw.videoId !== 'string' || !raw.videoId.trim()) return;
+    const key = getListeningEntryKey(raw);
+    const listened = Math.max(
+      0,
+      Math.round(
+        typeof raw.listenedSeconds === 'number' && Number.isFinite(raw.listenedSeconds)
+          ? raw.listenedSeconds
+          : Number.isFinite(raw.durationSec)
+          ? raw.durationSec
+          : 0
+      )
+    );
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, {
+        ...raw,
+        durationSec: listened,
+        listenedSeconds: listened,
+      });
+      return;
+    }
+    const prevSec = Math.max(0, Math.round(prev.listenedSeconds ?? prev.durationSec ?? 0));
+    const bestSec = Math.max(prevSec, listened);
+    byKey.set(key, {
+      ...prev,
+      ...raw,
+      albumName: raw.albumName || prev.albumName,
+      artworkUrl: raw.artworkUrl || prev.artworkUrl,
+      qualityLabel: raw.qualityLabel || prev.qualityLabel,
+      startedAt: prev.startedAt ?? raw.startedAt,
+      timestamp: Math.max(prev.timestamp || 0, raw.timestamp || 0),
+      durationSec: bestSec,
+      listenedSeconds: bestSec,
+      countedPlay: Boolean(prev.countedPlay ?? true) || Boolean(raw.countedPlay),
+    });
+  };
+  for (const e of Array.isArray(existing) ? existing : []) ingest(e);
+  for (const e of Array.isArray(incoming) ? incoming : []) ingest(e);
+  return Array.from(byKey.values()).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+}
+
+export class ListeningSessionTracker {
+  private sessionSeq = 0;
+  private active: {
+    sessionId: string;
+    song: Song;
+    startedAt: number;
+    trackDurationSec: number;
+    totalSec: number;
+    flushedSec: number;
+    lastFlushAtMs: number;
+    countedPlay: boolean;
+    lastEngineTimeSec: number;
+    lastTickMs: number;
+  } | null = null;
+
+  private startSession(song: Song, trackDurationSec: number, engineTimeSec: number, nowMs: number): void {
+    this.sessionSeq += 1;
+    this.active = {
+      sessionId: `ls_${nowMs}_${this.sessionSeq}_${Math.random().toString(36).slice(2, 7)}`,
+      song,
+      startedAt: nowMs,
+      trackDurationSec: Math.max(0, Number.isFinite(trackDurationSec) ? trackDurationSec : 0),
+      totalSec: 0,
+      flushedSec: 0,
+      lastFlushAtMs: nowMs,
+      countedPlay: false,
+      lastEngineTimeSec: engineTimeSec,
+      lastTickMs: nowMs,
+    };
+  }
+
+  private buildPayload(): RichListeningHistoryEntry | null {
+    const s = this.active;
+    if (!s) return null;
+    const totalRounded = Math.round(s.totalSec);
+    if (totalRounded <= 0) return null;
+    const albumName =
+      (typeof s.song.albumName === 'string' && s.song.albumName.trim()) ||
+      (typeof s.song.album === 'string' && s.song.album.trim()) ||
+      undefined;
+    const artworkUrl = extractEntryArtwork(s.song);
+    const qualityLabel = extractEntryQuality(s.song);
+    return {
+      sessionId: s.sessionId,
+      videoId: s.song.videoId,
+      title: s.song.title,
+      artist: s.song.artist,
+      ...(albumName ? { albumName } : {}),
+      ...(artworkUrl ? { artworkUrl } : {}),
+      ...(qualityLabel ? { qualityLabel } : {}),
+      timestamp: s.startedAt,
+      startedAt: s.startedAt,
+      durationSec: totalRounded,
+      listenedSeconds: totalRounded,
+      ...(s.trackDurationSec > 0 ? { trackDurationSec: Math.round(s.trackDurationSec) } : {}),
+      countedPlay: s.countedPlay,
+    };
+  }
+
+  onTick(params: {
+    song: Song | null;
+    isPlaying: boolean;
+    isSeeking: boolean;
+    engineTimeSec: number;
+    durationSec: number;
+    nowMs?: number;
+  }): RichListeningHistoryEntry[] {
+    const nowMs = params.nowMs ?? Date.now();
+    const out: RichListeningHistoryEntry[] = [];
+
+    if (!params.song || !params.song.videoId) {
+      const flushed = this.flush(nowMs);
+      if (flushed) out.push(flushed);
+      this.active = null;
+      return out;
+    }
+
+    const trackId = params.song.videoId;
+    if (!this.active || this.active.song.videoId !== trackId) {
+      const flushed = this.flush(nowMs);
+      if (flushed) out.push(flushed);
+      this.startSession(params.song, params.durationSec, params.engineTimeSec, nowMs);
+    } else if (
+      this.active.countedPlay &&
+      params.engineTimeSec < 3 &&
+      this.active.lastEngineTimeSec >= 10 &&
+      this.active.totalSec >= 10
+    ) {
+      // Track looped / restarted after being played -> flush completed play and start fresh session
+      const flushed = this.flush(nowMs);
+      if (flushed) out.push(flushed);
+      this.startSession(params.song, params.durationSec, params.engineTimeSec, nowMs);
+    }
+
+    const cur = this.active!;
+    cur.song = params.song;
+    if (params.durationSec > 0) cur.trackDurationSec = params.durationSec;
+
+    if (params.isPlaying && !params.isSeeking) {
+      const dtSec = cur.lastTickMs > 0 ? Math.min(1.0, Math.max(0, (nowMs - cur.lastTickMs) / 1000)) : 0;
+      const audioDelta = Math.abs(params.engineTimeSec - cur.lastEngineTimeSec);
+      const isAdvancing = dtSec <= 0 || audioDelta > 0.01 || cur.totalSec === 0;
+      if (isAdvancing) {
+        cur.totalSec += dtSec;
+      }
+      const playThreshold =
+        cur.trackDurationSec > 0 && cur.trackDurationSec < 50
+          ? cur.trackDurationSec * 0.5
+          : 25;
+      if (!cur.countedPlay && cur.totalSec >= playThreshold) {
+        cur.countedPlay = true;
+      }
+      if (
+        Math.floor(cur.totalSec) > cur.flushedSec &&
+        (nowMs - cur.lastFlushAtMs >= 5000 || (cur.countedPlay && cur.flushedSec === 0))
+      ) {
+        const payload = this.flush(nowMs);
+        if (payload) out.push(payload);
+      }
+    }
+
+    cur.lastEngineTimeSec = params.engineTimeSec;
+    cur.lastTickMs = nowMs;
+    return out;
+  }
+
+  flush(nowMs: number = Date.now()): RichListeningHistoryEntry | null {
+    const cur = this.active;
+    if (!cur) return null;
+    const rounded = Math.round(cur.totalSec);
+    if (rounded <= 0 || (rounded === cur.flushedSec && cur.flushedSec > 0)) {
+      return null;
+    }
+    const payload = this.buildPayload();
+    if (payload) {
+      cur.flushedSec = rounded;
+      cur.lastFlushAtMs = nowMs;
+    }
+    return payload;
+  }
+
+  pause(nowMs: number = Date.now()): RichListeningHistoryEntry | null {
+    const payload = this.flush(nowMs);
+    if (this.active) {
+      this.active.lastTickMs = nowMs;
+    }
+    return payload;
+  }
 }
 
 export interface YearlyTopTrack {
@@ -325,9 +541,22 @@ export function computeYearlyReplayStats(
     activeDays.add(formatLocalDayKey(dt));
     hourCounts[dt.getHours()] += 1;
 
-    const dur = Math.max(0, Math.round(Number.isFinite(entry.durationSec) ? entry.durationSec : 0));
+    const rawSec =
+      typeof entry.listenedSeconds === 'number' && Number.isFinite(entry.listenedSeconds)
+        ? entry.listenedSeconds
+        : Number.isFinite(entry.durationSec)
+        ? entry.durationSec
+        : 0;
+    const repairedSec =
+      rawSec <= 0 && typeof entry.trackDurationSec === 'number' && entry.trackDurationSec > 0
+        ? Math.min(entry.trackDurationSec, rawSec || entry.trackDurationSec)
+        : rawSec;
+    const dur = Math.max(0, Math.round(repairedSec));
+    const isCountedPlay = entry.countedPlay !== false;
     totalListeningTimeSec += dur;
-    totalPlaysCount += 1;
+    if (isCountedPlay) {
+      totalPlaysCount += 1;
+    }
 
     const title = (entry.title || 'Unknown Track').trim() || 'Unknown Track';
     const artistName = (entry.artist || 'Unknown Artist').trim() || 'Unknown Artist';
@@ -339,7 +568,7 @@ export function computeYearlyReplayStats(
     const trackKey = entry.videoId || `${title}::${artistName}`;
     const existingTrack = trackMap.get(trackKey);
     if (existingTrack) {
-      existingTrack.playCount += 1;
+      if (isCountedPlay) existingTrack.playCount += 1;
       existingTrack.totalSec += dur;
       if (!existingTrack.artworkUrl && artworkUrl) existingTrack.artworkUrl = artworkUrl;
       if (!existingTrack.albumName && albumName) existingTrack.albumName = albumName;
@@ -350,7 +579,7 @@ export function computeYearlyReplayStats(
         artist: artistName,
         albumName,
         artworkUrl,
-        playCount: 1,
+        playCount: isCountedPlay ? 1 : 0,
         totalSec: dur,
       });
     }
@@ -358,13 +587,13 @@ export function computeYearlyReplayStats(
     const artistKey = artistName.toLowerCase();
     const existingArtist = artistMap.get(artistKey);
     if (existingArtist) {
-      existingArtist.playCount += 1;
+      if (isCountedPlay) existingArtist.playCount += 1;
       existingArtist.totalSec += dur;
       if (!existingArtist.artworkUrl && artworkUrl) existingArtist.artworkUrl = artworkUrl;
     } else {
       artistMap.set(artistKey, {
         artistName,
-        playCount: 1,
+        playCount: isCountedPlay ? 1 : 0,
         totalSec: dur,
         artworkUrl,
       });
@@ -374,7 +603,7 @@ export function computeYearlyReplayStats(
       const albumKey = `${albumName.toLowerCase()}::${artistKey}`;
       const existingAlbum = albumMap.get(albumKey);
       if (existingAlbum) {
-        existingAlbum.playCount += 1;
+        if (isCountedPlay) existingAlbum.playCount += 1;
         existingAlbum.totalSec += dur;
         if (!existingAlbum.artworkUrl && artworkUrl) existingAlbum.artworkUrl = artworkUrl;
       } else {
@@ -382,13 +611,15 @@ export function computeYearlyReplayStats(
           albumName,
           artist: artistName,
           artworkUrl,
-          playCount: 1,
+          playCount: isCountedPlay ? 1 : 0,
           totalSec: dur,
         });
       }
     }
 
-    qualityBreakdown[classifyQualityBucket(entry.qualityLabel)] += 1;
+    if (isCountedPlay) {
+      qualityBreakdown[classifyQualityBucket(entry.qualityLabel)] += 1;
+    }
   }
 
   for (const monthly of Array.isArray(monthlyFallback) ? monthlyFallback : []) {
@@ -489,6 +720,11 @@ export interface IStorageService {
   updateSettings(delta: Partial<AppSettings>): Promise<void>;
   getPlaylists(): Promise<Playlist[]>;
   createPlaylist(name: string, description?: string): Promise<Playlist>;
+  createPlaylistWithSongs(
+    name: string,
+    songs: Song[],
+    options?: { description?: string; thumbnailUrl?: string | null; sourceUrl?: string }
+  ): Promise<Playlist>;
   addTracksToPlaylist(playlistId: string, trackIds: string[]): Promise<void>;
   addSongToPlaylist(playlistId: string, songId: string): Promise<void>;
   deletePlaylist(playlistId: string): Promise<boolean>;
@@ -582,6 +818,59 @@ export class StorageService implements IStorageService {
         songIds: [],
         songCount: 0,
         totalDurationSec: 0,
+      };
+      playlists.push(newPlaylist);
+      this.playlistsCache = playlists;
+      const filePath = joinPath(this.baseDir, 'playlists.json');
+      await writeJsonAtomic(filePath, playlists);
+      return { ...newPlaylist };
+    });
+  }
+
+  async createPlaylistWithSongs(
+    name: string,
+    rawSongs: Song[],
+    options: { description?: string; thumbnailUrl?: string | null; sourceUrl?: string } = {}
+  ): Promise<Playlist> {
+    if (!name || name.trim().length === 0) {
+      throw new Error('Playlist title cannot be empty');
+    }
+    const cleanSongs = (Array.isArray(rawSongs) ? rawSongs : [])
+      .filter((s) => s && (s.videoId || s.id))
+      .map((s) => normalizeSong(s as any));
+    const songIds = cleanSongs.map((s) => s.videoId);
+    const totalDurationSec = cleanSongs.reduce(
+      (acc, s) =>
+        acc +
+        (typeof s.durationSec === 'number' && s.durationSec > 0
+          ? Math.round(s.durationSec)
+          : s.totalPlayTimeMs > 0
+          ? Math.round(s.totalPlayTimeMs / 1000)
+          : 0),
+      0
+    );
+    const firstArt =
+      options.thumbnailUrl ||
+      cleanSongs.find((s) => s.thumbnailUrl || s.artworkUrl)?.thumbnailUrl ||
+      cleanSongs.find((s) => s.artworkUrl)?.artworkUrl ||
+      null;
+
+    return this.enqueue('playlists', async () => {
+      const playlists = await this.getPlaylists();
+      const nowIso = new Date().toISOString();
+      const newPlaylist: Playlist = {
+        id: `pl_custom_${Date.now()}_${++StorageService.playlistSeq}_${Math.random().toString(36).slice(2, 8)}`,
+        title: name.trim().slice(0, 100),
+        description: (options.description || '').trim(),
+        thumbnailUrl: firstArt,
+        ...(options.sourceUrl ? { sourceUrl: options.sourceUrl } : {}),
+        isCustom: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        songIds,
+        songs: cleanSongs,
+        songCount: songIds.length,
+        totalDurationSec,
       };
       playlists.push(newPlaylist);
       this.playlistsCache = playlists;
@@ -698,14 +987,135 @@ export class StorageService implements IStorageService {
     if (this.listeningCache !== null) {
       return this.listeningCache;
     }
-    const loaded = await readJsonSafe<RichListeningHistoryEntry[]>(
+    const localLoaded = await readJsonSafe<RichListeningHistoryEntry[]>(
       this.getListeningHistoryFilePath(),
       []
     );
-    this.listeningCache = Array.isArray(loaded)
-      ? loaded.filter((item) => item && typeof item.videoId === 'string')
+    const cleanLocal = Array.isArray(localLoaded)
+      ? localLoaded.filter((item) => item && typeof item.videoId === 'string')
       : [];
+
+    const api =
+      typeof window !== 'undefined'
+        ? (window as any).electronAPI
+        : (globalThis as any).window?.electronAPI;
+    if (typeof api?.replayLoad === 'function') {
+      try {
+        const diskRes = await api.replayLoad();
+        const diskEntries = Array.isArray(diskRes?.entries) ? diskRes.entries : [];
+        const merged = mergeListeningEntries(diskEntries, cleanLocal);
+        if (cleanLocal.length > 0 && merged.length > diskEntries.length && typeof api?.replayFlush === 'function') {
+          await api.replayFlush(merged).catch(() => {});
+        }
+        this.listeningCache = merged;
+        return this.listeningCache;
+      } catch {
+        // Fall back to local cache
+      }
+    }
+
+    this.listeningCache = cleanLocal;
     return this.listeningCache;
+  }
+
+  async upsertListeningSession(entry: RichListeningHistoryEntry): Promise<void> {
+    if (!entry || typeof entry.videoId !== 'string' || !entry.videoId.trim()) return;
+    const durationSec = Math.max(0, Math.round(entry.listenedSeconds ?? entry.durationSec ?? 0));
+    if (durationSec <= 0) return;
+
+    const normalizedEntry: RichListeningHistoryEntry = {
+      ...entry,
+      durationSec,
+      listenedSeconds: durationSec,
+    };
+    const now = new Date(normalizedEntry.timestamp || Date.now());
+    const yearMonth = formatLocalYearMonth(now);
+    const dayKey = now.toISOString().slice(0, 10);
+
+    return this.enqueue('history', async () => {
+      const history = await this.loadListeningHistoryInternal();
+      const key = getListeningEntryKey(normalizedEntry);
+      const existingIdx = history.findIndex((h) => getListeningEntryKey(h) === key);
+      const prevEntry = existingIdx >= 0 ? history[existingIdx] : null;
+      const prevDur = prevEntry ? Math.max(0, Math.round(prevEntry.listenedSeconds ?? prevEntry.durationSec ?? 0)) : 0;
+      const prevCounted = prevEntry ? prevEntry.countedPlay !== false : false;
+      const nextDur = Math.max(prevDur, durationSec);
+      const nextCounted = Boolean(prevCounted || normalizedEntry.countedPlay !== false);
+
+      const finalEntry: RichListeningHistoryEntry = {
+        ...(prevEntry || {}),
+        ...normalizedEntry,
+        durationSec: nextDur,
+        listenedSeconds: nextDur,
+        countedPlay: nextCounted,
+      };
+
+      if (existingIdx >= 0) {
+        history[existingIdx] = finalEntry;
+      } else {
+        history.push(finalEntry);
+        if (history.length > 50000) {
+          history.splice(0, history.length - 50000);
+        }
+      }
+
+      this.listeningCache = history;
+      await writeJsonAtomic(this.getListeningHistoryFilePath(), history);
+
+      const api =
+        typeof window !== 'undefined'
+          ? (window as any).electronAPI
+          : (globalThis as any).window?.electronAPI;
+      if (typeof api?.replayAppend === 'function') {
+        void Promise.resolve(api.replayAppend(finalEntry)).catch(() => {});
+      }
+
+      const deltaSec = Math.max(0, nextDur - prevDur);
+      const deltaPlay = nextCounted && !prevCounted ? 1 : 0;
+      if (deltaSec > 0 || deltaPlay > 0) {
+        const monthly = await this.getMonthlyListeningHistory(yearMonth);
+        monthly.totalListeningTimeSec += deltaSec;
+        monthly.totalPlaysCount += deltaPlay;
+        if (deltaPlay > 0) {
+          monthly.dailyPlays[dayKey] = (monthly.dailyPlays[dayKey] || 0) + 1;
+        }
+
+        const existingTrack = monthly.topTracks.find((t) => t.videoId === finalEntry.videoId);
+        if (existingTrack) {
+          existingTrack.playCount += deltaPlay;
+          existingTrack.durationSec += deltaSec;
+        } else {
+          monthly.topTracks.push({
+            videoId: finalEntry.videoId,
+            title: finalEntry.title,
+            artist: finalEntry.artist,
+            playCount: deltaPlay,
+            durationSec: deltaSec,
+          });
+          monthly.uniqueTracksCount = monthly.topTracks.length;
+        }
+
+        const existingArtist = monthly.topArtists.find((a) => a.artistName === finalEntry.artist);
+        if (existingArtist) {
+          existingArtist.playCount += deltaPlay;
+          existingArtist.durationSec += deltaSec;
+        } else {
+          monthly.topArtists.push({
+            artistName: finalEntry.artist,
+            playCount: deltaPlay,
+            durationSec: deltaSec,
+          });
+          monthly.uniqueArtistsCount = monthly.topArtists.length;
+        }
+
+        monthly.topTracks.sort((a, b) => b.playCount - a.playCount || b.durationSec - a.durationSec);
+        monthly.topArtists.sort((a, b) => b.playCount - a.playCount || b.durationSec - a.durationSec);
+
+        this.monthlyCache.set(yearMonth, monthly);
+        const monthlyFilePath = joinPath(this.baseDir, 'listening', `${yearMonth}.json`);
+        await writeJsonAtomic(monthlyFilePath, monthly);
+      }
+    });
   }
 
   async recordListeningHistory(song: Song, durationSec: number): Promise<void> {
@@ -733,7 +1143,10 @@ export class StorageService implements IStorageService {
       ...(artworkUrl ? { artworkUrl } : {}),
       ...(qualityLabel ? { qualityLabel } : {}),
       timestamp: now.getTime(),
+      startedAt: now.getTime(),
       durationSec,
+      listenedSeconds: Math.round(durationSec),
+      countedPlay: true,
     };
     const yearMonth = formatLocalYearMonth(now);
     const dayKey = now.toISOString().slice(0, 10);
@@ -741,11 +1154,19 @@ export class StorageService implements IStorageService {
     return this.enqueue('history', async () => {
       const history = await this.loadListeningHistoryInternal();
       history.push(entry);
-      if (history.length > 25000) {
-        history.splice(0, history.length - 25000);
+      if (history.length > 50000) {
+        history.splice(0, history.length - 50000);
       }
       this.listeningCache = history;
       await writeJsonAtomic(this.getListeningHistoryFilePath(), history);
+
+      const api =
+        typeof window !== 'undefined'
+          ? (window as any).electronAPI
+          : (globalThis as any).window?.electronAPI;
+      if (typeof api?.replayAppend === 'function') {
+        void Promise.resolve(api.replayAppend(entry)).catch(() => {});
+      }
 
       const monthly = await this.getMonthlyListeningHistory(yearMonth);
 
@@ -870,6 +1291,14 @@ export class StorageService implements IStorageService {
     return this.enqueue('history', async () => {
       this.listeningCache = [];
       this.monthlyCache.clear();
+
+      const api =
+        typeof window !== 'undefined'
+          ? (window as any).electronAPI
+          : (globalThis as any).window?.electronAPI;
+      if (typeof api?.replayReset === 'function') {
+        void Promise.resolve(api.replayReset()).catch(() => {});
+      }
 
       if (nodeFs && nodePath) {
         const listeningDir = joinPath(this.baseDir, 'listening');

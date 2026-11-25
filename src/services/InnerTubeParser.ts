@@ -82,20 +82,24 @@ export class InnerTubeParser {
     return rawUrl;
   }
 
-  private parseDurationMs(text?: string | null): number {
-    if (!text) return 210000;
+  public parseDurationSeconds(text?: string | null): number {
+    if (!text) return 0;
     const parts = text
       .trim()
       .split(':')
       .map((n) => parseInt(n, 10));
-    if (parts.some((n) => Number.isNaN(n))) return 210000;
+    if (parts.some((n) => Number.isNaN(n) || n < 0)) return 0;
     if (parts.length === 2) {
-      return (parts[0] * 60 + parts[1]) * 1000;
+      return parts[0] * 60 + parts[1];
     }
     if (parts.length === 3) {
-      return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
+      return parts[0] * 3600 + parts[1] * 60 + parts[2];
     }
-    return 210000;
+    return 0;
+  }
+
+  private parseDurationMs(text?: string | null): number {
+    return this.parseDurationSeconds(text) * 1000;
   }
 
   public parseResponsiveListItem(renderer: any, shelfTitle = ''): BrowseItem {
@@ -179,6 +183,20 @@ export class InnerTubeParser {
     // Extract duration text if present (e.g. "3:45")
     const durationRun = subtitleRuns.find((r: any) => /^\d+:\d+(:\d+)?$/.test(r?.text?.trim() || ''));
     const durationText = durationRun?.text?.trim() || null;
+    const durationSec = this.parseDurationSeconds(durationText);
+    const isPodcast =
+      typeToken === 'podcast' ||
+      typeToken === 'episode' ||
+      pageType.includes('PODCAST') ||
+      shelfLower.includes('podcast') ||
+      shelfLower.includes('episode');
+    const resultType = isPodcast
+      ? typeToken === 'episode'
+        ? 'episode'
+        : 'podcast'
+      : isVideo
+      ? 'video'
+      : 'song';
 
     const { artistText, artistIds } = this.parseArtistsFromRuns(subtitleRuns);
     const cleanSubtitle =
@@ -233,6 +251,8 @@ export class InnerTubeParser {
       subtitle: cleanSubtitle,
       thumbnailUrl,
       secondaryText: durationText,
+      durationText,
+      durationSec,
       explicit: isExplicit,
       endpoint,
       browseId: rawBrowseId,
@@ -246,7 +266,9 @@ export class InnerTubeParser {
       isPlaylist,
       isSingle: typeToken === 'single',
       isVideo,
-      badge,
+      isPodcast,
+      resultType,
+      badge: isPodcast ? (resultType === 'episode' ? 'Episode' : 'Podcast') : badge,
     };
   }
 
@@ -283,6 +305,12 @@ export class InnerTubeParser {
 
       const { artistText, artistIds } = this.parseArtistsFromRuns(subtitleRuns);
       const durationRun = subtitleRuns.find((r: any) => /^\d+:\d+(:\d+)?$/.test(r?.text?.trim() || ''));
+      const durationText = durationRun?.text?.trim() || null;
+      const durationSec = this.parseDurationSeconds(durationText);
+      const isPodcast =
+        typeToken === 'podcast' ||
+        typeToken === 'episode' ||
+        pageType.includes('PODCAST');
       const thumbnails = card?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails;
       const thumbnailUrl = this.extractThumbnails(thumbnails);
 
@@ -293,7 +321,9 @@ export class InnerTubeParser {
         title,
         subtitle: isArtist ? 'Artist' : artistText,
         thumbnailUrl,
-        secondaryText: durationRun?.text?.trim() || null,
+        secondaryText: durationText,
+        durationText,
+        durationSec,
         explicit: false,
         endpoint: videoId ? `watch?v=${videoId}` : browseId ? `browse/${browseId}` : null,
         browseId,
@@ -307,7 +337,9 @@ export class InnerTubeParser {
         isPlaylist,
         isSingle: false,
         isVideo,
-        badge: isArtist ? 'Artist' : isAlbum ? 'Album' : isPlaylist ? 'Playlist' : isVideo ? 'Video' : 'Song',
+        isPodcast,
+        resultType: isPodcast ? (typeToken === 'episode' ? 'episode' : 'podcast') : isVideo ? 'video' : 'song',
+        badge: isPodcast ? 'Podcast' : isArtist ? 'Artist' : isAlbum ? 'Album' : isPlaylist ? 'Playlist' : isVideo ? 'Video' : 'Song',
       });
     }
 
@@ -745,6 +777,103 @@ export class InnerTubeParser {
       albums,
       singlesAndEps,
     };
+  }
+
+  public parseUpNextRadio(raw: any): Song[] {
+    const songs: Song[] = [];
+    const seen = new Set<string>();
+
+    const parsePanelItem = (pvr: any) => {
+      if (!pvr || typeof pvr !== 'object') return;
+      const videoId: string =
+        pvr.videoId ||
+        pvr.navigationEndpoint?.watchEndpoint?.videoId ||
+        '';
+      if (!videoId || seen.has(videoId)) return;
+
+      const title =
+        pvr.title?.runs?.map((r: any) => r?.text).join('') ||
+        pvr.title?.simpleText ||
+        '';
+      if (!title.trim()) return;
+
+      const bylineRuns: any[] = pvr.longBylineText?.runs || pvr.shortBylineText?.runs || [];
+      const { artistText, artists, artistIds } = this.parseArtistsFromRuns(bylineRuns);
+      const lengthText =
+        pvr.lengthText?.runs?.map((r: any) => r?.text).join('') ||
+        pvr.lengthText?.simpleText ||
+        null;
+      const durationSec = this.parseDurationSeconds(lengthText);
+      const thumbnailUrl = this.extractThumbnails(pvr.thumbnail?.thumbnails);
+
+      const musicVideoType: string =
+        pvr.navigationEndpoint?.watchEndpoint?.watchEndpointMusicSupportedConfigs
+          ?.watchEndpointMusicConfig?.musicVideoType || '';
+      const bylineStr = bylineRuns.map((r: any) => r?.text || '').join(' ').toLowerCase();
+      const isPodcast =
+        musicVideoType.includes('PODCAST') ||
+        bylineStr.includes('podcast') ||
+        bylineStr.includes('episode');
+
+      seen.add(videoId);
+      songs.push({
+        videoId,
+        id: videoId,
+        title: title.trim(),
+        artist: artistText || 'Unknown Artist',
+        artists,
+        artistIds,
+        thumbnailUrl,
+        artworkUrl: thumbnailUrl || undefined,
+        durationText: lengthText,
+        durationSec: durationSec > 0 ? durationSec : undefined,
+        totalPlayTimeMs: durationSec > 0 ? durationSec * 1000 : 0,
+        liked: false,
+        playCount: 0,
+        isExplicit: Boolean(
+          pvr.badges?.some((b: any) =>
+            b?.musicInlineBadgeRenderer?.accessibilityData?.accessibilityData?.label
+              ?.toLowerCase()
+              .includes('explicit')
+          )
+        ),
+        isPodcast,
+        resultType: isPodcast ? 'podcast' : 'song',
+        playbackSourceType: 'YOUTUBE',
+      });
+    };
+
+    const panelContents =
+      raw?.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer
+        ?.watchNextTabbedResultsRenderer?.tabs?.[0]?.tabRenderer?.content?.musicQueueRenderer
+        ?.content?.playlistPanelRenderer?.contents;
+
+    if (Array.isArray(panelContents)) {
+      for (const entry of panelContents) {
+        if (entry?.playlistPanelVideoRenderer) {
+          parsePanelItem(entry.playlistPanelVideoRenderer);
+        }
+      }
+    }
+
+    if (songs.length === 0) {
+      const walk = (node: any) => {
+        if (!node || typeof node !== 'object') return;
+        if (Array.isArray(node)) {
+          for (const item of node) walk(item);
+          return;
+        }
+        if (node.playlistPanelVideoRenderer) {
+          parsePanelItem(node.playlistPanelVideoRenderer);
+        }
+        for (const val of Object.values(node)) {
+          if (val && typeof val === 'object') walk(val);
+        }
+      };
+      walk(raw);
+    }
+
+    return songs;
   }
 
   public getFilterParam(filter: string): string | undefined {

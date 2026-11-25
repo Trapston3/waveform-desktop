@@ -22,6 +22,7 @@ import { useContextMenu } from './ui/hooks/useContextMenu';
 import { SettingsModal } from './ui/common/SettingsModal';
 import { UpdatePromptModal } from './ui/common/UpdatePromptModal';
 import { CreatePlaylistModal } from './ui/common/CreatePlaylistModal';
+import { ImportPlaylistModal } from './ui/common/ImportPlaylistModal';
 import { ErrorBoundary } from './ui/common/ErrorBoundary';
 import { NowPlayingScreen } from './ui/player/NowPlayingScreen';
 import { ReplayStoriesModal } from './ui/player/ReplayStoriesModal';
@@ -53,6 +54,8 @@ export const App: React.FC = () => {
     setSettingsOpen,
     isCreatePlaylistOpen,
     setCreatePlaylistOpen,
+    isImportPlaylistOpen,
+    setImportPlaylistOpen,
     isReplayOpen,
     setReplayOpen,
     isEqualizerOpen,
@@ -153,6 +156,7 @@ export const App: React.FC = () => {
         <RightSidecar
           isOpen={isInspectorOpen}
           onClose={handleCloseInspector}
+          onOpenContextMenu={openContextMenu}
         />
       </div>
 
@@ -175,6 +179,10 @@ export const App: React.FC = () => {
       <CreatePlaylistModal
         isOpen={isCreatePlaylistOpen}
         onClose={() => setCreatePlaylistOpen(false)}
+      />
+      <ImportPlaylistModal
+        isOpen={isImportPlaylistOpen}
+        onClose={() => setImportPlaylistOpen(false)}
       />
 
       <NowPlayingScreen
@@ -208,6 +216,7 @@ export const App: React.FC = () => {
         x={menuState.x}
         y={menuState.y}
         track={menuState.track}
+        queueContext={menuState.queueContext}
         onClose={closeContextMenu}
       />
 

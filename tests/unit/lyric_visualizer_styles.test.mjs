@@ -1725,4 +1725,60 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
 
     renderer.dispose();
   });
+
+  test('Spaceship 3D renders a single corridor lyric stream with splash droplets and anticipated quintic barrel rolls', () => {
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'StarfieldShip3D',
+      palette: SAMPLE_PALETTE,
+      reduceMotion: false,
+    });
+    renderer.resize(960, 540, 1);
+
+    const lyrics = {
+      lines: [
+        {
+          startSeconds: 0.5,
+          endSeconds: 4.5,
+          text: 'Across the velvet dark',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Across', startSeconds: 0.5, endSeconds: 1.5 },
+            { text: 'velvet', startSeconds: 1.5, endSeconds: 2.8 },
+            { text: 'dark', startSeconds: 2.8, endSeconds: 4.5 },
+          ],
+        },
+      ],
+    };
+    renderer.setLyrics(lyrics);
+    canvas.ctx2d.ops.length = 0;
+
+    renderer.setSyncState({
+      timeSeconds: 1.52,
+      activeLineIndex: 0,
+      activeWordIndex: 1,
+      wordProgress: 0.05,
+      didSeekThisFrame: true,
+      hasLyrics: true,
+    });
+    assert.equal(renderer.renderFrame(1520, {
+      rmsLevel: 0.72,
+      bassEnergy: 0.85,
+      midEnergy: 0.5,
+      trebleEnergy: 0.4,
+      beatDetected: true,
+      isDownbeat: true,
+      estimatedBpm: 124,
+    }), true);
+
+    const drawnTexts = canvas.ctx2d.ops
+      .filter((op) => Array.isArray(op) && (op[0] === 'fillText' || op[0] === 'strokeText'))
+      .map((op) => String(op[1]));
+    assert.ok(drawnTexts.some((t) => t.toLowerCase().includes('velvet')));
+    // Ensure full-sentence duplicate upper ribbon is removed
+    assert.equal(drawnTexts.includes('Across the velvet dark'), false);
+
+    renderer.dispose();
+  });
 });

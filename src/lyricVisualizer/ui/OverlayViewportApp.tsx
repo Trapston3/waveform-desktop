@@ -57,6 +57,8 @@ export const OverlayViewportApp: React.FC = () => {
   const activeLyrics = useLyricVisualizerStore((s) => s.activeLyrics);
   const activePalette = useLyricVisualizerStore((s) => s.activePalette);
   const currentSongOffsetMs = useLyricVisualizerStore((s) => s.currentSongOffsetMs);
+  const currentAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.currentAutoSyncOffsetMs);
+  const vocalSilenceRanges = useLyricVisualizerStore((s) => s.vocalSilenceRanges);
   const isScreenLocked = useLyricVisualizerStore((s) => s.isScreenLocked);
   const isGameSuppressed = useLyricVisualizerStore((s) => s.isGameSuppressed);
 
@@ -109,6 +111,7 @@ export const OverlayViewportApp: React.FC = () => {
 
       applyBroadcastPayload(payload);
       syncEngineRef.current.setOffsetMs(payload.songOffsetMs ?? 0);
+      syncEngineRef.current.setAutoSyncOffsetMs(payload.autoSyncOffsetMs ?? 0);
       snapshotRef.current = {
         track: payload.track ?? null,
         positionSeconds: payload.positionSeconds ?? 0,
@@ -236,6 +239,8 @@ export const OverlayViewportApp: React.FC = () => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     syncEngineRef.current.setOffsetMs(currentSongOffsetMs);
+    syncEngineRef.current.setAutoSyncOffsetMs(currentAutoSyncOffsetMs);
+    syncEngineRef.current.setVocalSilenceRanges(vocalSilenceRanges);
     renderer.setStyle(config.styleId);
     renderer.setVariation(activeVariationId);
     renderer.setTypography(getBundledFontCssFamily(config.fontId), config.fontSizeScale);

@@ -766,7 +766,134 @@ export class LoudnessProcessor {
 /**
  * Master Float32 DSP Chain coordinating SpatialAudio, 10-Band SVF EQ, AutoEQ, and Peak Limiter.
  */
+/**
+ * Blends or subtracts a neural vocal stem against the stereo mix:
+ * `mix - (1 - vocalGain) * vocalStem` when suppressing vocals, or `vocalStem * vocalGain` when isolating vocals.
+ */
+export function blendVocalStem(
+  mixL: Float32Array,
+  mixR: Float32Array,
+  vocalL: Float32Array,
+  vocalR: Float32Array,
+  vocalGain: number,
+  isolateVocals = false
+): { leftOut: Float32Array; rightOut: Float32Array } {
+  const len = Math.min(mixL.length, mixR.length, vocalL.length, vocalR.length);
+  const leftOut = new Float32Array(len);
+  const rightOut = new Float32Array(len);
+  const gain = Number.isFinite(vocalGain) ? Math.max(0, Math.min(1, vocalGain)) : 1;
+  const subScale = 1 - gain;
+
+  for (let i = 0; i < len; i++) {
+    const ml = Number.isFinite(mixL[i]) ? mixL[i] : 0;
+    const mr = Number.isFinite(mixR[i]) ? mixR[i] : 0;
+    const vl = Number.isFinite(vocalL[i]) ? vocalL[i] : 0;
+    const vr = Number.isFinite(vocalR[i]) ? vocalR[i] : 0;
+    const l = isolateVocals ? vl * gain : ml - subScale * vl;
+    const r = isolateVocals ? vr * gain : mr - subScale * vr;
+    leftOut[i] = Math.max(-1, Math.min(1, l));
+    rightOut[i] = Math.max(-1, Math.min(1, r));
+  }
+  return { leftOut, rightOut };
+}
+
+/**
+ * Real-time Karaoke / Vocal Attenuation Processor with instant Mid/Side vocal-band filtering
+ * and seamless neural stem blending when `vocals_umxhq_int8.onnx` stem output is ready.
+ */
+export class KaraokeProcessor {
+  enabled = false;
+  vocalLevel = 1.0;
+  isolateVocals = false;
+
+  private sampleRate = 44100;
+  private neuralBlend = 0;
+  private lpL = 0;
+  private hpL = 0;
+  private prevIn = 0;
+
+  constructor(sampleRate = 44100) {
+    this.configure(sampleRate);
+  }
+
+  configure(sampleRate: number): void {
+    const validRate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 44100;
+    this.sampleRate = Math.max(8000, validRate);
+    this.reset();
+  }
+
+  reset(): void {
+    this.neuralBlend = 0;
+    this.lpL = 0;
+    this.hpL = 0;
+    this.prevIn = 0;
+  }
+
+  process(
+    leftIn: Float32Array,
+    rightIn: Float32Array,
+    vocalStem?: { left: Float32Array; right: Float32Array } | null
+  ): { leftOut: Float32Array; rightOut: Float32Array } {
+    const len = Math.min(leftIn.length, rightIn.length);
+    const gain = Math.max(0, Math.min(1, Number.isFinite(this.vocalLevel) ? this.vocalLevel : 1));
+    if (!this.enabled || (gain >= 0.995 && !this.isolateVocals)) {
+      const leftOut = new Float32Array(len);
+      const rightOut = new Float32Array(len);
+      leftOut.set(leftIn.subarray(0, len));
+      rightOut.set(rightIn.subarray(0, len));
+      return { leftOut, rightOut };
+    }
+
+    const leftOut = new Float32Array(len);
+    const rightOut = new Float32Array(len);
+
+    // One-pole crossover coefficients isolating vocal formants (~220Hz - 4200Hz)
+    const hpAlpha = Math.exp((-2 * Math.PI * 220) / this.sampleRate);
+    const lpAlpha = 1 - Math.exp((-2 * Math.PI * 4200) / this.sampleRate);
+    const hasStem = Boolean(vocalStem && vocalStem.left.length >= len && vocalStem.right.length >= len);
+    const subScale = 1 - gain;
+
+    for (let i = 0; i < len; i++) {
+      const l = leftIn[i];
+      const r = rightIn[i];
+      const mid = 0.5 * (l + r);
+      const side = 0.5 * (l - r);
+
+      // Extract vocal-band component of center channel so kick/bass stays intact
+      const hp = hpAlpha * (this.hpL + mid - this.prevIn);
+      this.hpL = hp;
+      this.prevIn = mid;
+      this.lpL += lpAlpha * (hp - this.lpL);
+      const dspVocal = this.lpL;
+
+      const dspL = this.isolateVocals ? dspVocal * gain : l - subScale * dspVocal;
+      const dspR = this.isolateVocals ? dspVocal * gain : r - subScale * dspVocal;
+
+      if (hasStem) {
+        this.neuralBlend = Math.min(1, this.neuralBlend + 0.002);
+        const vl = vocalStem!.left[i];
+        const vr = vocalStem!.right[i];
+        const nL = this.isolateVocals ? vl * gain : l - subScale * vl;
+        const nR = this.isolateVocals ? vr * gain : r - subScale * vr;
+        const b = this.neuralBlend;
+        leftOut[i] = Math.max(-1, Math.min(1, dspL * (1 - b) + nL * b));
+        rightOut[i] = Math.max(-1, Math.min(1, dspR * (1 - b) + nR * b));
+      } else {
+        this.neuralBlend = Math.max(0, this.neuralBlend - 0.002);
+        // Preserve low-end + side ambience during DSP fallback
+        const outL = this.isolateVocals ? dspL : l - subScale * dspVocal + side * 0.04 * subScale;
+        const outR = this.isolateVocals ? dspR : r - subScale * dspVocal - side * 0.04 * subScale;
+        leftOut[i] = Math.max(-1, Math.min(1, outL));
+        rightOut[i] = Math.max(-1, Math.min(1, outR));
+      }
+    }
+
+    return { leftOut, rightOut };
+  }
+}
+
 export class DspChain {
+  readonly karaoke: KaraokeProcessor;
   readonly spatial: SpatialAudioProcessor;
   readonly equalizer: EqualizerProcessor;
   readonly autoEq: AutoEqProcessor;
@@ -777,6 +904,7 @@ export class DspChain {
   constructor(sampleRate = 44100) {
     const validRate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 44100;
     this.sampleRate = Math.max(8000, validRate);
+    this.karaoke = new KaraokeProcessor(this.sampleRate);
     this.spatial = new SpatialAudioProcessor(this.sampleRate);
     this.equalizer = new EqualizerProcessor(this.sampleRate);
     this.autoEq = new AutoEqProcessor(this.sampleRate);
@@ -786,6 +914,7 @@ export class DspChain {
   configure(sampleRate: number): void {
     const validRate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 44100;
     this.sampleRate = Math.max(8000, validRate);
+    this.karaoke.configure(this.sampleRate);
     this.spatial.configure(this.sampleRate);
     this.equalizer.configure(this.sampleRate);
     this.autoEq.configure(this.sampleRate);
@@ -793,6 +922,7 @@ export class DspChain {
   }
 
   reset(): void {
+    this.karaoke.reset();
     this.spatial.reset();
     this.equalizer.reset();
     this.autoEq.reset();
@@ -827,8 +957,16 @@ export class DspChain {
     left: Float32Array,
     right: Float32Array
   ): { leftOut: Float32Array; rightOut: Float32Array } {
+    // 0. Optional Karaoke / Vocal Attenuation stage
+    const karaokeStage = this.karaoke.enabled
+      ? this.karaoke.process(left, right)
+      : { leftOut: left, rightOut: right };
+
     // 1. Spatial Audio Expansion
-    const { leftOut: spatialL, rightOut: spatialR } = this.spatial.process(left, right);
+    const { leftOut: spatialL, rightOut: spatialR } = this.spatial.process(
+      karaokeStage.leftOut,
+      karaokeStage.rightOut
+    );
 
     // 2. 10-Band SVF Equalizer
     const { leftOut: eqL, rightOut: eqR } = this.equalizer.process(spatialL, spatialR);

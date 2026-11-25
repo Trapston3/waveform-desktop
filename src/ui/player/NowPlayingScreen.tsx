@@ -24,10 +24,13 @@ import {
   X,
   Music2,
   PanelLeft,
+  Mic2,
 } from 'lucide-react';
+import { MlAudioService } from '../../services/MlAudioService';
 import { ArtistCredits } from '../common/ArtistCredits';
 import { VisualizerContextMenu } from '../common/VisualizerContextMenu';
 import { LyricStageControl } from '../../lyricVisualizer/ui/LyricStageControl';
+import { normalizeNowPlayingLayout } from '../../lyricVisualizer/core/models';
 import { useLyricVisualizerStore } from '../../lyricVisualizer/state/lyricVisualizerStore';
 import { useSettingsStore } from '../../state/settingsStore';
 import { useNavigationStore } from '../../state/navigationStore';
@@ -90,6 +93,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     x: 0,
     y: 0,
   });
+  const [isKaraokeOpen, setIsKaraokeOpen] = useState(false);
+  const [karaokeEnabled, setKaraokeEnabled] = useState(false);
+  const [karaokeVocalLevel, setKaraokeVocalLevel] = useState(0);
+  const [karaokeIsolateVocals, setKaraokeIsolateVocals] = useState(false);
+  const [hasNeuralStem, setHasNeuralStem] = useState(false);
+  const [isSeparatingVocals, setIsSeparatingVocals] = useState(false);
 
   const {
     lyricsData,
@@ -100,8 +109,10 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   } = useLyricsStore();
   const nowPlayingLyricsMode = useLyricVisualizerStore((s) => s.nowPlayingLyricsMode);
   const setNowPlayingLyricsMode = useLyricVisualizerStore((s) => s.setNowPlayingLyricsMode);
-  const nowPlayingLayout = useLyricVisualizerStore((s) => s.config.nowPlayingLayout ?? 'split');
+  const rawNowPlayingLayout = useLyricVisualizerStore((s) => s.config.nowPlayingLayout ?? 'split');
+  const nowPlayingLayout = normalizeNowPlayingLayout(rawNowPlayingLayout);
   const hideAlbumCover = useLyricVisualizerStore((s) => Boolean(s.config.hideAlbumCover));
+  const isAmbientOpen = useLyricVisualizerStore((s) => s.isAmbientOpen);
   const vizTextAlign = useLyricVisualizerStore((s) => s.config.textAlign ?? 'center');
   const setHideAlbumCover = useLyricVisualizerStore((s) => s.setHideAlbumCover);
   const setNowPlayingLayout = useLyricVisualizerStore((s) => s.setNowPlayingLayout);
@@ -134,7 +145,19 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const toggleShuffle = usePlayerStore((s) => s.toggleShuffle);
   const cycleRepeatMode = usePlayerStore((s) => s.cycleRepeatMode);
 
-  const { advanceQueue, previousTrack, tiers, jumpToTrack } = useQueueStore();
+  const {
+    advanceQueue,
+    previousTrack,
+    tiers,
+    jumpToTrack,
+    removeFromQueue,
+    moveTrackUp,
+    moveTrackDown,
+    autoplayEnabled,
+    toggleAutoplay,
+    shuffleUpNext,
+    clearQueue,
+  } = useQueueStore();
   const { toggleFavorite, isFavorite } = useLibraryStore();
   const artworkPalette = useThemeStore((s) => s.artworkPalette);
 
@@ -162,29 +185,68 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
 
   const handleToggleFullBleed = useCallback(() => {
     setIsFullBleedVisualizer((prev) => {
-      const next = !prev;
+      const next = !prev && nowPlayingLayout !== 'lyrics-focus';
+      setNowPlayingLayout(next ? 'lyrics-focus' : 'split');
       if (next) {
         setActiveSidecar('lyrics');
         setNowPlayingLyricsMode('visualizer');
       }
       return next;
     });
-  }, [setNowPlayingLyricsMode]);
+  }, [nowPlayingLayout, setNowPlayingLayout, setNowPlayingLyricsMode]);
 
   const isPlaying = playbackState === 'PLAYING';
   const isLiked = currentTrack ? isFavorite(currentTrack.videoId) : false;
-  const isVisualizerMode = nowPlayingLyricsMode === 'visualizer';
-  const isArtworkHidden =
-    hideAlbumCover ||
-    nowPlayingLayout === 'centered' ||
+  const isArtworkFocus = nowPlayingLayout === 'artwork-focus' && activeSidecar !== 'queue';
+  const isLyricsFocus =
+    nowPlayingLayout === 'lyrics-focus' ||
     nowPlayingLayout === 'ambient' ||
+    isAmbientOpen ||
+    hideAlbumCover ||
     isFullBleedVisualizer;
+  const isVisualizerMode = !isArtworkFocus && nowPlayingLyricsMode === 'visualizer';
+  const isArtworkHidden = isLyricsFocus;
+  const isFullBleedStage = isVisualizerMode && isLyricsFocus && activeSidecar !== 'queue';
   const splitContentInsetLeft =
-    isArtworkHidden || isFullBleedVisualizer || stageWidth < 768 || activeSidecar === 'queue'
+    isArtworkHidden || isArtworkFocus || isFullBleedStage || stageWidth < 768 || activeSidecar === 'queue'
       ? 0
       : Math.round(Math.min(Math.max(stageWidth * 0.44, 380), 540));
 
   const currentSongId = currentTrack?.videoId || (currentTrack as any)?.id || null;
+
+  // Synchronize live Karaoke DSP mode & lazy Open-Unmix neural stem separation
+  useEffect(() => {
+    const engine = usePlayerStore.getState().audioEngine;
+    engine?.setKaraokeMode(karaokeEnabled, karaokeVocalLevel, karaokeIsolateVocals);
+    const stemReady = Boolean(
+      currentSongId && MlAudioService.getCachedVocalStemSync(currentSongId)
+    );
+    setHasNeuralStem(stemReady);
+    if (!karaokeEnabled || !currentSongId || stemReady) return;
+
+    const url =
+      currentTrack?.streamUrl ||
+      (currentTrack?.localFilePath ? `local://${currentTrack.localFilePath}` : null);
+    if (!url) return;
+
+    let cancelled = false;
+    setIsSeparatingVocals(true);
+    void MlAudioService.separateTrackVocals(currentSongId, url)
+      .then((stem) => {
+        if (cancelled) return;
+        if (stem) {
+          engine?.setNeuralVocalStem(currentSongId, stem);
+          setHasNeuralStem(true);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setIsSeparatingVocals(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [karaokeEnabled, karaokeVocalLevel, karaokeIsolateVocals, currentSongId, currentTrack?.streamUrl, currentTrack?.localFilePath]);
   const isLyricsSyncedToTrack = Boolean(currentSongId && lyricsTrackId === currentSongId);
   const isLyricsSettled =
     isLyricsSyncedToTrack &&
@@ -413,14 +475,24 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const showHeader = isChromeVisible || isHeaderHovered || vizContextMenu.isOpen;
   const showBottomDock = isChromeVisible || isDockHovered || vizContextMenu.isOpen;
 
-  const renderQueueItem = (s: typeof tiers.CONTEXT[number], tier: 'USER_QUEUE' | 'CONTEXT', idx: number) => {
+  const renderQueueItem = (
+    s: typeof tiers.CONTEXT[number],
+    tier: 'USER_QUEUE' | 'CONTEXT' | 'AUTOPLAY',
+    idx: number,
+    totalLen: number
+  ) => {
     const itemArt = s.thumbnailUrl || (s as any).artworkUrl || artworkUrl;
     const artKey = `${tier}-${idx}-${s.videoId || s.title}`;
+    const durSec = s.durationSec || (s.totalPlayTimeMs ? s.totalPlayTimeMs / 1000 : 0);
+    const durText =
+      durSec > 0
+        ? `${Math.floor(durSec / 60)}:${String(Math.floor(durSec % 60)).padStart(2, '0')}`
+        : '—';
     return (
       <div
         key={`${tier}-${idx}`}
         onClick={() => jumpToTrack(tier, idx)}
-        className="flex items-center gap-3 p-2.5 rounded-xl bg-white/5 hover:bg-white/15 cursor-pointer transition-colors"
+        className="group flex items-center gap-3 p-2.5 rounded-xl bg-white/5 hover:bg-white/15 cursor-pointer transition-colors"
       >
         {isValidImageUrl(itemArt) && !brokenQueueArt[artKey] ? (
           <img
@@ -449,6 +521,46 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
             </span>
           </div>
         </div>
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+          {idx > 0 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                moveTrackUp(tier, idx);
+              }}
+              aria-label="Move track up"
+              className="px-1 text-white/60 hover:text-white cursor-pointer"
+            >
+              ↑
+            </button>
+          )}
+          {idx < totalLen - 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                moveTrackDown(tier, idx);
+              }}
+              aria-label="Move track down"
+              className="px-1 text-white/60 hover:text-white cursor-pointer"
+            >
+              ↓
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              removeFromQueue(tier, idx);
+            }}
+            aria-label="Remove from queue"
+            className="p-0.5 text-white/60 hover:text-red-400 cursor-pointer"
+          >
+            <X size={12} />
+          </button>
+        </div>
+        <span className="text-[10px] font-mono text-white/50 shrink-0">{durText}</span>
       </div>
     );
   };
@@ -497,7 +609,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
           </>
         ) : (
           <div
-            data-testid={isFullBleedVisualizer ? 'full-bleed-visualizer-stage' : 'backdrop-visualizer-stage'}
+            data-testid={isFullBleedStage ? 'full-bleed-visualizer-stage' : 'backdrop-visualizer-stage'}
             className="absolute inset-0 w-full h-full z-0"
           >
             <LyricStageControl
@@ -509,10 +621,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
               hasBottomDock={isArtworkHidden}
               onSwitchToClassic={() => {
                 setIsFullBleedVisualizer(false);
+                if (nowPlayingLayout === 'artwork-focus') setNowPlayingLayout('split');
                 setNowPlayingLyricsMode('classic');
               }}
               onContextMenu={handleOpenVizContextMenu}
-              isFullBleed={isFullBleedVisualizer}
+              isFullBleed={isFullBleedStage}
               onToggleFullBleed={handleToggleFullBleed}
             />
             {!isArtworkHidden && (
@@ -603,13 +716,14 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
         </div>
       </header>
 
-      {/* Main Split / Centered Foreground Viewport (hidden only in Full-Bleed Ambient Visualizer) */}
-      {!isFullBleedVisualizer && (
+      {/* Main Split / Centered / Artwork Focus Foreground Viewport */}
+      {!isFullBleedStage && (
         <div
-          className={`relative z-10 flex-1 flex min-h-0 overflow-x-hidden px-6 md:px-10 lg:px-12 pt-11 ${
+          data-layout={nowPlayingLayout}
+          className={`relative z-10 flex-1 flex min-h-0 overflow-x-hidden px-6 md:px-10 lg:px-12 pt-11 transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
             isArtworkHidden ? 'pb-24' : 'pb-5'
           } items-center ${
-            isArtworkHidden
+            isArtworkHidden || isArtworkFocus
               ? 'justify-center'
               : isVisualizerMode && activeSidecar !== 'queue'
               ? 'justify-start'
@@ -797,7 +911,10 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                 type="button"
                 data-testid="lyrics-visualizer-toggle"
                 onClick={() => {
-                  if (activeSidecar !== 'lyrics') {
+                  if (nowPlayingLayout === 'artwork-focus') {
+                    setNowPlayingLayout('split');
+                    setActiveSidecar('lyrics');
+                  } else if (activeSidecar !== 'lyrics') {
                     setActiveSidecar('lyrics');
                   } else {
                     const nextMode = isVisualizerMode ? 'classic' : 'visualizer';
@@ -824,6 +941,98 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
               >
                 {isVisualizerMode ? <Sparkles size={15} /> : <AlignLeft size={15} />}
               </button>
+
+              {/* Karaoke Vocal Control */}
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  data-testid="now-playing-karaoke-toggle"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsKaraokeOpen((prev) => !prev);
+                  }}
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all cursor-pointer active:scale-95 ${
+                    karaokeEnabled
+                      ? 'bg-[#FA2D48]/30 text-white border border-[#FA2D48]/50'
+                      : 'bg-white/[0.06] text-white/60 hover:text-white hover:bg-white/12'
+                  }`}
+                  title="Karaoke Mode (Vocal Level)"
+                  aria-label="Karaoke Vocal Control"
+                >
+                  <Mic2 size={15} />
+                </button>
+
+                {isKaraokeOpen && (
+                  <div
+                    data-testid="karaoke-popover"
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute bottom-11 left-0 w-64 p-3.5 rounded-2xl bg-[#161822]/90 backdrop-blur-2xl border border-white/15 shadow-2xl text-white z-40 space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Mic2 size={14} className="text-[#FA2D48]" />
+                        <span className="text-xs font-bold">Karaoke Mode</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setKaraokeEnabled((prev) => !prev)}
+                        className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold transition-colors cursor-pointer ${
+                          karaokeEnabled
+                            ? 'bg-[#FA2D48] text-white'
+                            : 'bg-white/10 text-white/70 hover:bg-white/20'
+                        }`}
+                      >
+                        {karaokeEnabled ? 'On' : 'Off'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px] text-white/75">
+                        <span>Vocal Level</span>
+                        <span className="font-mono">{Math.round(karaokeVocalLevel * 100)}%</span>
+                      </div>
+                      <input
+                        aria-label="Vocal Level"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.02"
+                        value={karaokeVocalLevel}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          setKaraokeVocalLevel(v);
+                          if (!karaokeEnabled) setKaraokeEnabled(true);
+                        }}
+                        className="w-full h-1.5 accent-[#FA2D48] bg-white/25 rounded-lg cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setKaraokeIsolateVocals((prev) => !prev);
+                          if (!karaokeEnabled) setKaraokeEnabled(true);
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                          karaokeIsolateVocals
+                            ? 'bg-white/20 text-white'
+                            : 'bg-white/5 text-white/70 hover:bg-white/15'
+                        }`}
+                      >
+                        {karaokeIsolateVocals ? 'Isolating Vocals' : 'Isolate Vocals'}
+                      </button>
+                      <span className="text-[10px] text-white/55 truncate">
+                        {isSeparatingVocals
+                          ? 'Neural stem…'
+                          : hasNeuralStem
+                          ? 'Neural Stem Ready'
+                          : 'Instant DSP'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div
                 onWheel={(e) => {
@@ -878,7 +1087,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
           )}
 
           {/* Right / Centered Column: BORDERLESS FLOATING LYRICS (Classic) or Queue Sidecar */}
-          {activeSidecar !== 'none' && (
+          {activeSidecar !== 'none' && !isArtworkFocus && (
             <div
               data-testid="now-playing-sidecar-column"
               style={{
@@ -921,23 +1130,71 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                   isArtworkHidden ? 'max-w-xl mx-auto w-full' : 'max-w-lg'
                 } h-full rounded-3xl overflow-hidden flex flex-col p-6 backdrop-blur-2xl`}>
                   <div className="flex-1 overflow-y-auto space-y-4 no-scrollbar">
-                    <h3 className="text-xs font-bold tracking-widest uppercase text-[var(--color-text-secondary)]">
-                      Up Next Queue
-                    </h3>
-                    <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold tracking-widest uppercase text-[var(--color-text-secondary)]">
+                        Up Next Queue
+                      </h3>
+                      <div className="flex items-center gap-1.5 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => toggleAutoplay()}
+                          className={`px-2 py-0.5 rounded-md font-semibold cursor-pointer transition-colors ${
+                            autoplayEnabled
+                              ? 'bg-[var(--color-accent)]/25 text-[var(--color-accent)]'
+                              : 'bg-white/10 text-white/60 hover:text-white'
+                          }`}
+                        >
+                          Autoplay
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => shuffleUpNext()}
+                          className="px-2 py-0.5 rounded-md bg-white/10 text-white/75 hover:text-white cursor-pointer"
+                        >
+                          Shuffle
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => clearQueue()}
+                          className="px-2 py-0.5 rounded-md bg-white/10 text-white/75 hover:text-red-400 cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-3">
                       {tiers.USER_QUEUE.length > 0 && (
                         <div className="space-y-1.5">
                           <div className="text-xs font-semibold text-[var(--color-accent)]">
                             User Queue
                           </div>
-                          {tiers.USER_QUEUE.map((s, idx) => renderQueueItem(s, 'USER_QUEUE', idx))}
+                          {tiers.USER_QUEUE.map((s, idx) =>
+                            renderQueueItem(s, 'USER_QUEUE', idx, tiers.USER_QUEUE.length)
+                          )}
                         </div>
                       )}
 
-                      <div className="space-y-1.5">
-                        <div className="text-xs font-semibold text-[var(--color-text-secondary)]">Context Queue</div>
-                        {tiers.CONTEXT.slice(0, 20).map((s, idx) => renderQueueItem(s, 'CONTEXT', idx))}
-                      </div>
+                      {tiers.CONTEXT.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-xs font-semibold text-[var(--color-text-secondary)]">
+                            Context Queue
+                          </div>
+                          {tiers.CONTEXT.slice(0, 20).map((s, idx, arr) =>
+                            renderQueueItem(s, 'CONTEXT', idx, arr.length)
+                          )}
+                        </div>
+                      )}
+
+                      {tiers.AUTOPLAY.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-xs font-semibold text-[var(--color-text-secondary)]">
+                            Autoplay Radio
+                          </div>
+                          {tiers.AUTOPLAY.map((s, idx, arr) =>
+                            renderQueueItem(s, 'AUTOPLAY', idx, arr.length)
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1100,7 +1357,10 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                 type="button"
                 data-testid="lyrics-visualizer-toggle"
                 onClick={() => {
-                  if (activeSidecar !== 'lyrics') {
+                  if (nowPlayingLayout === 'artwork-focus') {
+                    setNowPlayingLayout('split');
+                    setActiveSidecar('lyrics');
+                  } else if (activeSidecar !== 'lyrics') {
                     setActiveSidecar('lyrics');
                   } else {
                     const nextMode = isVisualizerMode ? 'classic' : 'visualizer';
@@ -1147,10 +1407,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                 data-testid="toggle-album-cover"
                 onClick={() => {
                   if (isFullBleedVisualizer) setIsFullBleedVisualizer(false);
-                  if (nowPlayingLayout === 'centered' || nowPlayingLayout === 'ambient') {
-                    setNowPlayingLayout('split');
-                  }
-                  setHideAlbumCover(false);
+                  setNowPlayingLayout('split');
                 }}
                 className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.06] text-white/70 hover:text-white hover:bg-white/15 transition-all cursor-pointer active:scale-95"
                 title="Show Album Cover (Split View)"
@@ -1169,7 +1426,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
         x={vizContextMenu.x}
         y={vizContextMenu.y}
         onClose={handleCloseVizContextMenu}
-        isFullBleed={isFullBleedVisualizer}
+        isFullBleed={isFullBleedStage}
         onToggleFullBleed={handleToggleFullBleed}
         context="now-playing"
       />

@@ -8,14 +8,17 @@ import {
   BUNDLED_FONTS,
   type BundledFontId,
   clampOffsetMs,
+  clampAutoSyncOffsetMs,
   DEFAULT_LYRIC_VISUALIZER_CONFIG,
   DEMO_FALLBACK_PALETTE,
+  type VocalSilenceInterval,
   getStyleDefinition,
   type LyricPalette,
   type Lyrics,
   type LyricsScriptMode,
   type LyricTextAlign,
   type LyricVisualizerConfig,
+  normalizeNowPlayingLayout,
   type NowPlayingLayoutMode,
   STARLIGHT_HARBOR_LYRICS,
   STARLIGHT_HARBOR_TRACK,
@@ -59,6 +62,7 @@ export interface LyricVisualizerBroadcastPayload {
   readonly positionSeconds: number;
   readonly isPlaying: boolean;
   readonly songOffsetMs: number;
+  readonly autoSyncOffsetMs?: number;
   readonly audio: AudioFrameMetrics;
   readonly isScreenLocked: boolean;
   readonly timestampMs: number;
@@ -70,6 +74,9 @@ export interface LyricVisualizerState {
   currentSongKey: string | null;
   currentSongOffsetMs: number;
   perSongOffsetsMs: Record<string, number>;
+  currentAutoSyncOffsetMs: number;
+  perSongAutoSyncOffsetsMs: Record<string, number>;
+  vocalSilenceRanges: readonly VocalSilenceInterval[];
   availableMonitors: MonitorDescriptor[];
   isAmbientOpen: boolean;
   isScreenLocked: boolean;
@@ -101,6 +108,9 @@ export interface LyricVisualizerState {
   setSongOffsetMs: (offsetMs: number, songKey?: string | null) => void;
   nudgeSongOffsetMs: (deltaMs?: number, songKey?: string | null) => void;
   resetSongOffsetMs: (songKey?: string | null) => void;
+  setAutoSyncOffsetMs: (offsetMs: number, songKey?: string | null) => void;
+  resetAutoSyncOffsetMs: (songKey?: string | null) => void;
+  setVocalSilenceRanges: (ranges: readonly VocalSilenceInterval[]) => void;
 
   setOverlayEnabled: (enabled: boolean) => void;
   toggleOverlayMonitor: (monitorId: string) => void;
@@ -176,8 +186,14 @@ function isValidTextAlign(val: unknown): val is LyricTextAlign {
   return val === 'center' || val === 'left';
 }
 
-function isValidNowPlayingLayout(val: unknown): val is NowPlayingLayoutMode {
-  return val === 'split' || val === 'centered' || val === 'ambient';
+function isValidNowPlayingLayout(val: unknown): val is NowPlayingLayoutMode | 'centered' {
+  return (
+    val === 'split' ||
+    val === 'lyrics-focus' ||
+    val === 'artwork-focus' ||
+    val === 'ambient' ||
+    val === 'centered'
+  );
 }
 
 function isValidScriptMode(val: unknown): val is LyricsScriptMode {
@@ -232,12 +248,14 @@ export function migrateLegacyStyleSelection(
 interface PersistedStorageData {
   config?: Partial<LyricVisualizerConfig>;
   perSongOffsetsMs?: Record<string, number>;
+  perSongAutoSyncOffsetsMs?: Record<string, number>;
   nowPlayingLyricsMode?: 'classic' | 'visualizer';
 }
 
 function loadPersistedState(): {
   config: LyricVisualizerConfig;
   perSongOffsetsMs: Record<string, number>;
+  perSongAutoSyncOffsetsMs: Record<string, number>;
   nowPlayingLyricsMode: 'classic' | 'visualizer';
 } {
   let raw: PersistedStorageData | null = null;
@@ -295,7 +313,7 @@ function loadPersistedState(): {
       ? (c as any).textAlign
       : DEFAULT_LYRIC_VISUALIZER_CONFIG.textAlign,
     nowPlayingLayout: isValidNowPlayingLayout((c as any).nowPlayingLayout)
-      ? (c as any).nowPlayingLayout
+      ? normalizeNowPlayingLayout((c as any).nowPlayingLayout)
       : DEFAULT_LYRIC_VISUALIZER_CONFIG.nowPlayingLayout,
     hideAlbumCover:
       typeof (c as any).hideAlbumCover === 'boolean'
@@ -347,17 +365,27 @@ function loadPersistedState(): {
     }
   }
 
+  const perSongAutoSyncOffsetsMs: Record<string, number> = {};
+  if (raw?.perSongAutoSyncOffsetsMs && typeof raw.perSongAutoSyncOffsetsMs === 'object') {
+    for (const [k, v] of Object.entries(raw.perSongAutoSyncOffsetsMs)) {
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        perSongAutoSyncOffsetsMs[k] = clampAutoSyncOffsetMs(v);
+      }
+    }
+  }
+
   const nowPlayingLyricsMode =
     raw?.nowPlayingLyricsMode === 'classic' || raw?.nowPlayingLyricsMode === 'visualizer'
       ? raw.nowPlayingLyricsMode
       : 'classic';
 
-  return { config, perSongOffsetsMs, nowPlayingLyricsMode };
+  return { config, perSongOffsetsMs, perSongAutoSyncOffsetsMs, nowPlayingLyricsMode };
 }
 
 function savePersistedState(state: {
   config: LyricVisualizerConfig;
   perSongOffsetsMs: Record<string, number>;
+  perSongAutoSyncOffsetsMs?: Record<string, number>;
   nowPlayingLyricsMode: 'classic' | 'visualizer';
 }): void {
   try {
@@ -369,6 +397,7 @@ function savePersistedState(state: {
       const payload: PersistedStorageData = {
         config: state.config,
         perSongOffsetsMs: state.perSongOffsetsMs,
+        ...(state.perSongAutoSyncOffsetsMs ? { perSongAutoSyncOffsetsMs: state.perSongAutoSyncOffsetsMs } : {}),
         nowPlayingLyricsMode: state.nowPlayingLyricsMode,
       };
       storage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -409,6 +438,11 @@ const initialPersisted = loadPersistedState();
 let lastBroadcastTimeMs = 0;
 let broadcastRevisionCounter = 0;
 
+let lastNonAmbientLayout: NowPlayingLayoutMode =
+  initialPersisted.config.nowPlayingLayout !== 'ambient'
+    ? initialPersisted.config.nowPlayingLayout
+    : 'split';
+
 export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) => ({
   config: initialPersisted.config,
   nowPlayingLyricsMode: initialPersisted.nowPlayingLyricsMode,
@@ -417,6 +451,11 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     ? initialPersisted.perSongOffsetsMs[STARLIGHT_HARBOR_TRACK.id] ?? 0
     : 0,
   perSongOffsetsMs: initialPersisted.perSongOffsetsMs,
+  currentAutoSyncOffsetMs: initialPersisted.config.sandboxEnabled
+    ? initialPersisted.perSongAutoSyncOffsetsMs[STARLIGHT_HARBOR_TRACK.id] ?? 0
+    : 0,
+  perSongAutoSyncOffsetsMs: initialPersisted.perSongAutoSyncOffsetsMs,
+  vocalSilenceRanges: [],
   availableMonitors: [{ id: 'primary', label: 'Primary Display', isPrimary: true }],
   isAmbientOpen: false,
   isScreenLocked: false,
@@ -618,10 +657,21 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     get().broadcastSnapshot(undefined, true);
   },
 
-  setNowPlayingLayout: (layout: NowPlayingLayoutMode) => {
+  setNowPlayingLayout: (layout: NowPlayingLayoutMode | 'centered') => {
     if (!isValidNowPlayingLayout(layout)) return;
+    const normalized = normalizeNowPlayingLayout(layout);
+    if (normalized !== 'ambient') {
+      lastNonAmbientLayout = normalized;
+    } else if (get().config.nowPlayingLayout !== 'ambient') {
+      lastNonAmbientLayout = get().config.nowPlayingLayout;
+    }
     set((s) => {
-      const nextConfig: LyricVisualizerConfig = { ...s.config, nowPlayingLayout: layout };
+      const nextHideCover = normalized === 'lyrics-focus' || normalized === 'ambient';
+      const nextConfig: LyricVisualizerConfig = {
+        ...s.config,
+        nowPlayingLayout: normalized,
+        hideAlbumCover: nextHideCover,
+      };
       savePersistedState({
         config: nextConfig,
         perSongOffsetsMs: s.perSongOffsetsMs,
@@ -629,13 +679,30 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
       });
       return { config: nextConfig };
     });
+    if (normalized === 'ambient' && !get().isAmbientOpen) {
+      void get().openAmbientMode();
+    } else if (normalized !== 'ambient' && get().isAmbientOpen) {
+      void get().closeAmbientMode();
+    }
     get().broadcastSnapshot(undefined, true);
   },
 
   setHideAlbumCover: (hide: boolean) => {
     const flag = Boolean(hide);
     set((s) => {
-      const nextConfig: LyricVisualizerConfig = { ...s.config, hideAlbumCover: flag };
+      const current = s.config.nowPlayingLayout;
+      const nextLayout: NowPlayingLayoutMode = flag
+        ? current === 'split' || current === 'artwork-focus'
+          ? 'lyrics-focus'
+          : current
+        : current === 'lyrics-focus'
+        ? 'split'
+        : current;
+      const nextConfig: LyricVisualizerConfig = {
+        ...s.config,
+        hideAlbumCover: flag,
+        nowPlayingLayout: nextLayout,
+      };
       savePersistedState({
         config: nextConfig,
         perSongOffsetsMs: s.perSongOffsetsMs,
@@ -663,9 +730,11 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   setCurrentSongKey: async (songKey: string | null) => {
     const key = songKey && songKey.trim().length > 0 ? songKey.trim() : null;
     const localOffset = key ? get().perSongOffsetsMs[key] ?? 0 : 0;
+    const localAutoOffset = key ? get().perSongAutoSyncOffsetsMs[key] ?? 0 : 0;
     set({
       currentSongKey: key,
       currentSongOffsetMs: clampOffsetMs(localOffset),
+      currentAutoSyncOffsetMs: clampAutoSyncOffsetMs(localAutoOffset),
     });
 
     if (!key) return;
@@ -730,6 +799,35 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   resetSongOffsetMs: (songKey?: string | null) => {
     const key = (songKey !== undefined ? songKey : get().currentSongKey) || 'default-track';
     get().setSongOffsetMs(0, key);
+  },
+
+  setAutoSyncOffsetMs: (offsetMs: number, songKey?: string | null) => {
+    const clamped = clampAutoSyncOffsetMs(offsetMs);
+    const key = (songKey !== undefined ? songKey : get().currentSongKey) || 'default-track';
+    set((s) => {
+      const nextAuto = { ...s.perSongAutoSyncOffsetsMs, [key]: clamped };
+      savePersistedState({
+        config: s.config,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        perSongAutoSyncOffsetsMs: nextAuto,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return {
+        currentSongKey: s.currentSongKey ?? key,
+        currentAutoSyncOffsetMs: clamped,
+        perSongAutoSyncOffsetsMs: nextAuto,
+      };
+    });
+    get().broadcastSnapshot({ autoSyncOffsetMs: clamped }, true);
+  },
+
+  resetAutoSyncOffsetMs: (songKey?: string | null) => {
+    const key = (songKey !== undefined ? songKey : get().currentSongKey) || 'default-track';
+    get().setAutoSyncOffsetMs(0, key);
+  },
+
+  setVocalSilenceRanges: (ranges: readonly VocalSilenceInterval[]) => {
+    set({ vocalSilenceRanges: Array.isArray(ranges) ? ranges : [] });
   },
 
   setOverlayEnabled: (enabled: boolean) => {
@@ -853,6 +951,9 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
 
   openAmbientMode: async () => {
     const { config } = get();
+    if (config.nowPlayingLayout !== 'ambient') {
+      lastNonAmbientLayout = config.nowPlayingLayout;
+    }
     set({ isAmbientOpen: true });
     get().broadcastSnapshot(undefined, true);
     const api = getElectronApi();
@@ -873,7 +974,21 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   },
 
   closeAmbientMode: async () => {
-    set({ isAmbientOpen: false });
+    const restoreLayout = lastNonAmbientLayout !== 'ambient' ? lastNonAmbientLayout : 'split';
+    set((s) => {
+      const nextConfig =
+        s.config.nowPlayingLayout === 'ambient'
+          ? { ...s.config, nowPlayingLayout: restoreLayout, hideAlbumCover: restoreLayout === 'lyrics-focus' }
+          : s.config;
+      if (nextConfig !== s.config) {
+        savePersistedState({
+          config: nextConfig,
+          perSongOffsetsMs: s.perSongOffsetsMs,
+          nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+        });
+      }
+      return { isAmbientOpen: false, config: nextConfig };
+    });
     const api = getElectronApi();
     try {
       if (typeof api?.setFullscreen === 'function') {
@@ -1104,6 +1219,10 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
           typeof payload.songOffsetMs === 'number'
             ? clampOffsetMs(payload.songOffsetMs)
             : s.currentSongOffsetMs,
+        currentAutoSyncOffsetMs:
+          typeof payload.autoSyncOffsetMs === 'number'
+            ? clampAutoSyncOffsetMs(payload.autoSyncOffsetMs)
+            : s.currentAutoSyncOffsetMs,
         isScreenLocked:
           typeof payload.isScreenLocked === 'boolean' ? payload.isScreenLocked : s.isScreenLocked,
         lastAppliedRevisionId: nextRevisionId,
@@ -1165,6 +1284,10 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
         partial?.isPlaying !== undefined ? partial.isPlaying : snap?.isPlaying ?? false,
       songOffsetMs:
         partial?.songOffsetMs !== undefined ? partial.songOffsetMs : state.currentSongOffsetMs,
+      autoSyncOffsetMs:
+        partial?.autoSyncOffsetMs !== undefined
+          ? partial.autoSyncOffsetMs
+          : state.currentAutoSyncOffsetMs,
       audio,
       isScreenLocked:
         partial?.isScreenLocked !== undefined ? partial.isScreenLocked : state.isScreenLocked,

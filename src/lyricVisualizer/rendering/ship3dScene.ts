@@ -31,9 +31,14 @@ const LIGHTNING_SEGMENTS = 18;
 
 const SHIP_WIDTH = 1.45;
 const SHIP_WORLD_Z = 0.35;
-const SHIP_BASE_Y = -0.58;
+const SHIP_NOSE_Z = SHIP_WORLD_Z - 0.85;
+const SHIP_BASE_Y = -0.15;
 const GATE_LOOKAHEAD_SEC = 2.8;
 const GATE_TRAVEL_SPEED = 14.5;
+const MANEUVER_MIN_COOLDOWN_SEC = 6.0;
+const MANEUVER_ANTICIPATION_SEC = 0.16;
+const MANEUVER_ANTICIPATION_RAD = (12 * Math.PI) / 180;
+const MANEUVER_SETTLE_SEC = 0.22;
 
 // Semantic action bitmask flags (precomputed once per lyrics load)
 const SEM_FIRE = 1 << 0;
@@ -96,6 +101,8 @@ export interface Ship3DWordGateProjection {
   readonly worldX: number;
   readonly worldY: number;
   readonly worldZ: number;
+  readonly lineIndex: number;
+  readonly wordIndex: number;
 }
 
 export interface Ship3DHudTelemetry {
@@ -814,6 +821,8 @@ export class Ship3DScene {
     worldX: number;
     worldY: number;
     worldZ: number;
+    lineIndex: number;
+    wordIndex: number;
   }> = Array.from({ length: GATE_POOL }, () => ({
     text: '',
     screenX: 0,
@@ -826,6 +835,8 @@ export class Ship3DScene {
     worldX: 0,
     worldY: 0,
     worldZ: 0,
+    lineIndex: -1,
+    wordIndex: -1,
   }));
   private gateProjectionCount = 0;
 
@@ -1049,13 +1060,13 @@ export class Ship3DScene {
   getFlightPosition(t: number, out?: Ship3DFlightVec): Ship3DFlightVec {
     const target = out ?? this.flightPosScratch;
     const time = Number.isFinite(t) ? t : 0;
-    const w = 0.68 * this.currentBpmFactor;
+    const w = 0.78 * this.currentBpmFactor;
     const amp = this.currentReduceMotion ? 0.25 : 1.0;
     const semY = this.computeSemanticVertical(time, 0);
-    target.x = amp * (2.45 * Math.sin(w * time) + 1.05 * Math.sin(w * 0.43 * time + 0.9));
+    target.x = amp * (3.65 * Math.sin(w * time) + 1.15 * Math.sin(w * 0.47 * time + 0.85));
     target.y =
       SHIP_BASE_Y +
-      amp * (0.56 * Math.sin(w * 0.67 * time + 0.4) + 0.22 * Math.cos(w * 1.13 * time) + semY);
+      amp * (0.48 * Math.sin(w * 0.65 * time + 0.35) + 0.18 * Math.cos(w * 1.11 * time) + semY);
     target.z = SHIP_WORLD_Z;
     return target;
   }
@@ -1066,15 +1077,15 @@ export class Ship3DScene {
   getFlightVelocity(t: number, out?: Ship3DFlightVec): Ship3DFlightVec {
     const target = out ?? this.flightVelScratch;
     const time = Number.isFinite(t) ? t : 0;
-    const w = 0.68 * this.currentBpmFactor;
+    const w = 0.78 * this.currentBpmFactor;
     const amp = this.currentReduceMotion ? 0.25 : 1.0;
-    const w2 = w * 0.43;
-    const wy1 = w * 0.67;
-    const wy2 = w * 1.13;
+    const w2 = w * 0.47;
+    const wy1 = w * 0.65;
+    const wy2 = w * 1.11;
     const semVy = this.computeSemanticVertical(time, 1);
-    target.x = amp * (2.45 * w * Math.cos(w * time) + 1.05 * w2 * Math.cos(w2 * time + 0.9));
+    target.x = amp * (3.65 * w * Math.cos(w * time) + 1.15 * w2 * Math.cos(w2 * time + 0.85));
     target.y =
-      amp * (0.56 * wy1 * Math.cos(wy1 * time + 0.4) - 0.22 * wy2 * Math.sin(wy2 * time) + semVy);
+      amp * (0.48 * wy1 * Math.cos(wy1 * time + 0.35) - 0.18 * wy2 * Math.sin(wy2 * time) + semVy);
     target.z = 0;
     return target;
   }
@@ -1085,18 +1096,18 @@ export class Ship3DScene {
   getFlightAcceleration(t: number, out?: Ship3DFlightVec): Ship3DFlightVec {
     const target = out ?? this.flightAccScratch;
     const time = Number.isFinite(t) ? t : 0;
-    const w = 0.68 * this.currentBpmFactor;
+    const w = 0.78 * this.currentBpmFactor;
     const amp = this.currentReduceMotion ? 0.25 : 1.0;
-    const w2 = w * 0.43;
-    const wy1 = w * 0.67;
-    const wy2 = w * 1.13;
+    const w2 = w * 0.47;
+    const wy1 = w * 0.65;
+    const wy2 = w * 1.11;
     const semAy = this.computeSemanticVertical(time, 2);
     target.x =
-      amp * (-2.45 * w * w * Math.sin(w * time) - 1.05 * w2 * w2 * Math.sin(w2 * time + 0.9));
+      amp * (-3.65 * w * w * Math.sin(w * time) - 1.15 * w2 * w2 * Math.sin(w2 * time + 0.85));
     target.y =
       amp *
-      (-0.56 * wy1 * wy1 * Math.sin(wy1 * time + 0.4) -
-        0.22 * wy2 * wy2 * Math.cos(wy2 * time) +
+      (-0.48 * wy1 * wy1 * Math.sin(wy1 * time + 0.35) -
+        0.18 * wy2 * wy2 * Math.cos(wy2 * time) +
         semAy);
     target.z = 0;
     return target;
@@ -1338,7 +1349,7 @@ export class Ship3DScene {
     const astRad = this.asteroids[idx + 6] * 3.2;
     const exclR = SHIP_WIDTH * 1.8 + astRad;
     const padExclR = exclR + 0.08;
-    const maxSkyY = 0.56 - astRad * 1.25;
+    const maxSkyY = 2.1 - astRad * 1.1;
 
     const astWorldSpeed = Math.max(2.0, this.lastAstWorldSpeed);
     const tAtZ = timeSeconds + (SHIP_WORLD_Z - astWZ) / astWorldSpeed;
@@ -1448,17 +1459,32 @@ export class Ship3DScene {
     let bestY = 0;
     let bestZ = zOverride ?? 6.2;
     let bestMinDist = -1;
+    const astWorldSpeed = Math.max(2.0, this.lastAstWorldSpeed);
 
     for (let attempt = 0; attempt < 16; attempt++) {
-      const lane = ((index + attempt) % 7) - 3;
-      const candX = Math.max(-1.65, Math.min(1.65, lane * 0.42 + (this.nextRand() - 0.5) * 0.42));
-      const maxCandY = Math.min(0.05, (0.56 - myRadius * 1.25 + 0.25) / 3.4);
-      const candY = -0.68 + this.nextRand() * Math.max(0.15, maxCandY + 0.68);
       const candZ = zOverride !== undefined ? zOverride + attempt * 0.12 : 5.8 + this.nextRand() * 3.2;
+      const wz = 5.0 - candZ * 6.2;
+      let candX: number;
+      let candY: number;
+
+      if (attempt < 10 && index % 3 !== 2) {
+        // Deliberate alternating flank / inside-bend placement along the S-curve spline
+        const tAtZ = this.currentSceneTime + (SHIP_WORLD_Z - wz) / astWorldSpeed;
+        const fp = this.getFlightPosition(tAtZ, this.tmpFlightPos);
+        const side = (index + attempt) % 2 === 0 ? 1 : -1;
+        const targetWx = fp.x + side * (exclR + 0.55 + this.nextRand() * 1.35);
+        candX = Math.max(-1.85, Math.min(1.85, targetWx / 5.2));
+        const targetWy = fp.y + (this.nextRand() - 0.5) * 0.85;
+        candY = Math.max(-0.68, Math.min(0.52, (targetWy + 0.25) / 3.4));
+      } else {
+        const lane = ((index + attempt) % 7) - 3;
+        candX = Math.max(-1.85, Math.min(1.85, lane * 0.48 + (this.nextRand() - 0.5) * 0.42));
+        const maxCandY = Math.min(0.45, (2.1 - myRadius * 1.1 + 0.25) / 3.4);
+        candY = -0.68 + this.nextRand() * Math.max(0.15, maxCandY + 0.68);
+      }
 
       const wx = candX * 5.2;
       const wy = -0.25 + candY * 3.4;
-      const wz = 5.0 - candZ * 6.2;
 
       let minDist = 999;
       let valid = true;
@@ -2538,15 +2564,21 @@ export class Ship3DScene {
     kind: 1 | 2 | 3,
     duration: number,
     dir: number,
-    force = false
+    _force = false
   ): void {
     if (this.currentReduceMotion) return;
-    if (!force && (this.maneuverKind !== 0 || this.maneuverCooldown > 0)) return;
+    // Never interrupt an active roll or violate the minimum 6s cooldown
+    if (this.maneuverKind !== 0 || this.maneuverCooldown > 0) return;
+    const rollDur =
+      kind === 1 || kind === 2
+        ? Math.max(1.05, Math.min(1.25, duration))
+        : Math.max(0.85, duration);
+    const totalDur = MANEUVER_ANTICIPATION_SEC + rollDur + MANEUVER_SETTLE_SEC;
     this.maneuverKind = kind;
     this.maneuverProgress = 0;
-    this.maneuverDuration = Math.max(0.32, duration);
+    this.maneuverDuration = totalDur;
     this.maneuverDir = dir >= 0 ? 1 : -1;
-    this.maneuverCooldown = 0.25;
+    this.maneuverCooldown = MANEUVER_MIN_COOLDOWN_SEC;
     if (kind === 1 || kind === 2) {
       this.barrelRollActive = true;
       this.barrelRollPhase = 0;
@@ -2685,15 +2717,15 @@ export class Ship3DScene {
     this.collectFlash = 1.0;
     this.collectLunge = reduceMotion ? 0 : 1.0;
     if (!reduceMotion) {
-      this.cameraSpringVel += 1.85;
+      this.cameraSpringVel += 1.35;
     }
-    this.cameraTrauma = Math.min(reduceMotion ? 0.15 : 1.0, this.cameraTrauma + (reduceMotion ? 0.05 : 0.16));
+    this.cameraTrauma = Math.min(reduceMotion ? 0.12 : 1.0, this.cameraTrauma + (reduceMotion ? 0.04 : 0.11));
 
     this.recordWordMergeFlash(wordGate.key);
 
     const pos = this.getFlightPosition(wordGate.startSeconds, this.tmpFlightPos);
     const gateWorldX = pos.x;
-    const gateWorldY = pos.y + 0.36;
+    const gateWorldY = pos.y;
 
     parseColorToRgbInto(palette.accentPrimary, this.tmpRgbA);
     parseColorToRgbInto(palette.accentSecondary, this.tmpRgbB);
@@ -2721,17 +2753,25 @@ export class Ship3DScene {
       splashB = this.tmpColorC.b;
     }
 
-    this.emitSplashDroplets(gateWorldX, gateWorldY, wordZ, 16, splashR, splashG, splashB);
-    this.emitSparks(gateWorldX, gateWorldY, wordZ, 12, splashR, splashG, splashB);
+    this.emitSplashDroplets(gateWorldX, gateWorldY, wordZ, 24, splashR, splashG, splashB);
+    this.emitSparks(gateWorldX, gateWorldY, wordZ, 16, splashR, splashG, splashB);
+    if (!reduceMotion) {
+      this.emitShockwave(gateWorldX, gateWorldY, wordZ);
+    }
 
     const shipWorldX = this.shipX;
     const shipWorldY = this.shipY;
 
-    // Choreographed 360-degree barrel roll or wing-tip corkscrew every 5-word streak
-    if (!reduceMotion && this.combo > 0 && this.combo % 5 === 0) {
+    // Silky anticipated barrel roll on chorus / major phrase transitions (respects 6s cooldown)
+    if (
+      !reduceMotion &&
+      wordGate.wordIndex === 0 &&
+      wordGate.lineIndex > 0 &&
+      wordGate.lineIndex % 4 === 0
+    ) {
       const dir = this.shipVx >= 0 ? 1 : -1;
-      const kind: 1 | 2 = (this.combo / 5) % 2 === 1 ? 2 : 1;
-      this.startChoreographedManeuver(kind, kind === 2 ? 0.68 : 0.62, dir);
+      const kind: 1 | 2 = wordGate.lineIndex % 8 === 0 ? 2 : 1;
+      this.startChoreographedManeuver(kind, 1.15, dir);
     }
 
     if (mask === 0) {
@@ -2753,7 +2793,7 @@ export class Ship3DScene {
     }
     if ((mask & SEM_BOOST) !== 0 && !reduceMotion) {
       this.warpSurge = 1.25;
-      this.startChoreographedManeuver(1, 0.58, this.shipVx >= 0 ? 1 : -1, true);
+      this.startChoreographedManeuver(1, 1.12, this.shipVx >= 0 ? 1 : -1);
       this.chromaticPulse = 0.85;
       this.cameraSpringVel += 1.4;
       this.toastText = 'HYPER WARP!';
@@ -2864,8 +2904,8 @@ export class Ship3DScene {
         : 0;
     const lungeZ = this.collectLunge * 0.16 + this.cameraSpringPos * 0.42;
 
-    st.camera.position.set(shakeX + bulletArc, 0.72 + shakeY, 5.95 - lungeZ);
-    st.camera.lookAt(0, -0.18, -4.5);
+    st.camera.position.set(this.shipX * 0.16 + shakeX + bulletArc, 0.65 + shakeY, 6.2 - lungeZ);
+    st.camera.lookAt(this.shipX * 0.12, -0.14, -5.0);
     st.camera.rotation.z += shakeRoll;
 
     const targetFov = 52 + this.warpSurge * 13 + this.collectLunge * 2.2 + Math.max(0, this.cameraSpringPos) * 3.5;
@@ -3067,8 +3107,8 @@ export class Ship3DScene {
       gp.screenX = (this.tmpVecC.x * 0.5 + 0.5) * width;
       gp.screenY = (-this.tmpVecC.y * 0.5 + 0.5) * height;
       gp.scale = Math.max(
-        0.45,
-        Math.min(1.45, 7.0 / Math.max(1.5, Math.abs(st.camera.position.z - gp.worldZ)))
+        0.55,
+        Math.min(1.6, 7.2 / Math.max(1.5, Math.abs(st.camera.position.z - gp.worldZ)))
       );
     }
 
@@ -3633,9 +3673,9 @@ export class Ship3DScene {
       this.chromaticPulse = Math.max(this.chromaticPulse, beatStrength > 0.85 ? 0.75 : 0.35);
       this.cameraSpringVel += 1.1;
 
-      if (beatStrength > 0.78 && this.maneuverKind === 0 && this.maneuverCooldown <= 0) {
+      if (((audio as any).isDownbeat || beatStrength > 0.88) && this.maneuverKind === 0 && this.maneuverCooldown <= 0) {
         const dir = this.shipVx >= 0 ? 1 : -1;
-        this.startChoreographedManeuver(beatStrength > 0.9 ? 1 : 3, beatStrength > 0.9 ? 0.62 : 0.52, dir);
+        this.startChoreographedManeuver(beatStrength > 0.92 ? 1 : 2, 1.15, dir);
       }
 
       if (this.isInstrumental && beatStrength > 0.86) {
@@ -3669,18 +3709,35 @@ export class Ship3DScene {
           this.barrelRollActive = false;
           this.barrelRollPhase = 0;
         } else {
-          const u = Math.max(0, Math.min(1, this.maneuverProgress));
-          const eased = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
-          if (this.maneuverKind === 1) {
-            this.barrelRollPhase = 2 * Math.PI * eased;
+          const elapsed = Math.max(0, Math.min(this.maneuverDuration, this.maneuverProgress * this.maneuverDuration));
+          const rollDur = Math.max(0.4, this.maneuverDuration - MANEUVER_ANTICIPATION_SEC - MANEUVER_SETTLE_SEC);
+          const rollEnd = MANEUVER_ANTICIPATION_SEC + rollDur;
+          const quintic = (t: number) => t * t * t * (t * (6 * t - 15) + 10);
+
+          if (elapsed < MANEUVER_ANTICIPATION_SEC) {
+            // Phase 1: 160ms counter-bank anticipation (-12 deg)
+            const q = quintic(elapsed / MANEUVER_ANTICIPATION_SEC);
+            this.barrelRollPhase = -MANEUVER_ANTICIPATION_RAD * q;
             maneuverRoll = this.barrelRollPhase * this.maneuverDir;
-          } else if (this.maneuverKind === 2) {
-            this.barrelRollPhase = 2 * Math.PI * eased;
+            maneuverYaw = -0.06 * q * this.maneuverDir;
+          } else if (elapsed < rollEnd) {
+            // Phase 2: Silky quintic ease-in-out 360-deg barrel roll (1.05s - 1.25s)
+            const u = (elapsed - MANEUVER_ANTICIPATION_SEC) / rollDur;
+            const q = quintic(u);
+            this.barrelRollPhase = -MANEUVER_ANTICIPATION_RAD + (2 * Math.PI + MANEUVER_ANTICIPATION_RAD) * q;
             maneuverRoll = this.barrelRollPhase * this.maneuverDir;
-            maneuverPitch = Math.sin(2 * Math.PI * eased) * 0.18;
-            maneuverYaw = Math.sin(Math.PI * eased) * 0.14 * this.maneuverDir;
+            if (this.maneuverKind === 2) {
+              maneuverPitch = Math.sin(2 * Math.PI * q) * 0.14;
+              maneuverYaw = Math.sin(Math.PI * q) * 0.12 * this.maneuverDir;
+            } else {
+              maneuverPitch = Math.sin(Math.PI * q) * 0.08;
+            }
           } else {
-            maneuverRoll = Math.sin(2 * Math.PI * eased) * 0.62 * this.maneuverDir;
+            // Phase 3: Damped settling back onto natural spline bank angle
+            const sNorm = (elapsed - rollEnd) / MANEUVER_SETTLE_SEC;
+            const settleEnv = Math.exp(-5.5 * sNorm) * Math.sin(Math.PI * sNorm);
+            this.barrelRollPhase = 2 * Math.PI;
+            maneuverRoll = settleEnv * 0.09 * this.maneuverDir;
           }
         }
       }
@@ -3698,7 +3755,7 @@ export class Ship3DScene {
       this.yawAngle = yawFromDeriv + maneuverYaw;
     }
 
-    // Build upcoming 3D Lyric Word Anchors (anchored at exact getFlightPosition(word.startSeconds))
+    // Build upcoming 3D Lyric Word Anchors directly along the ship's nose centerline
     this.gateProjectionCount = 0;
     const lyricT = this.currentLyricTime;
 
@@ -3706,13 +3763,13 @@ export class Ship3DScene {
       for (let i = 0; i < this.precomputedWords.length; i++) {
         const w = this.precomputedWords[i];
         const dtToWord = w.startSeconds - lyricT;
-        if (dtToWord < -0.45) continue;
+        if (dtToWord < -0.38) continue;
         if (dtToWord > GATE_LOOKAHEAD_SEC) break;
 
-        const wordZ = SHIP_WORLD_Z - dtToWord * GATE_TRAVEL_SPEED;
+        const wordZ = SHIP_NOSE_Z - dtToWord * GATE_TRAVEL_SPEED;
 
-        // Detect exact moment the ship's nose slices through the word (dtToWord <= 0.035)
-        if (dtToWord <= 0.035 && dtToWord >= -0.18 && w.key !== this.lastCollectedWordKey) {
+        // Detect exact moment the ship's nose flies straight through the center of the word
+        if (dtToWord <= 0.025 && dtToWord >= -0.18 && w.key !== this.lastCollectedWordKey) {
           this.lastCollectedWordKey = w.key;
           this.triggerWordCollection(w, wordZ, reduceMotion, palette);
         }
@@ -3723,22 +3780,24 @@ export class Ship3DScene {
           const mergeFlash = this.getWordMergeFlash(w.key);
           gp.text = w.text;
           gp.worldX = anchor.x;
-          gp.worldY = anchor.y + 0.36;
+          gp.worldY = anchor.y;
           gp.worldZ = wordZ;
+          gp.lineIndex = w.lineIndex;
+          gp.wordIndex = w.wordIndex;
           gp.isActive = w.lineIndex === this.currentActiveLine && w.wordIndex === this.currentActiveWord;
           gp.semanticMask = w.semanticMask;
           gp.mergeFlash = mergeFlash;
-          if (wordZ >= 4.9) {
+          if (wordZ >= 5.2) {
             gp.alpha = 0;
           } else if (dtToWord < 0) {
-            gp.alpha = Math.max(0, Math.min(1, 1.0 + dtToWord / 0.16));
+            gp.alpha = Math.max(0, Math.min(1, 1.0 + dtToWord / 0.24));
           } else {
-            gp.alpha = Math.max(0, Math.min(1, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.7));
+            gp.alpha = Math.max(0, Math.min(1, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.65));
           }
-          const invZ = 1.0 / Math.max(0.4, 5.95 - gp.worldZ);
-          gp.screenX = cx + gp.worldX * fallbackFocal * invZ;
-          gp.screenY = cy - (gp.worldY - 0.24) * fallbackFocal * invZ;
-          gp.scale = Math.max(0.45, Math.min(1.45, 7.0 * invZ));
+          const invZ = 1.0 / Math.max(0.4, 6.2 - gp.worldZ);
+          gp.screenX = cx + (gp.worldX - this.shipX * 0.12) * fallbackFocal * invZ;
+          gp.screenY = cy - (gp.worldY + 0.14) * fallbackFocal * invZ;
+          gp.scale = Math.max(0.55, Math.min(1.6, 7.2 * invZ));
         }
       }
     }

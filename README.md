@@ -4,7 +4,7 @@
   <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, a Rust <code>napi-rs</code> Native Performance Core, Web Audio DSP, and 12 hardware-accelerated lyric visualizers.</strong></p>
 
   <p>
-    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.2.5"><img src="https://img.shields.io/badge/Release-v1.2.5-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.2.5" /></a>
+    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.0"><img src="https://img.shields.io/badge/Release-v1.3.0-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.3.0" /></a>
     <img src="https://img.shields.io/badge/Rust-napi--rs_Native_Core-DEA584?style=flat-square&logo=rust&logoColor=black" alt="Rust napi-rs Native Core" />
     <img src="https://img.shields.io/badge/Electron-30.5.1-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
     <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React 19" />
@@ -15,19 +15,19 @@
 
 ---
 
-## Screenshots (`v1.2.5`)
+## Screenshots (`v1.3.0`)
 
 | Now Playing & Apple Music Fluid Mesh | iOS Messages Tapback & Magic Word Lyrics |
 | :---: | :---: |
 | ![Now Playing & Apple Music Fluid Mesh](docs/screenshots/01-now-playing-apple-mesh.png) | ![iOS Messages Tapback & Magic Word Lyrics](docs/screenshots/02-visualizer-ios-chat.png) |
 
-| Code Editor Kinetic Visualizer | 3D Spaceship — Night-Sky Weave & Lyric Merge |
+| Code Editor Kinetic Visualizer | 3D Spaceship — Corridor Splashes & S-Curve Weave |
 | :---: | :---: |
-| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship — Night-Sky Weave & Lyric Merge](docs/screenshots/04-visualizer-spaceship-3d.png) |
+| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship — Corridor Splashes & S-Curve Weave](docs/screenshots/04-visualizer-spaceship-3d.png) |
 
-| Centered Lyric Mode (Minimal Controls) | 3D Cover Flow & Library |
+| Lyrics Focus Mode (Minimal Controls) | 3D Cover Flow & Library |
 | :---: | :---: |
-| ![Centered Lyric Mode](docs/screenshots/05-centered-lyrics-mode.png) | ![3D Cover Flow & Library](docs/screenshots/06-cover-flow-library.png) |
+| ![Lyrics Focus Mode](docs/screenshots/05-centered-lyrics-mode.png) | ![3D Cover Flow & Library](docs/screenshots/06-cover-flow-library.png) |
 
 ---
 
@@ -54,12 +54,12 @@ irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/in
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Fresh -Force
 
 # Pin a specific release tag
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.2.5 -Portable
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.3.0 -Portable
 ```
 
 ### Direct `.exe` Download & Smart NSIS Updater
 
-Grab [`WaveForm-Setup-1.2.5.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.2.5/WaveForm-Setup-1.2.5.exe) (NSIS installer with SemVer-aware changed-files-only diff-sync, repair/verify mode, and downgrade protection) or [`WaveForm-Portable-1.2.5.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.2.5/WaveForm-Portable-1.2.5.exe) (standalone executable) from the [v1.2.5 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.2.5).
+Grab [`WaveForm-Setup-1.3.0.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.0/WaveForm-Setup-1.3.0.exe) (NSIS installer with SemVer-aware changed-files-only diff-sync, repair/verify mode, and downgrade protection) or [`WaveForm-Portable-1.3.0.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.0/WaveForm-Portable-1.3.0.exe) (standalone executable) from the [v1.3.0 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.0).
 
 ### One-Click In-App Auto-Updater (`electron/appUpdater.ts`, `UpdatePromptModal.tsx`)
 
@@ -70,28 +70,34 @@ Grab [`WaveForm-Setup-1.2.5.exe`](https://github.com/Trapston3/waveform-desktop/
 
 ## Native Rust Performance Core (`native/waveform-core`)
 
-WaveForm v1.2.5 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
+WaveForm v1.3.0 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
 
 - **SQLite AutoEQ Engine (`src/autoeq.rs`, `rusqlite` bundled)**: Indexes all 17,703 rows (8,850 parametric `PaP\x01` profiles) into a normalized accent/punctuation-stripped 36-bit bitmask + trigram index for sub-millisecond fuzzy search (`sony whch-720n` → `Sony WH-CH720N`) and Boundary-07 parametric filter decoding.
 - **Multi-Core Parallel Media Scanner (`src/scanner.rs`, `lofty` + `rayon` + `walkdir` + `sha2`)**: Scans local folders incrementally against cached `(path, mtimeMs, size)` diffs across all CPU cores, extracts tags, synced/unsynced lyrics (`USLT`/`SYLT`/`©lyr`/`LYRICS`), and writes content-addressed deduplicated cover art into `userData/artwork-cache/`.
-- **Real-Time DSP, FFT & Native ONNX Runtime (`src/dsp.rs`, `src/onnx_engine.rs`, `realfft` + `ort`)**: Computes exact f64 RBJ biquad and 10-band trapezoidal SVF EQ magnitude curves, Hann-windowed `realfft` 32-band spectra / spectral-flux beat & BPM onset tracking, and non-blocking background-thread `ort` inference hooks for `beat_this_final0_q8.onnx` and `vocals_umxhq_int8.onnx`.
+- **Real-Time DSP, FFT & Native ONNX ML Engine (`src/dsp.rs`, `src/onnx_engine.rs`, `realfft` + `ort`)**: Powers live RBJ/SVF 10-band EQ curves, 32-band spectra, and background-thread ONNX / STFT inference (`beat_this_final0_q8.onnx` & `vocals_umxhq_int8.onnx`) for neural PCM beat/downbeat detection (`onnx_analyze_track_beats_pcm`), vocal stem separation (`onnx_separate_vocals_pcm`), chorus hook detection, vocal-silence gap detection, and cross-correlation Auto-Lyric Sync (`estimate_lyric_offset_ms`).
 
 ---
 
 ## Features
 
-### Dual-Deck Audio Engine & DSP (`src/audio/`)
+### Dual-Deck Audio Engine, Karaoke & Neural ML Intelligence (`src/audio/`, `src/services/MlAudioService.ts`)
+- **Live Karaoke Mode (`Mic2` Control)**: Instant zero-latency Web Audio Mid/Side vocal-band attenuation paired with `KaraokeProcessor` / background Open-Unmix neural vocal stem separation (`0%–100%` Vocal Level slider + Isolate Vocals mode).
+- **Neural Beat-Locked Auto-Mix & Chorus Preview**: `TransitionProcessor.findBestDownbeatTransitionWindow` aligns Auto-Mix transitions onto outgoing/incoming neural downbeats while minimizing vocal overlap; `2026 Replay` 15s previews and `Cover Flow` `Preview Chorus` jump straight into the detected chorus hook.
+- **Auto-Sync Lyrics & Downbeat Reactive Stage**: One-click `Auto-Sync Lyrics` aligns LRC timestamps up to `±15s` against the audio vocal contour while feeding vocal-silence gaps into `SyncEngine` and neural `isDownbeat` pulses into visualizers.
 - **CORS-Resilient Dual-Deck Playback (`AudioEngine.ts`)**: Dual deck architecture (`deckA` / `deckB`) with constant-power crossfading, `waveform-local://` HTTP Range (`206 Partial Content`) local streaming, and automatic lazy unbound `<audio>` direct fallback if an external media CDN fails CORS or `MediaElementAudioSourceNode` routing.
 - **10-Band Equalizer & Interactive AutoEQ Graph (`DspChain.ts`, `AutoEqLoader.ts`, `InteractiveEqGraph.tsx`)**: Live Web Audio `BiquadFilterNode` chain paired with the native Rust SQLite AutoEQ database (`src/assets/data/auto_eq.db`), spatial stereo width processing, ReplayGain normalization, and a lookahead peak limiter.
 - **68-Bar Waveform & Live PCM Visualizer (`WaveformExtractor.ts`, `LiveVisualizer.ts`, `WaveformCanvasSeekbar.tsx`)**: Hardware-accelerated High-DPI canvas seekbar with optimistic seek latching.
 
 ### LyricVisualizer Subsystem (`src/lyricVisualizer/`, `electron/lyricVisualizerPlatform.ts`)
+- **Unified Now Playing Layouts & Clean Stage**: Consolidated 4-mode layout selector (`Split View`, `Lyrics Focus`, `Artwork Focus` hiding lyrics cleanly, `Fullscreen Ambient`), standalone `Lyric Engine` toggle (`Classic Apple Music` vs `Lyric Visualizer`), and zero native HTML hover tooltips on the stage.
 - **12 Hardware-Accelerated Visual Styles (with Variations)**: `AppleMusicFlow`, `TypewriterEditorial`, `MinimalSwiss`, `LiquidMetal`, `KaraokeStage`, `BrutalistZine`, `GenerativeParticleInk`, `Spatial3DDepth`, `CRTScanline`, `StarfieldShip3D`, `iOSTextingMotion`, and `CodeEditorKinetic` powered by Canvas2D + WebGL2.
-- **Reworked 3D Spaceship (`ship3dScene.ts`, `starfieldShip3d.ts`)**: Deterministic wide-weaving C∞ S-curve spline synced to BPM with analytical derivative banking and cubic ease-in-out barrel rolls, hard asteroid exclusion cylinder along both the flight corridor and upcoming lyric anchors, serene 2,400-star twinkling night sky, and direct nose-to-lyric energy splashes.
-- **Polished iOS Messages (`iosTextingMotion.ts`, `lrcParser.ts`, `lyricsPipeline.ts`)**: Single unified dark iOS voice-note waveform pill, reserved vertical thread spacing with zero overlap, compact beat-bobbing musical note bubbles for `< 4s` pauses, `• • •` typing indicators before upcoming lines, and zero blank empty bubbles across the entire lyrics pipeline.
+- **Reworked 3D Spaceship (`ship3dScene.ts`, `starfieldShip3d.ts`)**: Single unified flight-corridor lyric stream with direct nose/wing liquid-starlight impact splashes, wide left-to-right S-curve asteroid weaving with strict clearance cylinders, and anticipated quintic (`6t^5 - 15t^4 + 10t^3`) barrel rolls locked to downbeats.
 - **Multi-Surface Windows Guards**: Embeds in `NowPlayingScreen`, multi-monitor click-through Desktop Overlays (`#/overlay`), and Fullscreen Ambient Mode (`#/ambient`) with `KeepAwake`, Windows fullscreen game suppression, and lock-screen `0%` GPU suspend. See [DECISIONS.md](DECISIONS.md).
 
-### Streaming, Local Library & Desktop UX
+### Zero-API-Key URL Import, Smart Radio Queue & Permanent Replay
+- **Spotify & Apple Music URL Playlist Importer (`electron/playlistImporter.ts`, `ImportPlaylistModal.tsx`)**: Paste any public Spotify or Apple Music playlist URL to preview metadata and concurrently match tracks into permanent local WaveForm playlists with zero API keys.
+- **Genre-Matched Up Next Radio & Interactive Queue (`queueStore.ts`, `RightSidecar.tsx`)**: Playing from Search starts that single track paired with YouTube Music Up Next Radio (`RDAMVM<videoId>`), filters out podcasts/episodes/`>15 min` shows/title-spam covers, isolates `USER_QUEUE` vs `AUTOPLAY`, and adds drag-and-drop reordering, move up/down, hover remove (`×`), `Start Song Radio`, `Shuffle Up Next`, and `Save as Playlist`.
+- **Permanent 2026 Replay Disk History (`electron/replayStore.ts`, `StorageService.ts`)**: Continuous 1-second playback accumulation flushed atomically to `userData/replay-history.json` (`.bak` recovery + automatic `localStorage` migration) so real listening minutes persist permanently across updates.
 - **YouTube SABR & Account Connections (`youtubeSabrStream.ts`, `accountAuth.ts`)**: Server-driven ABR (`SabrStream`) with `SAPISIDHASH` auth isolation, progressive HTTP `206` streaming, `yt-dlp` fallback, Spotify Playlists shelf, Discord Rich Presence (`discordRpc.ts`), and Party LAN/WebRTC sync (`PartySyncClient.ts`).
 - **Liquid Glass Desktop UX (`src/ui/`)**: Unified top-left sidebar search (`Ctrl+K`), collapsible icon rail (`64px`), dynamic album-cover OKLCH accent extraction, tray minimize/close controls, and `2026 Replay`.
 

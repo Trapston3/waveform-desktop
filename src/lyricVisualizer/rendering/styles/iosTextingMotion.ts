@@ -1082,7 +1082,12 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     const bass = frame.audio.bassEnergy ?? 0;
     const mid = frame.audio.midEnergy ?? 0;
     const treble = frame.audio.trebleEnergy ?? 0;
-    const beatBoost = motionScale > 0 && frame.audio.beatDetected ? 0.2 : 0;
+    const beatBoost =
+      motionScale > 0 && frame.audio.isDownbeat
+        ? 0.34
+        : motionScale > 0 && frame.audio.beatDetected
+        ? 0.2
+        : 0;
 
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -1152,7 +1157,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         : Math.sin(t * 4.5) * 2.2 * Math.min(1.2, motionScale) -
           (frame.audio.beatDetected ? 1.4 * Math.min(1.2, motionScale) : 0);
     const pulseScale =
-      motionScale > 0 && frame.audio.beatDetected
+      motionScale > 0 && frame.audio.isDownbeat
+        ? 1.13
+        : motionScale > 0 && frame.audio.beatDetected
         ? 1.08
         : 1.0 + bass * 0.06 * Math.min(1, motionScale);
 

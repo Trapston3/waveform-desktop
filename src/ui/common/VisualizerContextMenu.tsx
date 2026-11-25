@@ -10,8 +10,8 @@ import {
   Check,
   ChevronRight,
   Clock,
+  Disc,
   Eye,
-  EyeOff,
   Languages,
   Layout,
   Maximize2,
@@ -29,6 +29,7 @@ import {
   getBundledFontCssFamily,
   type LyricsScriptMode,
   type LyricTextAlign,
+  normalizeNowPlayingLayout,
   type NowPlayingLayoutMode,
   resolveStyleVariationId,
   VISUAL_STYLE_DEFINITIONS,
@@ -44,6 +45,8 @@ import {
   type MotionIntensity,
   useLyricVisualizerStore,
 } from '../../lyricVisualizer/state/lyricVisualizerStore';
+import { MlAudioService } from '../../services/MlAudioService';
+import { usePlayerStore } from '../../state/playerStore';
 
 export interface VisualizerContextMenuProps {
   isOpen: boolean;
@@ -119,12 +122,17 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   context = 'now-playing',
 }) => {
   const [activeSubmenu, setActiveSubmenu] = useState<SubmenuId>('none');
+  const [isAutoSyncing, setIsAutoSyncing] = useState(false);
+  const [autoSyncMessage, setAutoSyncMessage] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const config = useLyricVisualizerStore((s) => s.config);
   const nowPlayingLyricsMode = useLyricVisualizerStore((s) => s.nowPlayingLyricsMode);
   const isAmbientOpen = useLyricVisualizerStore((s) => s.isAmbientOpen);
   const currentSongOffsetMs = useLyricVisualizerStore((s) => s.currentSongOffsetMs);
+  const currentAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.currentAutoSyncOffsetMs);
+  const activeLyrics = useLyricVisualizerStore((s) => s.activeLyrics);
+  const activeTrack = useLyricVisualizerStore((s) => s.activeTrack);
 
   const setNowPlayingLyricsMode = useLyricVisualizerStore((s) => s.setNowPlayingLyricsMode);
   const setStyleId = useLyricVisualizerStore((s) => s.setStyleId);
@@ -139,10 +147,12 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   const setVignetteStrength = useLyricVisualizerStore((s) => s.setVignetteStrength);
   const setTextAlign = useLyricVisualizerStore((s) => s.setTextAlign);
   const setNowPlayingLayout = useLyricVisualizerStore((s) => s.setNowPlayingLayout);
-  const setHideAlbumCover = useLyricVisualizerStore((s) => s.setHideAlbumCover);
   const setScriptMode = useLyricVisualizerStore((s) => s.setScriptMode);
   const nudgeSongOffsetMs = useLyricVisualizerStore((s) => s.nudgeSongOffsetMs);
   const resetSongOffsetMs = useLyricVisualizerStore((s) => s.resetSongOffsetMs);
+  const setAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.setAutoSyncOffsetMs);
+  const resetAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.resetAutoSyncOffsetMs);
+  const setVocalSilenceRanges = useLyricVisualizerStore((s) => s.setVocalSilenceRanges);
   const setOverlayEnabled = useLyricVisualizerStore((s) => s.setOverlayEnabled);
   const openAmbientMode = useLyricVisualizerStore((s) => s.openAmbientMode);
   const closeAmbientMode = useLyricVisualizerStore((s) => s.closeAmbientMode);
@@ -207,21 +217,91 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   const activeVariationId = resolveStyleVariationId(config.styleId, config.variationByStyle);
   const currentMotionIntensity: MotionIntensity =
     ((config as any).motionIntensity as MotionIntensity | undefined) || 'normal';
-  const currentLayout: NowPlayingLayoutMode = config.nowPlayingLayout ?? 'split';
-  const currentHideCover = Boolean(config.hideAlbumCover);
+  const rawLayout = normalizeNowPlayingLayout(config.nowPlayingLayout);
+  const currentLayout: NowPlayingLayoutMode =
+    isAmbientOpen || context === 'ambient'
+      ? 'ambient'
+      : isFullBleed && rawLayout === 'split'
+      ? 'lyrics-focus'
+      : rawLayout;
+  const isArtworkFocus = currentLayout === 'artwork-focus';
   const currentTextAlign: LyricTextAlign = config.textAlign ?? 'center';
   const currentScriptMode: LyricsScriptMode = config.scriptMode ?? 'auto';
   const activeScriptOption =
     SCRIPT_MODE_OPTIONS.find((opt) => opt.id === currentScriptMode) ?? SCRIPT_MODE_OPTIONS[0];
   const currentBgOpacity = typeof config.backgroundOpacity === 'number' ? config.backgroundOpacity : 0.95;
   const currentVignette = typeof config.vignetteStrength === 'number' ? config.vignetteStrength : 0.55;
+  const combinedOffsetMs = currentSongOffsetMs + currentAutoSyncOffsetMs;
   const formattedOffset =
-    currentSongOffsetMs > 0 ? `+${currentSongOffsetMs}ms` : `${currentSongOffsetMs}ms`;
+    combinedOffsetMs > 0 ? `+${combinedOffsetMs}ms` : `${combinedOffsetMs}ms`;
+
+  const handleAutoSyncLyrics = async () => {
+    const lineStarts = (activeLyrics?.lines || []).map((l) => l.startSeconds).filter((t) => Number.isFinite(t));
+    if (lineStarts.length === 0) {
+      setAutoSyncMessage('Load timed lyrics first');
+      return;
+    }
+    const playerTrack = usePlayerStore.getState().currentTrack;
+    const trackId = playerTrack?.videoId || activeTrack?.id || '';
+    const streamUrl =
+      playerTrack?.streamUrl ||
+      (playerTrack?.localFilePath ? `local://${playerTrack.localFilePath}` : null);
+    if (!trackId) {
+      setAutoSyncMessage('No active track');
+      return;
+    }
+
+    setIsAutoSyncing(true);
+    setAutoSyncMessage('Analyzing vocal contour...');
+    try {
+      const analysis =
+        (await MlAudioService.analyzeTrackBeats(trackId, streamUrl)) ??
+        MlAudioService.getCachedTrackBeatsSync(trackId);
+      if (!analysis || analysis.vocalEnvelope.length < 4) {
+        setAutoSyncMessage('Play or cache track audio to auto-sync');
+        return;
+      }
+      setVocalSilenceRanges(analysis.vocalSilenceRanges);
+      const result = await MlAudioService.autoSyncLyrics(
+        analysis.vocalEnvelope,
+        analysis.envelopeFps || 10,
+        lineStarts
+      );
+      setAutoSyncOffsetMs(result.offsetMs);
+      const sign = result.offsetMs > 0 ? '+' : '';
+      setAutoSyncMessage(
+        `Auto-synced ${sign}${Math.round(result.offsetMs)}ms (${Math.round(result.confidence * 100)}%)`
+      );
+    } catch {
+      setAutoSyncMessage('Auto-sync unavailable for this stream');
+    } finally {
+      setIsAutoSyncing(false);
+    }
+  };
+
+  const handleSelectLayout = (layout: NowPlayingLayoutMode) => {
+    if (layout === 'ambient') {
+      setNowPlayingLayout('ambient');
+      if (!isAmbientOpen && context !== 'ambient') {
+        openAmbientMode().catch(() => {});
+      }
+      onClose();
+      return;
+    }
+    if (isFullBleed && layout === 'split' && onToggleFullBleed) {
+      onToggleFullBleed();
+    }
+    if (isAmbientOpen) {
+      closeAmbientMode().catch(() => {});
+    }
+    setNowPlayingLayout(layout);
+    onClose();
+  };
 
   const handleSelectClassic = () => {
     setNowPlayingLyricsMode('classic');
-    if (isFullBleed && onToggleFullBleed) {
-      onToggleFullBleed();
+    if (isArtworkFocus) {
+      setNowPlayingLayout('split');
     }
     if (isAmbientOpen) {
       closeAmbientMode().catch(() => {});
@@ -231,17 +311,11 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
 
   const handleSelectVisualizer = () => {
     setNowPlayingLyricsMode('visualizer');
+    if (isArtworkFocus) {
+      setNowPlayingLayout('split');
+    }
     if (isAmbientOpen) {
       closeAmbientMode().catch(() => {});
-    }
-    onClose();
-  };
-
-  const handleToggleAmbient = () => {
-    if (isAmbientOpen || context === 'ambient') {
-      closeAmbientMode().catch(() => {});
-    } else {
-      openAmbientMode().catch(() => {});
     }
     onClose();
   };
@@ -255,6 +329,9 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
     setStyleId(styleId);
     if (nowPlayingLyricsMode !== 'visualizer') {
       setNowPlayingLyricsMode('visualizer');
+    }
+    if (isArtworkFocus) {
+      setNowPlayingLayout('split');
     }
   };
 
@@ -285,22 +362,59 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
       }}
       className="liquid-glass-capsule fixed w-64 rounded-2xl text-white p-1.5 text-xs select-none shadow-2xl border border-white/15 animate-in fade-in zoom-in-95 duration-100"
     >
-      {/* Section 1: View Mode */}
-      <div className="px-2.5 pt-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
-        View Mode
+      {/* Section 1: Layout (Unified 4-Mode Choice) */}
+      <div className="flex items-center gap-1.5 px-2.5 pt-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
+        <Layout size={11} />
+        <span>Layout</span>
+      </div>
+
+      {(
+        [
+          { id: 'split', label: 'Split View', icon: <Layout size={14} className="text-white/75" /> },
+          { id: 'lyrics-focus', label: 'Lyrics Focus', icon: <AlignCenter size={14} className="text-white/75" /> },
+          { id: 'artwork-focus', label: 'Artwork Focus', icon: <Disc size={14} className="text-white/75" /> },
+          { id: 'ambient', label: 'Fullscreen Ambient', icon: <Maximize2 size={14} className="text-white/75" /> },
+        ] as const
+      ).map((opt) => {
+        const active = currentLayout === opt.id;
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            data-testid={`layout-option-${opt.id}`}
+            onMouseEnter={() => setActiveSubmenu('none')}
+            onClick={() => handleSelectLayout(opt.id)}
+            className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
+          >
+            <span className="flex items-center gap-2.5">
+              {opt.icon}
+              <span>{opt.label}</span>
+            </span>
+            {active && <Check size={13} className="text-[var(--color-accent)] shrink-0" />}
+          </button>
+        );
+      })}
+
+      <div className="h-[1px] bg-white/10 my-1.5" />
+
+      {/* Section 2: Lyric Engine */}
+      <div className="px-2.5 pt-0.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
+        Lyric Engine
       </div>
 
       <button
         type="button"
         onMouseEnter={() => setActiveSubmenu('none')}
         onClick={handleSelectClassic}
-        className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
+        className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer ${
+          isArtworkFocus ? 'opacity-60' : ''
+        }`}
       >
         <span className="flex items-center gap-2.5">
           <AlignLeft size={14} className="text-white/75" />
-          <span>Classic Apple Music Lyrics</span>
+          <span>Classic Apple Music</span>
         </span>
-        {!isAmbientOpen && context !== 'ambient' && nowPlayingLyricsMode === 'classic' && (
+        {!isArtworkFocus && nowPlayingLyricsMode === 'classic' && (
           <Check size={13} className="text-[var(--color-accent)] shrink-0" />
         )}
       </button>
@@ -309,114 +423,22 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
         type="button"
         onMouseEnter={() => setActiveSubmenu('none')}
         onClick={handleSelectVisualizer}
-        className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
+        className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer ${
+          isArtworkFocus ? 'opacity-60' : ''
+        }`}
       >
         <span className="flex items-center gap-2.5">
           <Sparkles size={14} className="text-white/75" />
           <span>Lyric Visualizer</span>
         </span>
-        {!isAmbientOpen && context !== 'ambient' && nowPlayingLyricsMode === 'visualizer' && (
+        {!isArtworkFocus && nowPlayingLyricsMode === 'visualizer' && (
           <Check size={13} className="text-[var(--color-accent)] shrink-0" />
         )}
       </button>
-
-      {onToggleFullBleed && (
-        <button
-          type="button"
-          onMouseEnter={() => setActiveSubmenu('none')}
-          onClick={() => {
-            onToggleFullBleed();
-            onClose();
-          }}
-          className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
-        >
-          <span className="flex items-center gap-2.5">
-            <Maximize2 size={14} className="text-white/75" />
-            <span>Full-Bleed In-Window Stage</span>
-          </span>
-          {isFullBleed && <Check size={13} className="text-[var(--color-accent)] shrink-0" />}
-        </button>
-      )}
-
-      <button
-        type="button"
-        onMouseEnter={() => setActiveSubmenu('none')}
-        onClick={handleToggleAmbient}
-        className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
-      >
-        <span className="flex items-center gap-2.5">
-          <Maximize2 size={14} className="text-white/75" />
-          <span>Fullscreen Ambient</span>
-        </span>
-        {(isAmbientOpen || context === 'ambient') && (
-          <Check size={13} className="text-[var(--color-accent)] shrink-0" />
-        )}
-      </button>
-
-      <button
-        type="button"
-        onMouseEnter={() => setActiveSubmenu('none')}
-        onClick={handleToggleOverlay}
-        className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
-      >
-        <span className="flex items-center gap-2.5">
-          <Monitor size={14} className="text-white/75" />
-          <span>Desktop Overlay</span>
-        </span>
-        {config.overlayEnabled && <Check size={13} className="text-cyan-400 shrink-0" />}
-      </button>
-
-      {/* Now Playing Layout & Hide Album Cover */}
-      <div className="px-2 py-1.5 space-y-1.5">
-        <div className="flex items-center gap-1.5 px-0.5 text-[10px] font-bold uppercase tracking-wider text-white/45">
-          <Layout size={11} />
-          <span>Now Playing Layout</span>
-        </div>
-        <div className="grid grid-cols-3 gap-1">
-          {(
-            [
-              { id: 'split', label: 'Split View' },
-              { id: 'centered', label: 'Centered' },
-              { id: 'ambient', label: 'Ambient' },
-            ] as const
-          ).map((opt) => {
-            const active = currentLayout === opt.id;
-            return (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setNowPlayingLayout(opt.id)}
-                className={`py-1 px-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer ${
-                  active
-                    ? 'bg-white/25 text-white font-semibold'
-                    : 'bg-white/5 hover:bg-white/15 text-white/70'
-                }`}
-              >
-                {opt.label}
-              </button>
-            );
-          })}
-        </div>
-        <button
-          type="button"
-          onClick={() => setHideAlbumCover(!currentHideCover)}
-          className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
-        >
-          <span className="flex items-center gap-2">
-            {currentHideCover ? (
-              <EyeOff size={13} className="text-[var(--color-accent)]" />
-            ) : (
-              <Eye size={13} className="text-white/75" />
-            )}
-            <span>Hide Album Cover</span>
-          </span>
-          {currentHideCover && <Check size={13} className="text-[var(--color-accent)] shrink-0" />}
-        </button>
-      </div>
 
       <div className="h-[1px] bg-white/10 my-1.5" />
 
-      {/* Section 2: Theme / Style Submenu (consolidated 12 styles) */}
+      {/* Theme / Style Submenu (consolidated 12 styles) */}
       <div
         className="relative"
         onMouseEnter={() => setActiveSubmenu('styles')}
@@ -894,7 +916,37 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
 
             <button
               type="button"
-              onClick={() => resetSongOffsetMs()}
+              data-testid="auto-sync-lyrics-btn"
+              disabled={isAutoSyncing}
+              onClick={() => void handleAutoSyncLyrics()}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-white/10 disabled:opacity-50 transition-colors text-left cursor-pointer text-cyan-300"
+            >
+              <span className="flex items-center gap-2">
+                <Wand2 size={12} />
+                <span>{isAutoSyncing ? 'Auto-Syncing...' : 'Auto-Sync Lyrics'}</span>
+              </span>
+              {currentAutoSyncOffsetMs !== 0 && (
+                <span className="font-mono text-[10px] text-cyan-200/80">
+                  {currentAutoSyncOffsetMs > 0
+                    ? `+${currentAutoSyncOffsetMs}ms`
+                    : `${currentAutoSyncOffsetMs}ms`}
+                </span>
+              )}
+            </button>
+
+            {autoSyncMessage && (
+              <div className="px-2.5 py-1 text-[10px] text-white/65 leading-snug">
+                {autoSyncMessage}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                resetSongOffsetMs();
+                resetAutoSyncOffsetMs();
+                setAutoSyncMessage(null);
+              }}
               className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
             >
               <span className="flex items-center gap-2">
@@ -906,6 +958,20 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
           </div>
         )}
       </div>
+
+      {/* Desktop Overlay toggle (nested under Lyric Engine) */}
+      <button
+        type="button"
+        onMouseEnter={() => setActiveSubmenu('none')}
+        onClick={handleToggleOverlay}
+        className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
+      >
+        <span className="flex items-center gap-2.5">
+          <Monitor size={14} className="text-white/75" />
+          <span>Desktop Overlay</span>
+        </span>
+        {config.overlayEnabled && <Check size={13} className="text-cyan-400 shrink-0" />}
+      </button>
     </div>
   );
 };

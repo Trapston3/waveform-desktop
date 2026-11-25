@@ -26,6 +26,7 @@ import type { Song } from '../../models/Song';
 import { useLibraryStore, type YearlyReplayStats } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
 import { MusicService } from '../../services/MusicService';
+import { MlAudioService } from '../../services/MlAudioService';
 
 export interface ReplayStoriesModalProps {
   isOpen: boolean;
@@ -380,6 +381,26 @@ export const ReplayStoriesModal: React.FC<ReplayStoriesModalProps> = ({
         const audio = new Audio(streamUrl);
         audio.volume = 0.85;
         previewAudioRef.current = audio;
+
+        const cachedBeats = candidate.videoId
+          ? await MlAudioService.getCachedTrackBeats(candidate.videoId).catch(() => null)
+          : null;
+        if (session !== previewSessionRef.current) return;
+
+        audio.onloadedmetadata = () => {
+          const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+          if (dur > 25) {
+            const chorusSec =
+              cachedBeats && cachedBeats.chorusStartSec > 5 && cachedBeats.chorusStartSec < dur - 16
+                ? cachedBeats.chorusStartSec
+                : Math.round(Math.min(Math.max(dur * 0.34, 24), Math.max(24, dur - 22)));
+            try {
+              audio.currentTime = chorusSec;
+            } catch {
+              // Ignore seek errors on unseekable streams
+            }
+          }
+        };
 
         const startedAt = Date.now();
         audio.onended = () => {

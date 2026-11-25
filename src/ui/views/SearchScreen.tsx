@@ -59,6 +59,7 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const currentTrackId = usePlayerStore((s) => s.currentTrack?.videoId);
   const setContextQueue = useQueueStore((s) => s.setContextQueue);
+  const playSingleWithRadio = useQueueStore((s) => s.playSingleWithRadio);
   const localSongs = useLibraryStore((s) => s.localSongs);
 
   const localMatchedItems: any[] = useMemo(() => {
@@ -248,30 +249,12 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
       return;
     }
 
-    // Contextual song queue
-    if (mergedResults && mergedResults.items.length > 0) {
-      const playable = mergedResults.items
-        .filter((it: any) => !it.isAlbum && !it.isPlaylist && !it.isArtist && (it.videoId || it.id))
-        .map((it: any) => ({
-          ...it,
-          videoId: it.videoId || it.id,
-          artist: it.artist || it.subtitle || 'Unknown Artist',
-        }));
-      const startIdx = playable.findIndex((s) => s.videoId === (item.videoId || item.id));
-      if (playable.length > 0) {
-        setContextQueue(playable as any, Math.max(0, startIdx));
-      }
-    }
-
-    loadTrack(
-      {
-        ...item,
-        videoId: item.videoId || item.id,
-        artist: item.artist || item.subtitle || 'Unknown Artist',
-      },
-      'active',
-      true
-    );
+    // Play only the clicked song and populate Up Next via genuine YouTube Music Up Next Radio
+    void playSingleWithRadio({
+      ...item,
+      videoId: item.videoId || item.id,
+      artist: item.artist || item.subtitle || 'Unknown Artist',
+    });
   };
 
   const formatItemBadge = (item: any) => {

@@ -1,7 +1,8 @@
 // src/models/Settings.ts
 // Typed application settings across 7 subsystems conforming to mockSettings.mjs
 
-import type { LyricsScriptMode } from '../lyricVisualizer/core/models';
+import type { LyricsScriptMode, NowPlayingLayoutMode } from '../lyricVisualizer/core/models';
+import { normalizeNowPlayingLayout } from '../lyricVisualizer/core/models';
 import type { DiscordDisplayFormat } from '../services/DiscordRpcService';
 
 export interface AppSettings {
@@ -17,9 +18,9 @@ export interface AppSettings {
   'appearance.waveformStyle': 'bars68' | 'thinSlider';
   'appearance.ambientBackdropGlow': boolean;
   'appearance.compactSidebar': boolean;
-  'appearance.nowPlayingLayout': 'split' | 'centered' | 'ambient';
+  'appearance.nowPlayingLayout': NowPlayingLayoutMode;
   'appearance.hideAlbumCover': boolean;
-  nowPlayingLayout: 'split' | 'centered' | 'ambient';
+  nowPlayingLayout: NowPlayingLayoutMode;
   hideAlbumCover: boolean;
 
   // Audio Engine & Playback (16 items)
@@ -222,9 +223,14 @@ export function mergeSettings(current: AppSettings, delta: Partial<AppSettings>)
     }
   }
   if ('nowPlayingLayout' in delta && !('appearance.nowPlayingLayout' in delta)) {
+    updated.nowPlayingLayout = normalizeNowPlayingLayout(updated.nowPlayingLayout);
     updated['appearance.nowPlayingLayout'] = updated.nowPlayingLayout;
   } else if ('appearance.nowPlayingLayout' in delta && !('nowPlayingLayout' in delta)) {
+    updated['appearance.nowPlayingLayout'] = normalizeNowPlayingLayout(updated['appearance.nowPlayingLayout']);
     updated.nowPlayingLayout = updated['appearance.nowPlayingLayout'];
+  } else {
+    updated.nowPlayingLayout = normalizeNowPlayingLayout(updated.nowPlayingLayout);
+    updated['appearance.nowPlayingLayout'] = updated.nowPlayingLayout;
   }
   if ('hideAlbumCover' in delta && !('appearance.hideAlbumCover' in delta)) {
     updated['appearance.hideAlbumCover'] = updated.hideAlbumCover;

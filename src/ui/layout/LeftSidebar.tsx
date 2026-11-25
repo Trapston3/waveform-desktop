@@ -16,6 +16,7 @@ import {
   Heart,
   ListMusic,
   Plus,
+  Link2,
   Sliders,
   Settings,
   Search,
@@ -80,6 +81,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
     navigateToTab,
     navigateToRelease,
     setCreatePlaylistOpen,
+    setImportPlaylistOpen,
     setReplayOpen,
     searchQuery,
     setSearchQuery,
@@ -578,14 +580,25 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
                   />
                   <span>Playlists</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setCreatePlaylistOpen(true)}
-                  title="New Playlist"
-                  className="p-0.5 rounded dark:hover:bg-white/10 hover:bg-black/[0.06] text-[var(--color-on-surface-variant)] dark:hover:text-white hover:text-black transition-colors cursor-pointer"
-                >
-                  <Plus size={13} />
-                </button>
+                <div className="flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setImportPlaylistOpen(true)}
+                    title="Import Playlist from URL (Spotify / Apple Music)"
+                    data-testid="sidebar-import-playlist-btn"
+                    className="p-0.5 rounded dark:hover:bg-white/10 hover:bg-black/[0.06] text-[var(--color-on-surface-variant)] dark:hover:text-white hover:text-black transition-colors cursor-pointer"
+                  >
+                    <Link2 size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreatePlaylistOpen(true)}
+                    title="New Playlist"
+                    className="p-0.5 rounded dark:hover:bg-white/10 hover:bg-black/[0.06] text-[var(--color-on-surface-variant)] dark:hover:text-white hover:text-black transition-colors cursor-pointer"
+                  >
+                    <Plus size={13} />
+                  </button>
+                </div>
               </div>
 
               <div

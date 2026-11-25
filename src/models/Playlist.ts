@@ -8,10 +8,12 @@ export interface Playlist {
   title: string;
   description?: string;
   thumbnailUrl?: string | null;
+  sourceUrl?: string;
   isCustom: boolean;
   createdAt: string;            // ISO 8601 string
   updatedAt: string;            // ISO 8601 string
   songIds: string[];            // Track IDs in playback order
+  songs?: Song[];               // Full embedded Song objects for online/imported/queue playlists
   songCount: number;
   totalDurationSec: number;
 }

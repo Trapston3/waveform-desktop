@@ -138,6 +138,8 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
   const config = useLyricVisualizerStore((s) => s.config);
   const currentSongOffsetMs = useLyricVisualizerStore((s) => s.currentSongOffsetMs);
+  const currentAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.currentAutoSyncOffsetMs);
+  const vocalSilenceRanges = useLyricVisualizerStore((s) => s.vocalSilenceRanges);
   const isScreenLocked = useLyricVisualizerStore((s) => s.isScreenLocked);
   const activePalette = useLyricVisualizerStore((s) => s.activePalette);
 
@@ -210,10 +212,12 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     bridge.setSandboxMode(config.sandboxEnabled);
   }, [config.sandboxEnabled]);
 
-  // Keep SyncEngine per-song offset synchronized
+  // Keep SyncEngine per-song offset, auto-sync offset & vocal silence ranges synchronized
   useEffect(() => {
     syncEngineRef.current.setOffsetMs(currentSongOffsetMs);
-  }, [currentSongOffsetMs]);
+    syncEngineRef.current.setAutoSyncOffsetMs(currentAutoSyncOffsetMs);
+    syncEngineRef.current.setVocalSilenceRanges(vocalSilenceRanges);
+  }, [currentSongOffsetMs, currentAutoSyncOffsetMs, vocalSilenceRanges]);
 
   // Resolve track lyrics & OKLCH palette whenever track, lyricsData, or sandbox mode changes
   useEffect(() => {
@@ -655,7 +659,6 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onPointerLeave={handlePointerLeave}
-        title="Click any lyric line to seek · Scroll or drag to browse · Right-click for Visualizer options"
         style={{
           cursor: isDraggingStage ? 'grabbing' : isHoveringLine ? 'pointer' : 'default',
           touchAction: 'none',

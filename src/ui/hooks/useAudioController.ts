@@ -4,6 +4,8 @@
 import { useEffect, useRef } from 'react';
 import { isDeadOrStaleRestoredStreamUrl } from '../../audio/AudioEngine';
 import { getSharedWaveFormPlaybackBridge } from '../../lyricVisualizer/bridge/waveFormPlaybackBridge';
+import { useLyricVisualizerStore } from '../../lyricVisualizer/state/lyricVisualizerStore';
+import { MlAudioService } from '../../services/MlAudioService';
 import type { AppSettings } from '../../models/Settings';
 import {
   DISCORD_DEFAULT_CLIENT_ID,
@@ -11,6 +13,7 @@ import {
   type DiscordRpcConfig,
 } from '../../services/DiscordRpcService';
 import { usePartyStore } from '../../services/PartySyncClient';
+import { ListeningSessionTracker } from '../../services/StorageService';
 import { StreamResolver } from '../../services/StreamResolver';
 import { useLibraryStore } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
@@ -52,19 +55,7 @@ function resolveDurationSec(trackDurationSec: unknown, fallbackDurationMs: numbe
 export function useAudioController() {
   const isInitialized = useRef(false);
   const discordRpcRef = useRef<DiscordRpcService | null>(null);
-  const listenTelemetryRef = useRef<{
-    videoId: string | null;
-    listenedSec: number;
-    recordedForPlay: boolean;
-    lastEngineTimeSec: number;
-    lastTickMs: number;
-  }>({
-    videoId: null,
-    listenedSec: 0,
-    recordedForPlay: false,
-    lastEngineTimeSec: 0,
-    lastTickMs: 0,
-  });
+  const sessionTrackerRef = useRef<ListeningSessionTracker>(new ListeningSessionTracker());
 
   useEffect(() => {
     if (isInitialized.current) return;
@@ -453,12 +444,20 @@ export function useAudioController() {
     } catch {}
   }, [currentTrack, playbackState]);
 
-  // 5. Real-media playback progress, listening telemetry & throttled Zustand store synchronization (no synthetic progress)
+  // 5. Real-media playback progress, continuous 1s listening telemetry & throttled Zustand store synchronization
   useEffect(() => {
-    if (playbackState !== 'PLAYING') return;
+    const tracker = sessionTrackerRef.current;
+    const flushSessionEntry = (entry: ReturnType<ListeningSessionTracker['flush']>) => {
+      if (!entry) return;
+      void useLibraryStore.getState().upsertListeningSession(entry).catch(() => {});
+    };
+
+    if (playbackState !== 'PLAYING') {
+      flushSessionEntry(tracker.pause(Date.now()));
+      return;
+    }
 
     let lastStoreSyncTime = Date.now();
-    listenTelemetryRef.current.lastTickMs = lastStoreSyncTime;
 
     const timer = setInterval(() => {
       const state = usePlayerStore.getState();
@@ -481,52 +480,24 @@ export function useAudioController() {
         const engineDur = engine.getCurrentDurationMs();
         const nextDur = engineDur > 0 ? engineDur : state.durationMs;
         const storeTimeSec = state.positionMs / 1000;
-
         const now = Date.now();
-
-        // WS8 Listening telemetry: capped delta prevents OS sleep from inflating listened duration
-        const tel = listenTelemetryRef.current;
-        const trackId = state.currentTrack.videoId;
-        if (tel.videoId !== trackId) {
-          tel.videoId = trackId;
-          tel.listenedSec = 0;
-          tel.recordedForPlay = false;
-          tel.lastEngineTimeSec = engineTimeSec;
-          tel.lastTickMs = now;
-        } else if (
-          tel.recordedForPlay &&
-          engineTimeSec < 3 &&
-          (tel.lastEngineTimeSec >= 3 || engineTimeSec + 0.5 < tel.lastEngineTimeSec)
-        ) {
-          tel.listenedSec = 0;
-          tel.recordedForPlay = false;
-          tel.lastEngineTimeSec = engineTimeSec;
-          tel.lastTickMs = now;
-        }
-
-        const dtSec =
-          tel.lastTickMs > 0 ? Math.min(1.0, Math.max(0, (now - tel.lastTickMs) / 1000)) : 0;
-        tel.listenedSec += dtSec;
-        tel.lastEngineTimeSec = engineTimeSec;
-        tel.lastTickMs = now;
-
         const durSec = resolveDurationSec(state.currentTrack.durationSec, nextDur);
-        if (
-          !tel.recordedForPlay &&
-          (tel.listenedSec >= 30 || (durSec > 0 && tel.listenedSec >= durSec * 0.5))
-        ) {
-          tel.recordedForPlay = true;
-          void useLibraryStore
-            .getState()
-            .recordListeningHistory(
-              {
-                ...state.currentTrack,
-                sourceQuality: state.activeStreamQuality || state.currentTrack.sourceQuality,
-              },
-              Math.round(Math.max(1, tel.listenedSec))
-            )
-            .catch(() => {});
+
+        const flushed = tracker.onTick({
+          song: {
+            ...state.currentTrack,
+            sourceQuality: state.activeStreamQuality || state.currentTrack.sourceQuality,
+          },
+          isPlaying: true,
+          isSeeking: state.isScrubbing || engine.isSeekingActive(),
+          engineTimeSec,
+          durationSec: durSec,
+          nowMs: now,
+        });
+        for (const entry of flushed) {
+          flushSessionEntry(entry);
         }
+
         // Drift Watchdog: snap store + lyric visualizer if >1.0s out of sync
         if (
           !state.isScrubbing &&
@@ -560,6 +531,7 @@ export function useAudioController() {
 
     return () => {
       clearInterval(timer);
+      flushSessionEntry(tracker.pause(Date.now()));
       const state = usePlayerStore.getState();
       const engine = state.audioEngine;
       if (engine && state.playbackState === 'PAUSED') {
@@ -571,13 +543,19 @@ export function useAudioController() {
         }
       }
     };
-  }, [playbackState]);
+  }, [playbackState, currentTrack?.videoId]);
 
   // 6. Persist exact state before page reload (F5 / Ctrl+R) or window close
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
     const handleUnload = () => {
+      const pendingReplay = sessionTrackerRef.current.flush(Date.now());
+      if (pendingReplay) {
+        try {
+          void useLibraryStore.getState().upsertListeningSession(pendingReplay);
+        } catch {}
+      }
       const p = usePlayerStore.getState();
       const q = useQueueStore.getState();
       const enginePos = p.audioEngine ? p.audioEngine.getCurrentPositionMs() : p.positionMs;
@@ -616,6 +594,50 @@ export function useAudioController() {
       window.removeEventListener('pagehide', handleUnload);
     };
   }, []);
+
+  // 7. Neural beat/downbeat + vocal-silence analysis hook for active tracks
+  useEffect(() => {
+    const engine = usePlayerStore.getState().audioEngine;
+    if (!currentTrack?.videoId) {
+      engine?.setTrackBeatAnalysis(null);
+      useLyricVisualizerStore.getState().setVocalSilenceRanges([]);
+      return;
+    }
+
+    let cancelled = false;
+    const trackId = currentTrack.videoId;
+    const url =
+      currentTrack.streamUrl ||
+      (currentTrack.localFilePath ? `local://${currentTrack.localFilePath}` : null);
+
+    engine?.setTrackBeatAnalysis(null);
+    useLyricVisualizerStore.getState().setVocalSilenceRanges([]);
+
+    void MlAudioService.getCachedTrackBeats(trackId)
+      .then((cached) => {
+        if (cancelled) return cached;
+        if (cached) {
+          engine?.setTrackBeatAnalysis(cached);
+          useLyricVisualizerStore.getState().setVocalSilenceRanges(cached.vocalSilenceRanges);
+          return cached;
+        }
+        if (url && (currentTrack.localFilePath || currentTrack.isLocal)) {
+          return MlAudioService.analyzeTrackBeats(trackId, url).then((fresh) => {
+            if (!cancelled && fresh) {
+              engine?.setTrackBeatAnalysis(fresh);
+              useLyricVisualizerStore.getState().setVocalSilenceRanges(fresh.vocalSilenceRanges);
+            }
+            return fresh;
+          });
+        }
+        return null;
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack?.videoId, currentTrack?.streamUrl, currentTrack?.localFilePath]);
 
   return {
     play: usePlayerStore.getState().play,

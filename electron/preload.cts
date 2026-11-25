@@ -69,6 +69,29 @@ export interface ElectronAPI {
   onUpdaterStateChanged: (callback: (state: any) => void) => () => void;
   getNativeCoreStatus: () => Promise<any>;
   initNativeOnnxModels: () => Promise<any>;
+  replayLoad: () => Promise<{ version: number; entries: any[] }>;
+  replayAppend: (entry: any) => Promise<{ ok: boolean; count: number }>;
+  replayFlush: (entries: any[]) => Promise<{ ok: boolean; count: number; entries?: any[] }>;
+  replayReset: () => Promise<{ ok: boolean }>;
+  importPlaylistFromUrl: (url: string) => Promise<any>;
+  mlAnalyzeTrackBeats: (payload: {
+    trackId: string;
+    leftPcm?: Float32Array | number[] | null;
+    rightPcm?: Float32Array | number[] | null;
+    sampleRate?: number;
+    forceRefresh?: boolean;
+  }) => Promise<any>;
+  mlSeparateVocals: (payload: {
+    trackId: string;
+    leftPcm?: Float32Array | number[] | null;
+    rightPcm?: Float32Array | number[] | null;
+    sampleRate?: number;
+  }) => Promise<any>;
+  mlAutoSyncLyrics: (payload: {
+    vocalEnvelope: Float32Array | number[];
+    envelopeFps?: number;
+    lineStartTimesSec: number[];
+  }) => Promise<{ offsetMs: number; confidence: number }>;
   platform: string;
 }
 
@@ -190,6 +213,14 @@ const electronAPI: ElectronAPI = {
   },
   getNativeCoreStatus: () => ipcRenderer.invoke('nativeCore:status'),
   initNativeOnnxModels: () => ipcRenderer.invoke('nativeCore:onnxInit'),
+  replayLoad: () => ipcRenderer.invoke('replay:load'),
+  replayAppend: (entry: any) => ipcRenderer.invoke('replay:append', entry),
+  replayFlush: (entries: any[]) => ipcRenderer.invoke('replay:flush', entries),
+  replayReset: () => ipcRenderer.invoke('replay:reset'),
+  importPlaylistFromUrl: (url: string) => ipcRenderer.invoke('playlist:import-url', url),
+  mlAnalyzeTrackBeats: (payload: any) => ipcRenderer.invoke('ml:analyzeTrackBeats', payload),
+  mlSeparateVocals: (payload: any) => ipcRenderer.invoke('ml:separateVocals', payload),
+  mlAutoSyncLyrics: (payload: any) => ipcRenderer.invoke('ml:autoSyncLyrics', payload),
   platform: process.platform,
 };
 

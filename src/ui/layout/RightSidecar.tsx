@@ -4,15 +4,30 @@
 // ambient artwork tinting, and the 3-tier queue (USER_QUEUE -> CONTEXT -> AUTOPLAY)
 
 import React, { useState, useEffect, memo } from 'react';
-import { AlignLeft, ListOrdered, X, Music2, GripVertical, Trash2 } from 'lucide-react';
+import {
+  AlignLeft,
+  ListOrdered,
+  X,
+  Music2,
+  GripVertical,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  Shuffle,
+  ListPlus,
+  Radio,
+  Check,
+} from 'lucide-react';
 import { ArtistCredits } from '../common/ArtistCredits';
 import { usePlayerStore } from '../../state/playerStore';
-import { useQueueStore } from '../../state/queueStore';
+import { useQueueStore, type QueueTierType } from '../../state/queueStore';
+import { useLibraryStore } from '../../state/libraryStore';
 import { useLyricsStore } from '../../state/lyricsStore';
 import { useNavigationStore } from '../../state/navigationStore';
 import { useThemeStore } from '../theme/Theme';
 import { SyllableLyricsEngine } from '../player/SyllableLyricsEngine';
 import type { Song } from '../../models/Song';
+import type { ContextMenuQueueContext } from '../hooks/useContextMenu';
 
 function isValidImageUrl(url: unknown): url is string {
   if (typeof url !== 'string') return false;
@@ -23,6 +38,11 @@ function isValidImageUrl(url: unknown): url is string {
 export interface RightSidecarProps {
   isOpen: boolean;
   onClose: () => void;
+  onOpenContextMenu?: (
+    e: React.MouseEvent,
+    song: Song,
+    queueContext?: ContextMenuQueueContext | null
+  ) => void;
   currentTrack?: {
     title: string;
     artist: string;
@@ -34,10 +54,14 @@ export interface RightSidecarProps {
 export const RightSidecar: React.FC<RightSidecarProps> = memo(({
   isOpen,
   onClose,
+  onOpenContextMenu,
   currentTrack: fallbackTrack,
 }) => {
   const [activeTab, setActiveTab] = useState<'lyrics' | 'queue'>('lyrics');
   const [brokenArt, setBrokenArt] = useState<Record<string, boolean>>({});
+  const [dragItem, setDragItem] = useState<{ tier: QueueTierType; index: number } | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ tier: QueueTierType; index: number } | null>(null);
+  const [savedQueueNotice, setSavedQueueNotice] = useState(false);
 
   const markArtBroken = (url: string) =>
     setBrokenArt((prev) => (prev[url] ? prev : { ...prev, [url]: true }));
@@ -96,7 +120,21 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
         } as Song)
       : null);
 
-  const { tiers, currentSong, jumpToTrack, removeFromQueue, clearQueue } = useQueueStore();
+  const {
+    tiers,
+    currentSong,
+    autoplayEnabled,
+    isAutoplayLoading,
+    jumpToTrack,
+    removeFromQueue,
+    reorderQueue,
+    moveTrackUp,
+    moveTrackDown,
+    shuffleUpNext,
+    toggleAutoplay,
+    clearQueue,
+  } = useQueueStore();
+  const createPlaylistWithSongs = useLibraryStore((s) => s.createPlaylistWithSongs);
   const { lyricsData, isLoading, fetchLyricsForTrack } = useLyricsStore();
 
   useEffect(() => {
@@ -110,13 +148,142 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
   ]);
 
   const formatDuration = (sec?: number) => {
-    if (!sec || isNaN(sec)) return '0:00';
+    if (!sec || isNaN(sec) || sec <= 0) return '—';
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
   const currentPlaying = currentSong || activeTrack;
+
+  const handleSaveQueueAsPlaylist = async () => {
+    const queueSongs: Song[] = [];
+    const seen = new Set<string>();
+    for (const s of [
+      ...(currentPlaying ? [currentPlaying] : []),
+      ...tiers.USER_QUEUE,
+      ...tiers.CONTEXT,
+      ...tiers.AUTOPLAY,
+    ]) {
+      if (!s?.videoId || seen.has(s.videoId)) continue;
+      seen.add(s.videoId);
+      queueSongs.push(s);
+    }
+    if (queueSongs.length === 0) return;
+    const label = currentPlaying?.title
+      ? `Up Next • ${currentPlaying.title}`
+      : `Saved Queue (${new Date().toLocaleDateString()})`;
+    await createPlaylistWithSongs(label, queueSongs, {
+      description: `Saved from WaveForm Up Next queue (${queueSongs.length} tracks)`,
+    });
+    setSavedQueueNotice(true);
+    setTimeout(() => setSavedQueueNotice(false), 1800);
+  };
+
+  const renderTierRows = (tier: QueueTierType, items: Song[], keyPrefix: string) =>
+    items.map((item, idx) => {
+      const isDragging = dragItem?.tier === tier && dragItem.index === idx;
+      const isDropHere =
+        dropTarget?.tier === tier &&
+        dropTarget.index === idx &&
+        dragItem?.tier === tier &&
+        dragItem.index !== idx;
+      const dur = item.durationSec || (item.totalPlayTimeMs ? item.totalPlayTimeMs / 1000 : 0);
+
+      return (
+        <div
+          key={`${keyPrefix}-${item.videoId}-${idx}`}
+          draggable
+          onDragStart={(e) => {
+            setDragItem({ tier, index: idx });
+            e.dataTransfer.effectAllowed = 'move';
+            try {
+              e.dataTransfer.setData('text/plain', `${tier}:${idx}`);
+            } catch {}
+          }}
+          onDragOver={(e) => {
+            if (!dragItem || dragItem.tier !== tier) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            if (dropTarget?.tier !== tier || dropTarget.index !== idx) {
+              setDropTarget({ tier, index: idx });
+            }
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (dragItem && dragItem.tier === tier && dragItem.index !== idx) {
+              reorderQueue(tier, dragItem.index, idx);
+            }
+            setDragItem(null);
+            setDropTarget(null);
+          }}
+          onDragEnd={() => {
+            setDragItem(null);
+            setDropTarget(null);
+          }}
+          onClick={() => jumpToTrack(tier, idx)}
+          onContextMenu={(e) => onOpenContextMenu?.(e, item, { tier, index: idx })}
+          className={`queue-row group relative flex items-center gap-2 p-2 rounded-lg hover:bg-white/[0.06] transition-all cursor-pointer ${
+            isDragging ? 'opacity-45 scale-[0.98]' : ''
+          }`}
+        >
+          {isDropHere && (
+            <div className="pointer-events-none absolute -top-0.5 inset-x-2 h-[2px] rounded-full bg-[var(--color-accent)] shadow-[0_0_8px_var(--color-accent)]" />
+          )}
+          <GripVertical
+            size={13}
+            className="text-[var(--color-on-surface-variant)] opacity-25 group-hover:opacity-90 cursor-grab shrink-0"
+          />
+          <div className="w-8 h-8 rounded overflow-hidden bg-neutral-900 shrink-0">
+            {renderCoverArt(item.thumbnailUrl, 12)}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-medium text-white truncate">{item.title}</div>
+            <div className="text-[10px] text-[var(--color-on-surface-variant)] truncate">{item.artist}</div>
+          </div>
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+            <button
+              type="button"
+              disabled={idx === 0}
+              onClick={(e) => {
+                e.stopPropagation();
+                moveTrackUp(tier, idx);
+              }}
+              aria-label="Move track up"
+              className="p-0.5 text-[var(--color-on-surface-variant)] hover:text-white disabled:opacity-25 cursor-pointer"
+            >
+              <ArrowUp size={11} />
+            </button>
+            <button
+              type="button"
+              disabled={idx >= items.length - 1}
+              onClick={(e) => {
+                e.stopPropagation();
+                moveTrackDown(tier, idx);
+              }}
+              aria-label="Move track down"
+              className="p-0.5 text-[var(--color-on-surface-variant)] hover:text-white disabled:opacity-25 cursor-pointer"
+            >
+              <ArrowDown size={11} />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                removeFromQueue(tier, idx);
+              }}
+              aria-label="Remove from queue"
+              className="p-0.5 text-[var(--color-on-surface-variant)] hover:text-red-400 cursor-pointer"
+            >
+              <X size={12} />
+            </button>
+          </div>
+          <span className="text-[10px] font-mono text-[var(--color-on-surface-variant)] shrink-0">
+            {formatDuration(dur)}
+          </span>
+        </div>
+      );
+    });
 
   return (
     <div
@@ -188,17 +355,50 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
         {/* Tab 2: Dynamic 3-Tier Queue */}
         {activeTab === 'queue' && (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                 Playing Now
               </span>
-              <button
-                onClick={() => clearQueue()}
-                className="flex items-center gap-1 text-[11px] text-[var(--color-on-surface-variant)] hover:text-red-400 transition-colors cursor-pointer"
-              >
-                <Trash2 size={12} />
-                <span>Clear</span>
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => toggleAutoplay()}
+                  title={autoplayEnabled ? 'Autoplay Radio On' : 'Autoplay Radio Off'}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold transition-colors cursor-pointer ${
+                    autoplayEnabled
+                      ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)] border border-[var(--color-accent)]/40'
+                      : 'bg-white/5 text-[var(--color-on-surface-variant)] hover:text-white'
+                  }`}
+                >
+                  <Radio size={11} />
+                  <span>Autoplay</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => shuffleUpNext()}
+                  title="Shuffle Up Next"
+                  className="p-1.5 rounded-md text-[var(--color-on-surface-variant)] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <Shuffle size={12} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSaveQueueAsPlaylist()}
+                  title="Save Queue as Playlist"
+                  className="p-1.5 rounded-md text-[var(--color-on-surface-variant)] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  {savedQueueNotice ? <Check size={12} className="text-emerald-400" /> : <ListPlus size={12} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => clearQueue()}
+                  title="Clear Up Next"
+                  className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-[var(--color-on-surface-variant)] hover:text-red-400 hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <Trash2 size={12} />
+                  <span>Clear</span>
+                </button>
+              </div>
             </div>
 
             {/* Current Playing Item Card */}
@@ -230,38 +430,7 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
                 <div className="text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                   User Queue ({tiers.USER_QUEUE.length})
                 </div>
-                {tiers.USER_QUEUE.map((item, idx) => (
-                  <div
-                    key={`user-${item.videoId}-${idx}`}
-                    onClick={() => jumpToTrack('USER_QUEUE', idx)}
-                    className="queue-row group flex items-center gap-2 p-2 rounded-lg hover:bg-white/[0.06] transition-all cursor-pointer"
-                  >
-                    <GripVertical
-                      size={14}
-                      className="text-[var(--color-on-surface-variant)] opacity-30 group-hover:opacity-100 cursor-grab"
-                    />
-                    <div className="w-8 h-8 rounded overflow-hidden bg-neutral-900 shrink-0">
-                      {renderCoverArt(item.thumbnailUrl, 12)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-medium text-white truncate">{item.title}</div>
-                      <div className="text-[10px] text-[var(--color-on-surface-variant)] truncate">{item.artist}</div>
-                    </div>
-                    <span className="text-[10px] font-mono text-[var(--color-on-surface-variant)]">
-                      {formatDuration(item.durationSec || (item.totalPlayTimeMs ? item.totalPlayTimeMs / 1000 : 0))}
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeFromQueue('USER_QUEUE', idx);
-                      }}
-                      title="Remove from queue"
-                      className="p-1 opacity-0 group-hover:opacity-100 text-[var(--color-on-surface-variant)] hover:text-red-400 transition-opacity"
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                ))}
+                {renderTierRows('USER_QUEUE', tiers.USER_QUEUE, 'user')}
               </div>
             )}
 
@@ -271,51 +440,22 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
                 <div className="text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                   Next Up ({tiers.CONTEXT.length})
                 </div>
-                {tiers.CONTEXT.slice(0, 25).map((item, idx) => (
-                  <div
-                    key={`ctx-${item.videoId}-${idx}`}
-                    onClick={() => jumpToTrack('CONTEXT', idx)}
-                    className="queue-row group flex items-center gap-2 p-2 rounded-lg hover:bg-white/[0.06] transition-all cursor-pointer"
-                  >
-                    <div className="w-8 h-8 rounded overflow-hidden bg-neutral-900 shrink-0">
-                      {renderCoverArt(item.thumbnailUrl, 12)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-medium text-white truncate">{item.title}</div>
-                      <div className="text-[10px] text-[var(--color-on-surface-variant)] truncate">{item.artist}</div>
-                    </div>
-                    <span className="text-[10px] font-mono text-[var(--color-on-surface-variant)]">
-                      {formatDuration(item.durationSec || (item.totalPlayTimeMs ? item.totalPlayTimeMs / 1000 : 0))}
-                    </span>
-                  </div>
-                ))}
+                {renderTierRows('CONTEXT', tiers.CONTEXT.slice(0, 30), 'ctx')}
               </div>
             )}
 
             {/* Tier 3: Autoplay Radio Queue */}
-            {tiers.AUTOPLAY.length > 0 && (
+            {(tiers.AUTOPLAY.length > 0 || isAutoplayLoading) && (
               <div className="space-y-1.5 pt-2">
-                <div className="text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Autoplay Radio ({tiers.AUTOPLAY.length})
-                </div>
-                {tiers.AUTOPLAY.map((item, idx) => (
-                  <div
-                    key={`auto-${item.videoId}-${idx}`}
-                    onClick={() => jumpToTrack('AUTOPLAY', idx)}
-                    className="queue-row group flex items-center gap-2 p-2 rounded-lg hover:bg-white/[0.06] transition-all cursor-pointer"
-                  >
-                    <div className="w-8 h-8 rounded overflow-hidden bg-neutral-900 shrink-0">
-                      {renderCoverArt(item.thumbnailUrl, 12)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-medium text-white truncate">{item.title}</div>
-                      <div className="text-[10px] text-[var(--color-on-surface-variant)] truncate">{item.artist}</div>
-                    </div>
-                    <span className="text-[10px] font-mono text-[var(--color-on-surface-variant)]">
-                      {formatDuration(item.durationSec || (item.totalPlayTimeMs ? item.totalPlayTimeMs / 1000 : 0))}
+                <div className="flex items-center justify-between text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
+                  <span>Autoplay Radio ({tiers.AUTOPLAY.length})</span>
+                  {isAutoplayLoading && (
+                    <span className="text-[10px] font-normal lowercase text-[var(--color-accent)]">
+                      curating…
                     </span>
-                  </div>
-                ))}
+                  )}
+                </div>
+                {renderTierRows('AUTOPLAY', tiers.AUTOPLAY, 'auto')}
               </div>
             )}
           </div>

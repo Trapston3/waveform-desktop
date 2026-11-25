@@ -899,7 +899,12 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const bass = frame.audio.bassEnergy;
       const mid = frame.audio.midEnergy;
       const treble = frame.audio.trebleEnergy;
-      const beatKick = motionScale > 0 && frame.audio.beatDetected ? 0.12 : 0;
+      const beatKick =
+        motionScale > 0 && frame.audio.isDownbeat
+          ? 0.2
+          : motionScale > 0 && frame.audio.beatDetected
+          ? 0.12
+          : 0;
       const rightEdge = fullWidth - 16;
 
       ctx.save();
@@ -969,7 +974,11 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       const beatPhase = beatsElapsed % 1.0;
       const baseR = Math.min(focalWidth, height) * 0.34;
       const beatPulse =
-        motionScale > 0 && frame.audio.beatDetected ? 1 + 0.045 * motionScale : 1.0;
+        motionScale > 0 && frame.audio.isDownbeat
+          ? 1 + 0.075 * motionScale
+          : motionScale > 0 && frame.audio.beatDetected
+          ? 1 + 0.045 * motionScale
+          : 1.0;
 
       ctx.save();
       ctx.translate(cx, cy);

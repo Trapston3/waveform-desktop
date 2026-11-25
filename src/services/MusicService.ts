@@ -5,6 +5,7 @@ import { InnerTubeClient, universalFetch } from './InnerTubeClient';
 import { InnerTubeParser } from './InnerTubeParser';
 import { StreamResolver } from './StreamResolver';
 import { LyricsService } from './LyricsService';
+import { TrackMatcher } from './TrackMatcher';
 import type { ResolvedStream } from './StreamResolver';
 export type { ResolvedStream };
 import { useLibraryStore } from '../state/libraryStore';
@@ -61,6 +62,80 @@ const CHART_QUERY_MAP: Record<string, { title: string; subtitle: string; query: 
     query: 'deep electronic ambient focus',
   },
 };
+
+const PODCAST_OR_TALK_RE = /\b(podcast|episode|ep\.\s*\d+|talk show|audiobook|full interview)\b/i;
+
+/**
+ * Strict Music Quality Filter for Autoplay Radio / Up Next:
+ * Removes podcasts, episodes, >15min non-music shows, seed duplicates,
+ * and near-duplicate title-spam covers by unrelated artists.
+ */
+export function filterMusicRadioTracks(
+  candidates: Song[],
+  seed: Pick<Song, 'videoId' | 'title' | 'artist'>,
+  opts: { allowSameTitleDifferentArtist?: boolean; excludeVideoIds?: Iterable<string> } = {}
+): Song[] {
+  const seenIds = new Set<string>();
+  if (seed.videoId) seenIds.add(seed.videoId);
+  if (opts.excludeVideoIds) {
+    for (const id of opts.excludeVideoIds) {
+      if (id) seenIds.add(id);
+    }
+  }
+
+  const seedParsed = TrackMatcher.parseTitle(seed.title || '', seed.artist || '');
+  const out: Song[] = [];
+
+  for (const raw of Array.isArray(candidates) ? candidates : []) {
+    if (!raw) continue;
+    const vid = String(raw.videoId || (raw as any).id || '').trim();
+    if (!vid || seenIds.has(vid)) continue;
+    if ((raw as any).isArtist || (raw as any).isAlbum || (raw as any).isPlaylist) continue;
+
+    const rType = String((raw as any).resultType || '').toLowerCase();
+    const badge = String((raw as any).badge || '').toLowerCase();
+    if ((raw as any).isPodcast || rType === 'podcast' || rType === 'episode' || badge === 'podcast' || badge === 'episode') {
+      continue;
+    }
+
+    const title = String(raw.title || '').trim();
+    const artist = String(raw.artist || (raw as any).subtitle || '').trim();
+    if (!title) continue;
+    if (PODCAST_OR_TALK_RE.test(title) || PODCAST_OR_TALK_RE.test(artist)) {
+      continue;
+    }
+
+    const durSec =
+      typeof raw.durationSec === 'number' && Number.isFinite(raw.durationSec) && raw.durationSec > 0
+        ? raw.durationSec
+        : raw.durationText
+        ? TrackMatcher.parseSeconds(raw.durationText) ?? 0
+        : raw.totalPlayTimeMs > 0
+        ? Math.round(raw.totalPlayTimeMs / 1000)
+        : 0;
+    if (durSec > 900) {
+      continue;
+    }
+
+    if (!opts.allowSameTitleDifferentArtist && seedParsed.core.length >= 4) {
+      const candParsed = TrackMatcher.parseTitle(title, artist);
+      if (candParsed.core === seedParsed.core && !TrackMatcher.sharesArtist(seed.artist || '', artist)) {
+        continue;
+      }
+    }
+
+    seenIds.add(vid);
+    out.push({
+      ...raw,
+      videoId: vid,
+      id: vid,
+      artist: artist || 'Unknown Artist',
+      ...(durSec > 0 ? { durationSec: durSec, totalPlayTimeMs: durSec * 1000 } : {}),
+    });
+  }
+
+  return out;
+}
 
 export class MusicService implements IMusicService {
   private client: InnerTubeClient;
@@ -275,18 +350,25 @@ export class MusicService implements IMusicService {
       const playlist = playlists.find((p) => p.id === id);
       if (playlist) {
         const songById = new Map<string, Song>();
-        for (const s of favorites) {
+        for (const s of (playlist as any).songs || []) {
           if (s?.videoId) songById.set(s.videoId, s);
           if (s?.id) songById.set(s.id, s);
         }
+        for (const s of favorites) {
+          if (s?.videoId && !songById.has(s.videoId)) songById.set(s.videoId, s);
+          if (s?.id && !songById.has(s.id)) songById.set(s.id, s);
+        }
         for (const s of localSongs) {
-          if (s?.videoId) songById.set(s.videoId, s);
-          if (s?.id) songById.set(s.id, s);
+          if (s?.videoId && !songById.has(s.videoId)) songById.set(s.videoId, s);
+          if (s?.id && !songById.has(s.id)) songById.set(s.id, s);
         }
         const songs: Song[] = [];
         for (const sid of playlist.songIds || []) {
           const hit = songById.get(sid);
           if (hit) songs.push(hit);
+        }
+        if (songs.length === 0 && Array.isArray((playlist as any).songs)) {
+          songs.push(...(playlist as any).songs);
         }
         const thumb =
           playlist.thumbnailUrl ||
@@ -801,6 +883,50 @@ export class MusicService implements IMusicService {
       }
       return null;
     }
+  }
+
+  public async getUpNextRadio(
+    seed: Song,
+    excludeVideoIds?: Iterable<string>
+  ): Promise<Song[]> {
+    if (!seed || !seed.videoId || !this.isOnline) {
+      return [];
+    }
+
+    try {
+      const vid = seed.videoId;
+      if (/^[A-Za-z0-9_-]{11}$/.test(vid)) {
+        const raw = await this.client.post('next', {
+          videoId: vid,
+          playlistId: `RDAMVM${vid}`,
+          isAudioOnly: true,
+        });
+        const parsed = this.parser.parseUpNextRadio(raw);
+        const filtered = filterMusicRadioTracks(parsed, seed, { excludeVideoIds });
+        if (filtered.length > 0) {
+          return filtered;
+        }
+      }
+
+      // Fallback when seed has non-YT ID or empty next endpoint: search artist's top songs (strictly filtered)
+      if (seed.artist && seed.artist !== 'Unknown Artist') {
+        const res = await this.search(`${seed.artist} songs`, 'songs');
+        const candidates = (res.items || []).map((item: any) => ({
+          ...item,
+          videoId: item.videoId || item.id,
+          artist: item.artist || item.subtitle || 'Unknown Artist',
+          durationSec:
+            typeof item.durationSec === 'number' && item.durationSec > 0
+              ? item.durationSec
+              : TrackMatcher.parseSeconds(item.durationText || item.secondaryText) ?? undefined,
+        })) as Song[];
+        return filterMusicRadioTracks(candidates, seed, { excludeVideoIds }).slice(0, 15);
+      }
+    } catch {
+      // Non-fatal: return empty radio queue
+    }
+
+    return [];
   }
 
   public invalidateStreamCache(songId?: string): void {

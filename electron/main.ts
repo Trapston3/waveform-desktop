@@ -5,6 +5,7 @@ const dialog = (electronNs as any).dialog as Electron.Dialog;
 import { Readable } from 'node:stream';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -55,6 +56,13 @@ import {
 } from './discordRpc.js';
 import { initAppUpdaterIpc } from './appUpdater.js';
 import { getNativeCore, getNativeCoreInfo } from './nativeCore.js';
+import {
+  mergeReplayEntries,
+  readReplayHistorySync,
+  writeReplayHistoryAtomicSync,
+  type ReplayDiskEntry,
+} from './replayStore.js';
+import { fetchPublicPlaylistByUrl } from './playlistImporter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1299,6 +1307,250 @@ if (!gotTheLock) {
       },
     });
     lyricVisualizerPlatform.registerIpcHandlers();
+
+    const replayFilePath = path.join(app.getPath('userData'), 'replay-history.json');
+    let replayEntriesCache: ReplayDiskEntry[] | null = null;
+    const ensureReplayCache = (): ReplayDiskEntry[] => {
+      if (replayEntriesCache === null) {
+        replayEntriesCache = readReplayHistorySync(replayFilePath);
+      }
+      return replayEntriesCache;
+    };
+
+    ipcMain.handle('replay:load', () => {
+      return { version: 1, entries: ensureReplayCache() };
+    });
+
+    ipcMain.handle('replay:append', (_e, entry: ReplayDiskEntry) => {
+      if (!entry || typeof entry.videoId !== 'string') return { ok: false, count: 0 };
+      const merged = mergeReplayEntries(ensureReplayCache(), [entry]);
+      replayEntriesCache = merged;
+      writeReplayHistoryAtomicSync(replayFilePath, merged);
+      return { ok: true, count: merged.length };
+    });
+
+    ipcMain.handle('replay:flush', (_e, entries: ReplayDiskEntry[]) => {
+      const list = Array.isArray(entries) ? entries : [];
+      const merged = mergeReplayEntries(ensureReplayCache(), list);
+      replayEntriesCache = merged;
+      writeReplayHistoryAtomicSync(replayFilePath, merged);
+      return { ok: true, count: merged.length, entries: merged };
+    });
+
+    ipcMain.handle('replay:reset', () => {
+      replayEntriesCache = [];
+      writeReplayHistoryAtomicSync(replayFilePath, []);
+      return { ok: true };
+    });
+
+    ipcMain.handle('playlist:import-url', (_event, url: string) =>
+      fetchPublicPlaylistByUrl(url)
+    );
+
+    const analysisCachePath = path.join(app.getPath('userData'), 'analysis-cache.json');
+    const stemsDir = path.join(os.tmpdir(), 'waveform-stems');
+    let analysisCache: Record<string, any> | null = null;
+    const loadAnalysisCache = (): Record<string, any> => {
+      if (analysisCache !== null) return analysisCache;
+      try {
+        if (fs.existsSync(analysisCachePath)) {
+          const parsed = JSON.parse(fs.readFileSync(analysisCachePath, 'utf8'));
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const loaded = parsed as Record<string, any>;
+            analysisCache = loaded;
+            return loaded;
+          }
+        }
+      } catch {
+        // Ignore corrupt cache file
+      }
+      analysisCache = {};
+      return analysisCache;
+    };
+    const saveAnalysisCache = (cacheObj: Record<string, any>): void => {
+      try {
+        const keys = Object.keys(cacheObj);
+        if (keys.length > 500) {
+          keys
+            .sort((a, b) => (cacheObj[a]?.updatedAt || 0) - (cacheObj[b]?.updatedAt || 0))
+            .slice(0, keys.length - 500)
+            .forEach((k) => delete cacheObj[k]);
+        }
+        fs.mkdirSync(path.dirname(analysisCachePath), { recursive: true });
+        const tmp = `${analysisCachePath}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(cacheObj), 'utf8');
+        fs.renameSync(tmp, analysisCachePath);
+      } catch {
+        // Non-fatal
+      }
+    };
+    const toFloat32 = (input: unknown): Float32Array => {
+      if (input instanceof Float32Array) return input;
+      if (ArrayBuffer.isView(input)) {
+        return new Float32Array(input.buffer, input.byteOffset, Math.floor(input.byteLength / 4));
+      }
+      if (Array.isArray(input)) {
+        return Float32Array.from(input as number[]);
+      }
+      return new Float32Array(0);
+    };
+
+    ipcMain.handle(
+      'ml:analyzeTrackBeats',
+      async (
+        _event,
+        payload: {
+          trackId: string;
+          leftPcm?: Float32Array | number[] | null;
+          rightPcm?: Float32Array | number[] | null;
+          sampleRate?: number;
+          forceRefresh?: boolean;
+        }
+      ) => {
+        const trackId = String(payload?.trackId || '').trim();
+        if (!trackId) return { ok: false, error: 'Missing trackId' };
+        const cache = loadAnalysisCache();
+        if (!payload.forceRefresh && cache[trackId]) {
+          return { ok: true, cached: true, ...cache[trackId] };
+        }
+        const left = toFloat32(payload?.leftPcm);
+        if (left.length === 0) {
+          return { ok: false, cached: false, found: false };
+        }
+        const right = toFloat32(payload?.rightPcm);
+        const core = getNativeCore();
+        if (!core?.onnxAnalyzeTrackBeatsPcm) {
+          return { ok: false, error: 'Native core ML beat analyzer unavailable' };
+        }
+        try {
+          const res = await core.onnxAnalyzeTrackBeatsPcm(
+            left,
+            right.length > 0 ? right : null,
+            payload?.sampleRate || 44100
+          );
+          const entry = { ...res, updatedAt: Date.now() };
+          cache[trackId] = entry;
+          saveAnalysisCache(cache);
+          return { ok: true, cached: false, ...entry };
+        } catch (err) {
+          return {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    );
+
+    ipcMain.handle(
+      'ml:separateVocals',
+      async (
+        _event,
+        payload: {
+          trackId: string;
+          leftPcm?: Float32Array | number[] | null;
+          rightPcm?: Float32Array | number[] | null;
+          sampleRate?: number;
+        }
+      ) => {
+        const trackId = String(payload?.trackId || '').trim();
+        if (!trackId) return { ok: false, error: 'Missing trackId' };
+        const hash = createHash('sha1').update(trackId).digest('hex');
+        const stemFile = path.join(stemsDir, `${hash}.wfstem`);
+        try {
+          if (fs.existsSync(stemFile)) {
+            const buf = fs.readFileSync(stemFile);
+            if (buf.byteLength >= 24 && buf.readUInt32LE(0) === 0x57465354) {
+              const count = buf.readUInt32LE(4);
+              const sampleRate = buf.readDoubleLE(8);
+              const usedOnnx = buf.readUInt32LE(16) === 1;
+              const expectedBytes = 24 + count * 8;
+              if (count > 0 && buf.byteLength >= expectedBytes) {
+                const vocalsLeft = new Float32Array(
+                  buf.buffer.slice(buf.byteOffset + 24, buf.byteOffset + 24 + count * 4)
+                );
+                const vocalsRight = new Float32Array(
+                  buf.buffer.slice(
+                    buf.byteOffset + 24 + count * 4,
+                    buf.byteOffset + 24 + count * 8
+                  )
+                );
+                return { ok: true, cached: true, usedOnnx, vocalsLeft, vocalsRight, sampleRate };
+              }
+            }
+          }
+        } catch {
+          // Recompute if cached file unreadable
+        }
+
+        const left = toFloat32(payload?.leftPcm);
+        const right = toFloat32(payload?.rightPcm);
+        if (left.length === 0 || right.length === 0) {
+          return { ok: false, cached: false, found: false };
+        }
+        const core = getNativeCore();
+        if (!core?.onnxSeparateVocalsPcm) {
+          return { ok: false, error: 'Native core vocal separation unavailable' };
+        }
+        try {
+          const sr = payload?.sampleRate || 44100;
+          const res = await core.onnxSeparateVocalsPcm(left, right, sr);
+          const count = Math.min(res.vocalsLeft.length, res.vocalsRight.length);
+          if (count > 0) {
+            try {
+              fs.mkdirSync(stemsDir, { recursive: true });
+              const outBuf = Buffer.allocUnsafe(24 + count * 8);
+              outBuf.writeUInt32LE(0x57465354, 0);
+              outBuf.writeUInt32LE(count, 4);
+              outBuf.writeDoubleLE(res.sampleRate || sr, 8);
+              outBuf.writeUInt32LE(res.usedOnnx ? 1 : 0, 16);
+              outBuf.writeUInt32LE(0, 20);
+              Buffer.from(res.vocalsLeft.buffer, res.vocalsLeft.byteOffset, count * 4).copy(
+                outBuf,
+                24
+              );
+              Buffer.from(res.vocalsRight.buffer, res.vocalsRight.byteOffset, count * 4).copy(
+                outBuf,
+                24 + count * 4
+              );
+              const tmp = `${stemFile}.${process.pid}.tmp`;
+              fs.writeFileSync(tmp, outBuf);
+              fs.renameSync(tmp, stemFile);
+            } catch {
+              // Non-fatal cache write error
+            }
+          }
+          return { ok: true, cached: false, ...res };
+        } catch (err) {
+          return {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    );
+
+    ipcMain.handle(
+      'ml:autoSyncLyrics',
+      (
+        _event,
+        payload: {
+          vocalEnvelope: Float32Array | number[];
+          envelopeFps?: number;
+          lineStartTimesSec: number[];
+        }
+      ) => {
+        const env = toFloat32(payload?.vocalEnvelope);
+        const fps = payload?.envelopeFps || 10;
+        const starts = Array.isArray(payload?.lineStartTimesSec)
+          ? payload.lineStartTimesSec
+          : [];
+        const core = getNativeCore();
+        if (core?.estimateLyricOffsetMs) {
+          return core.estimateLyricOffsetMs(env, fps, starts);
+        }
+        return { offsetMs: 0, confidence: 0 };
+      }
+    );
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

@@ -1155,6 +1155,29 @@ export class AudioEngine {
   private metricsLastBeatMs = 0;
   private synthPhase = 0;
   private crossfadeSequence = 0;
+
+  // Live Karaoke DSP + Neural Stem & Downbeat State
+  private karaokeEnabled = false;
+  private karaokeVocalLevel = 1.0;
+  private karaokeIsolateVocals = false;
+  private karaokeBypassGain: GainNode | null = null;
+  private karaokeDryGain: GainNode | null = null;
+  private karaokeMidCancelGain: GainNode | null = null;
+  private postKaraokeBus: GainNode | null = null;
+  private activeBeatAnalysis: {
+    bpm: number;
+    beats: readonly number[];
+    downbeats: readonly number[];
+    chorusStartSec?: number;
+  } | null = null;
+  private lastMatchedDownbeatIdx = -1;
+  private beatCountSinceDownbeat = 0;
+  private cachedVocalStem: {
+    trackId: string;
+    vocalsLeft: Float32Array;
+    vocalsRight: Float32Array;
+    sampleRate: number;
+  } | null = null;
   private pendingResumePositionSec: number | null = null;
   private pendingResumeVerifyTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingResumeMaxWaitTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1228,6 +1251,62 @@ export class AudioEngine {
         }
 
         let prevNode: AudioNode = this.decksBus;
+        // Live Karaoke Mid/Side vocal-band stage (unity bypass when disabled)
+        if (
+          typeof (this.ctx as any).createChannelSplitter === 'function' &&
+          typeof (this.ctx as any).createChannelMerger === 'function' &&
+          typeof (this.ctx as any).createBiquadFilter === 'function'
+        ) {
+          try {
+            const postBus = this.ctx.createGain();
+            const bypassGain = this.ctx.createGain();
+            bypassGain.gain.setValueAtTime(1.0, this.ctx.currentTime);
+            this.decksBus.connect(bypassGain);
+            bypassGain.connect(postBus);
+
+            const splitter = this.ctx.createChannelSplitter(2);
+            const merger = this.ctx.createChannelMerger(2);
+            const dryGainL = this.ctx.createGain();
+            const dryGainR = this.ctx.createGain();
+            dryGainL.gain.setValueAtTime(0.0, this.ctx.currentTime);
+            dryGainR.gain.setValueAtTime(0.0, this.ctx.currentTime);
+
+            const midSum = this.ctx.createGain();
+            midSum.gain.setValueAtTime(0.5, this.ctx.currentTime);
+            const bandpass = this.ctx.createBiquadFilter();
+            bandpass.type = 'bandpass';
+            bandpass.frequency.setValueAtTime(1150, this.ctx.currentTime);
+            bandpass.Q.setValueAtTime(0.45, this.ctx.currentTime);
+            const midCancelGain = this.ctx.createGain();
+            midCancelGain.gain.setValueAtTime(0.0, this.ctx.currentTime);
+
+            this.decksBus.connect(splitter);
+            splitter.connect(dryGainL, 0);
+            splitter.connect(dryGainR, 1);
+            dryGainL.connect(merger, 0, 0);
+            dryGainR.connect(merger, 0, 1);
+
+            // Share dryGain via dryGainL/dryGainR synchronized updates or use single shared dry bus:
+            splitter.connect(midSum, 0);
+            splitter.connect(midSum, 1);
+            midSum.connect(bandpass);
+            bandpass.connect(midCancelGain);
+            midCancelGain.connect(merger, 0, 0);
+            midCancelGain.connect(merger, 0, 1);
+            merger.connect(postBus);
+
+            // Tie dryGainR to dryGainL value through helper reference on dryGainL
+            (dryGainL as any).__pairedDryR = dryGainR;
+            this.karaokeBypassGain = bypassGain;
+            this.karaokeDryGain = dryGainL;
+            this.karaokeMidCancelGain = midCancelGain;
+            this.postKaraokeBus = postBus;
+            prevNode = postBus;
+          } catch {
+            prevNode = this.decksBus;
+          }
+        }
+
         for (const filter of this.eqFilterNodes) {
           prevNode.connect(filter);
           prevNode = filter;
@@ -2371,6 +2450,87 @@ export class AudioEngine {
   }
 
   /**
+   * Configure live Karaoke / Vocal Attenuation mode (0.0 = Vocals Off, 1.0 = Full Vocals).
+   */
+  setKaraokeMode(enabled: boolean, vocalLevel: number, isolateVocals = false): void {
+    const safeLevel = Number.isFinite(vocalLevel) ? Math.max(0, Math.min(1, vocalLevel)) : 1;
+    this.karaokeEnabled = Boolean(enabled);
+    this.karaokeVocalLevel = safeLevel;
+    this.karaokeIsolateVocals = Boolean(isolateVocals);
+
+    this.dspChain.karaoke.enabled = this.karaokeEnabled;
+    this.dspChain.karaoke.vocalLevel = safeLevel;
+    this.dspChain.karaoke.isolateVocals = this.karaokeIsolateVocals;
+
+    if (
+      this.ctx &&
+      this.karaokeBypassGain &&
+      this.karaokeDryGain &&
+      this.karaokeMidCancelGain
+    ) {
+      const now = this.ctx.currentTime;
+      const bypassVal = this.karaokeEnabled ? 0.0 : 1.0;
+      const dryVal = this.karaokeEnabled ? (this.karaokeIsolateVocals ? 0.0 : 1.0) : 0.0;
+      const midVal = this.karaokeEnabled
+        ? this.karaokeIsolateVocals
+          ? safeLevel
+          : -(1.0 - safeLevel)
+        : 0.0;
+      try {
+        this.karaokeBypassGain.gain.setTargetAtTime(bypassVal, now, 0.02);
+        this.karaokeDryGain.gain.setTargetAtTime(dryVal, now, 0.02);
+        const pairedR = (this.karaokeDryGain as any).__pairedDryR as GainNode | undefined;
+        pairedR?.gain.setTargetAtTime(dryVal, now, 0.02);
+        this.karaokeMidCancelGain.gain.setTargetAtTime(midVal, now, 0.02);
+      } catch {
+        this.karaokeBypassGain.gain.value = bypassVal;
+        this.karaokeDryGain.gain.value = dryVal;
+        const pairedR = (this.karaokeDryGain as any).__pairedDryR as GainNode | undefined;
+        if (pairedR) pairedR.gain.value = dryVal;
+        this.karaokeMidCancelGain.gain.value = midVal;
+      }
+    }
+  }
+
+  getKaraokeState(trackId?: string | null): {
+    enabled: boolean;
+    vocalLevel: number;
+    isolateVocals: boolean;
+    hasNeuralStem: boolean;
+  } {
+    const activeDeckTrackId = (this.activeDeckName === 'active' ? this.deckA : this.deckB).track?.videoId ?? null;
+    const activeId = trackId ?? activeDeckTrackId;
+    return {
+      enabled: this.karaokeEnabled,
+      vocalLevel: this.karaokeVocalLevel,
+      isolateVocals: this.karaokeIsolateVocals,
+      hasNeuralStem: Boolean(
+        activeId && this.cachedVocalStem && this.cachedVocalStem.trackId === activeId
+      ),
+    };
+  }
+
+  setNeuralVocalStem(
+    trackId: string,
+    stem: { vocalsLeft: Float32Array; vocalsRight: Float32Array; sampleRate: number } | null
+  ): void {
+    this.cachedVocalStem = stem ? { trackId, ...stem } : null;
+  }
+
+  setTrackBeatAnalysis(
+    analysis: {
+      bpm: number;
+      beats: readonly number[];
+      downbeats: readonly number[];
+      chorusStartSec?: number;
+    } | null
+  ): void {
+    this.activeBeatAnalysis = analysis;
+    this.lastMatchedDownbeatIdx = -1;
+    this.beatCountSinceDownbeat = 0;
+  }
+
+  /**
    * Sample normalized RMS, Bass (20-250 Hz), Mid (250-4000 Hz), Treble (4-16 kHz),
    * and beat onset detection from the active Web Audio AnalyserNode / LiveVisualizer
    * without allocating per-call arrays when `out` is provided.
@@ -2390,6 +2550,7 @@ export class AudioEngine {
     target.midEnergy = 0;
     target.trebleEnergy = 0;
     target.beatDetected = false;
+    target.isDownbeat = false;
 
     const activeDeck = this.activeDeckName === 'active' ? this.deckA : this.deckB;
     const isCtxInactive =
@@ -2534,16 +2695,38 @@ export class AudioEngine {
 
     if (isBeat) {
       this.metricsLastBeatMs = nowMs;
+      this.beatCountSinceDownbeat += 1;
     }
     this.metricsRollingBass = prevAvg * 0.82 + bass * 0.18;
     this.visualizer.updateBeatMetrics(bass, nowMs);
+
+    let isDownbeat = false;
+    const downbeats = this.activeBeatAnalysis?.downbeats;
+    if (downbeats && downbeats.length > 0 && this.playbackState === 'PLAYING') {
+      const posSec = this.getCurrentTime();
+      for (let i = 0; i < downbeats.length; i++) {
+        if (Math.abs(downbeats[i] - posSec) <= 0.055) {
+          if (i !== this.lastMatchedDownbeatIdx) {
+            this.lastMatchedDownbeatIdx = i;
+            isDownbeat = true;
+          }
+          break;
+        }
+      }
+    } else if (isBeat && this.beatCountSinceDownbeat % 4 === 1) {
+      isDownbeat = true;
+    }
 
     target.rmsLevel = rms;
     target.bassEnergy = bass;
     target.midEnergy = mid;
     target.trebleEnergy = treble;
     target.beatDetected = isBeat;
-    (target as any).estimatedBpm = this.visualizer.getEstimatedBpm();
+    target.isDownbeat = isDownbeat;
+    (target as any).estimatedBpm =
+      this.activeBeatAnalysis && this.activeBeatAnalysis.bpm > 40
+        ? this.activeBeatAnalysis.bpm
+        : this.visualizer.getEstimatedBpm();
     (target as any).beatStrength = this.visualizer.getBeatStrength();
 
     return target;

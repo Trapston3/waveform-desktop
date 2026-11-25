@@ -374,6 +374,7 @@ export interface AudioFrameMetrics {
   midEnergy: number;
   trebleEnergy: number;
   beatDetected: boolean;
+  isDownbeat?: boolean;
   estimatedBpm?: number;
   beatStrength?: number;
 }
@@ -444,8 +445,15 @@ export interface LyricsLayout {
 }
 
 export type MotionIntensity = 'subtle' | 'normal' | 'vivid';
-export type NowPlayingLayoutMode = 'split' | 'centered' | 'ambient';
+export type NowPlayingLayoutMode = 'split' | 'lyrics-focus' | 'artwork-focus' | 'ambient';
 export type LyricTextAlign = 'center' | 'left';
+
+export function normalizeNowPlayingLayout(val: unknown): NowPlayingLayoutMode {
+  if (val === 'centered' || val === 'lyrics-focus') return 'lyrics-focus';
+  if (val === 'artwork-focus') return 'artwork-focus';
+  if (val === 'ambient') return 'ambient';
+  return 'split';
+}
 
 export interface StyleTrackMetadata {
   readonly id: string;

@@ -31,6 +31,7 @@ import {
   transliterateToLatin,
 } from '../../../utils/transliterate';
 import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
+import { drawWordIcon, resolveWordIcon, type WordIconId } from '../wordIconDictionary';
 
 export const CODE_FONT_STACK =
   "'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace";
@@ -501,6 +502,7 @@ interface PrecomputedVisualToken {
   readonly height: number;
   readonly chars: readonly string[];
   readonly charOffsets: Float32Array;
+  readonly iconId: WordIconId | null;
 }
 
 interface PrecomputedCodeLine {
@@ -578,6 +580,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     if (variationId === 'led-stage-matrix') return 1;
     if (variationId === 'clockwork-orbit') return 2;
     if (variationId === 'clean-dark-ide') return 3;
+    if (variationId === 'codestyle-visual') return 4;
     return 0; // 'ide-macro'
   }
 
@@ -775,6 +778,7 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
           height: codeFontSize,
           chars,
           charOffsets,
+          iconId: tok.wordIndex >= 0 ? resolveWordIcon(tok.text, codeSourceText) : null,
         };
 
         if (tok.wordIndex >= 0 && tok.wordIndex < wordVisualIndices.length) {
@@ -1247,6 +1251,21 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       ctx.fillStyle = '#d2a8ff';
       ctx.fillText('await', bx + 19, by + 7);
       ctx.restore();
+    }
+
+    // Inline vector icon for Codestyle Visual variation (variationIdx === 4)
+    if (variationIdx === 4 && tok.iconId && (isWordActive || isWordPassed || !isActiveLine)) {
+      const iconSize = Math.max(11, Math.round(tok.height * 0.72));
+      const pop = isWordActive && motionScale > 0 ? 0.85 + 0.3 * easeOutBack(clamp01(p * 1.8)) : 1.0;
+      drawWordIcon(
+        ctx,
+        tok.iconId,
+        tx + tok.width * 0.5,
+        ty - iconSize * 0.55,
+        iconSize,
+        isWordActive ? CODE_COLOR_HOOK : tok.color,
+        pop
+      );
     }
 
     ctx.restore();

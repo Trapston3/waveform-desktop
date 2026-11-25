@@ -12,7 +12,35 @@ export type VisualStyleId =
   | 'CRTScanline'
   | 'StarfieldShip3D'
   | 'IosTextingMotion'
-  | 'CodeEditorKinetic';
+  | 'CodeEditorKinetic'
+  | 'FisheyeKinetic'
+  | 'MotionGeometry';
+
+export type VisualStyleCategoryId = 'kinetic' | 'motion' | 'native';
+
+export interface VisualStyleCategoryDefinition {
+  readonly id: VisualStyleCategoryId;
+  readonly label: string;
+  readonly description: string;
+}
+
+export const VISUAL_STYLE_CATEGORIES: readonly VisualStyleCategoryDefinition[] = [
+  {
+    id: 'kinetic',
+    label: 'Kinetic Type',
+    description: 'High-craft typographic rhythms, 3D corridors & barrel-lens stacks',
+  },
+  {
+    id: 'motion',
+    label: 'Motion Scenes',
+    description: 'Reactive geometric canvases, live code & CRT/ink shaders',
+  },
+  {
+    id: 'native',
+    label: 'Native Phone UI',
+    description: 'Authentic dark iOS Messages, Wallet, Maps, Notifications & Group Chat',
+  },
+] as const;
 
 export interface StyleVariationDefinition {
   readonly id: string;
@@ -23,6 +51,7 @@ export interface StyleVariationDefinition {
 export interface VisualStyleDefinition {
   readonly id: VisualStyleId;
   readonly label: string;
+  readonly category: VisualStyleCategoryId;
   readonly description: string;
   readonly usesWebGl: boolean;
   readonly uses3D?: boolean;
@@ -34,6 +63,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'AppleMusicFlow',
     label: 'Atmospheric Flow',
+    category: 'kinetic',
     description: 'Smooth spring-eased word illumination with atmospheric palette backdrop and depth falloff.',
     usesWebGl: false,
     defaultVariationId: 'silk-glow',
@@ -43,8 +73,22 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     ],
   },
   {
+    id: 'FisheyeKinetic',
+    label: 'Fisheye & Visual',
+    category: 'kinetic',
+    description: 'Stacked 3–4 word barrel-lens kinetic typography with tilted inverse highlight bar & inline icons.',
+    usesWebGl: false,
+    defaultVariationId: 'fisheye-visual',
+    variations: [
+      { id: 'fisheye-visual', label: 'Fisheye Visual', description: 'Radial barrel-lens typography with matched monochrome vector icons' },
+      { id: 'fisheye', label: 'Fisheye', description: 'Pure tight typographic barrel-lens stack without icons' },
+      { id: 'visual-stack', label: 'Visual Stack', description: 'Clean flat centered word stack paired with vector icons' },
+    ],
+  },
+  {
     id: 'TypewriterEditorial',
     label: 'Typewriter Editorial',
+    category: 'kinetic',
     description: 'Literary serif spotlight with animated cursor, ink reveal, and warm editorial grid.',
     usesWebGl: false,
     defaultVariationId: 'dark-slate',
@@ -56,6 +100,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'MinimalSwiss',
     label: 'Minimal Swiss',
+    category: 'kinetic',
     description: 'Asymmetric Swiss modernist grid with tight grotesque type and crisp active bar.',
     usesWebGl: false,
     defaultVariationId: 'international-grid',
@@ -67,6 +112,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'LiquidMetal',
     label: 'Liquid Metal',
+    category: 'motion',
     description: 'Specular obsidian chrome, iridescent vaporwave synth grid, and album-tinted mercury shaders.',
     usesWebGl: true,
     defaultVariationId: 'obsidian-chrome',
@@ -79,6 +125,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'KaraokeStage',
     label: 'Karaoke Stage',
+    category: 'motion',
     description: 'High-contrast live stage bounce with word fill-wipe progress and upcoming preview.',
     usesWebGl: false,
     defaultVariationId: 'concert-gold',
@@ -90,6 +137,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'BrutalistZine',
     label: 'Brutalist Zine',
+    category: 'kinetic',
     description: 'Tilted poster cards, bold uppercase blocks, newsprint halftone dots, and knockout highlights.',
     usesWebGl: false,
     defaultVariationId: 'newsprint-cutout',
@@ -102,6 +150,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'GenerativeParticleInk',
     label: 'Particle Ink & Ribbons',
+    category: 'motion',
     description: 'Audio-reactive calligraphic ink droplets and multi-band FFT spectrum ribbons.',
     usesWebGl: false,
     defaultVariationId: 'pure-ink',
@@ -112,8 +161,22 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     ],
   },
   {
+    id: 'MotionGeometry',
+    label: 'Constellation / Branches / Web',
+    category: 'motion',
+    description: 'Generative astronomical star constellations, botanical stems, and FFT-reactive spider webs.',
+    usesWebGl: false,
+    defaultVariationId: 'constellation',
+    variations: [
+      { id: 'constellation', label: 'Constellation', description: 'Connects word-by-word star nodes with glowing vectors across night sky' },
+      { id: 'branches', label: 'Branches', description: 'Luminous botanical stem sprouting glowing word nodes & side-branches' },
+      { id: 'web', label: 'Web', description: 'Geometric radial web spinning shimmering FFT-reactive strands per word' },
+    ],
+  },
+  {
     id: 'Spatial3DDepth',
     label: 'Spatial 3D Depth',
+    category: 'kinetic',
     description: 'Multi-plane Z-depth perspective camera with volumetric rings and depth-of-field scale.',
     usesWebGl: false,
     uses3D: true,
@@ -127,6 +190,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'CRTScanline',
     label: 'CRT Scanline',
+    category: 'motion',
     description: 'Deep phosphor CRT glass monitor with curved barrel vignette, scanlines, and RGB subpixel mask.',
     usesWebGl: true,
     defaultVariationId: 'p31-green',
@@ -139,6 +203,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   {
     id: 'StarfieldShip3D',
     label: 'Starfield Ship 3D',
+    category: 'kinetic',
     description: '3D starfighter weaving through procedural asteroids with BPM cruise and beat warp surges.',
     usesWebGl: true,
     uses3D: true,
@@ -151,20 +216,23 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
   },
   {
     id: 'IosTextingMotion',
-    label: 'iOS Messages',
-    description: 'Synced iOS message thread with glossy Tapbacks, Magic Word kinetic effects, and rich cards.',
+    label: 'iOS Native Design',
+    category: 'native',
+    description: 'Authentic dark-mode iOS Messages, Apple Wallet Pay cards, Apple Maps walk route & Lock Screen stacks.',
     usesWebGl: false,
-    defaultVariationId: 'ios-dark',
+    defaultVariationId: 'kinetic-messages',
     variations: [
-      { id: 'ios-dark', label: 'iOS Dark', description: 'Authentic dark iMessage blue and graphite thread' },
-      { id: 'liquid-glass', label: 'Liquid Glass', description: 'Frosted translucent glass bubbles with specular rim highlights' },
-      { id: 'cinema-edit', label: 'Cinema Edit', description: 'Letterboxed kinetic edit with dramatic focal zoom' },
-      { id: 'classic-sms', label: 'Classic SMS Green', description: 'iMessage blue paired with classic SMS green replies' },
+      { id: 'kinetic-messages', label: 'Kinetic Messages', description: 'Blur-spring word reveal, tilted bubbles, glowing contour halo & Maps cards' },
+      { id: 'wallet-payments', label: 'Wallet / Payments', description: 'Dark Apple Wallet / Apple Pay transaction cards with merchant icons & checkmark' },
+      { id: 'city-walk-map', label: 'City Walk Map', description: 'Dark Apple Maps vector grid gliding along a polyline with callout pins' },
+      { id: 'lock-screen-alerts', label: 'Lock Screen Alerts', description: 'Stacked frosted iOS Lock Screen banners, clock & live waveform widget' },
+      { id: 'group-chat', label: 'Group Chat', description: 'Multi-speaker dark iMessage thread with staggered Tapback bursts' },
     ],
   },
   {
     id: 'CodeEditorKinetic',
     label: 'Code Editor Kinetic',
+    category: 'motion',
     description: 'Macro-camera dark IDE where lyrics compile live as expressive JavaScript with collaborator cursors.',
     usesWebGl: false,
     uses3D: true,
@@ -174,6 +242,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
       { id: 'led-stage-matrix', label: 'LED Stage Matrix', description: 'Concert LED dot-matrix glow over live code tokens' },
       { id: 'clockwork-orbit', label: 'Clockwork Orbit', description: 'BPM-locked geometric timing rings rotating behind syntax' },
       { id: 'clean-dark-ide', label: 'Clean Dark IDE', description: 'Razor-sharp flat obsidian code editor without camera tilt' },
+      { id: 'codestyle-visual', label: 'Codestyle Visual', description: 'Inline monochrome vector icons paired with matching live syntax tokens' },
     ],
   },
 ] as const;
@@ -203,6 +272,15 @@ export function resolveStyleVariationId(
       : undefined;
   if (rawCandidate && def.variations.some((v) => v.id === rawCandidate)) {
     return rawCandidate;
+  }
+  if (
+    def.id === 'IosTextingMotion' &&
+    (rawCandidate === 'ios-dark' ||
+      rawCandidate === 'liquid-glass' ||
+      rawCandidate === 'cinema-edit' ||
+      rawCandidate === 'classic-sms')
+  ) {
+    return 'kinetic-messages';
   }
   if (styleId === 'HoloVaporwave' && def.variations.some((v) => v.id === 'holo-vaporwave')) {
     return 'holo-vaporwave';

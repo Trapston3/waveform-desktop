@@ -195,6 +195,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     });
   }, [nowPlayingLayout, setNowPlayingLayout, setNowPlayingLyricsMode]);
 
+  const currentAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.currentAutoSyncOffsetMs);
+  const resetAutoSyncOffsetMs = useLyricVisualizerStore((s) => s.resetAutoSyncOffsetMs);
   const isPlaying = playbackState === 'PLAYING';
   const isLiked = currentTrack ? isFavorite(currentTrack.videoId) : false;
   const isArtworkFocus = nowPlayingLayout === 'artwork-focus' && activeSidecar !== 'queue';
@@ -206,13 +208,27 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     isFullBleedVisualizer;
   const isVisualizerMode = !isArtworkFocus && nowPlayingLyricsMode === 'visualizer';
   const isArtworkHidden = isLyricsFocus;
-  const isFullBleedStage = isVisualizerMode && isLyricsFocus && activeSidecar !== 'queue';
+  const currentSongId = currentTrack?.videoId || (currentTrack as any)?.id || null;
+  const isLyricsSyncedToTrack = Boolean(currentSongId && lyricsTrackId === currentSongId);
+  const isLyricsSettled =
+    isLyricsSyncedToTrack &&
+    !isLoading &&
+    lyricsStatus !== 'loading' &&
+    lyricsStatus !== 'idle';
+  const isPlainUnsyncedLyrics = Boolean(
+    isLyricsSettled &&
+      lyricsData &&
+      (lyricsData.syncType === 'plain' ||
+        lyricsData.type === 'UNSYNCED' ||
+        lyricsData.isSynced === false)
+  );
+  // Temporarily fall back to Classic scrollable view for plain unsynced tracks while preserving Visualizer preference
+  const effectiveIsVisualizerMode = isVisualizerMode && !isPlainUnsyncedLyrics;
+  const isFullBleedStage = effectiveIsVisualizerMode && isLyricsFocus && activeSidecar !== 'queue';
   const splitContentInsetLeft =
     isArtworkHidden || isArtworkFocus || isFullBleedStage || stageWidth < 768 || activeSidecar === 'queue'
       ? 0
       : Math.round(Math.min(Math.max(stageWidth * 0.44, 380), 540));
-
-  const currentSongId = currentTrack?.videoId || (currentTrack as any)?.id || null;
 
   // Synchronize live Karaoke DSP mode & lazy Open-Unmix neural stem separation
   useEffect(() => {
@@ -247,12 +263,50 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
       cancelled = true;
     };
   }, [karaokeEnabled, karaokeVocalLevel, karaokeIsolateVocals, currentSongId, currentTrack?.streamUrl, currentTrack?.localFilePath]);
-  const isLyricsSyncedToTrack = Boolean(currentSongId && lyricsTrackId === currentSongId);
-  const isLyricsSettled =
-    isLyricsSyncedToTrack &&
-    !isLoading &&
-    lyricsStatus !== 'loading' &&
-    lyricsStatus !== 'idle';
+
+  // Cancelable neural Auto-Sync when synced lyrics settle (skipped for plain lyrics or manual user offsets)
+  useEffect(() => {
+    if (!currentSongId || !isLyricsSettled || !lyricsData || isPlainUnsyncedLyrics) return;
+    if (!lyricsData.isSynced || lyricsData.lines.length < 3) return;
+    if (!useSettingsStore.getState().settings?.['lyrics.autoSyncOnStart']) return;
+
+    const viz = useLyricVisualizerStore.getState();
+    const songKey = currentSongId;
+    if (viz.currentSongKey === songKey && viz.currentSongOffsetMs !== 0) return;
+
+    const url =
+      currentTrack?.streamUrl ||
+      (currentTrack?.localFilePath ? `local://${currentTrack.localFilePath}` : null);
+    if (!url) return;
+
+    let cancelled = false;
+    const lineStartsSec = lyricsData.lines
+      .map((l) => (l.startTimeMs || 0) / 1000)
+      .filter((s) => Number.isFinite(s) && s >= 0);
+
+    void MlAudioService.analyzeTrackBeats(songKey, url)
+      .then(async (beats) => {
+        if (cancelled || !beats?.vocalEnvelope?.length) return null;
+        return MlAudioService.autoSyncLyrics(
+          beats.vocalEnvelope,
+          beats.envelopeFps || 10,
+          lineStartsSec
+        );
+      })
+      .then((res) => {
+        if (cancelled || !res) return;
+        const absOffset = Math.abs(res.offsetMs);
+        if (res.confidence >= 0.35 && absOffset >= 250 && absOffset <= 15000) {
+          useLyricVisualizerStore.getState().setAutoSyncOffsetMs(res.offsetMs, songKey);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSongId, isLyricsSettled, isPlainUnsyncedLyrics, lyricsData, currentTrack?.streamUrl, currentTrack?.localFilePath]);
+
   const currentTrackHasLyrics = Boolean(
     lyricsStatus !== 'not_found' &&
       lyricsStatus !== 'empty' &&
@@ -262,7 +316,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const effectiveHasLyrics = isLyricsSettled ? currentTrackHasLyrics : lastSettledHasLyrics;
   const isNoLyricsSettled = isLyricsSettled && !currentTrackHasLyrics;
   const isLyricsColumnCollapsed =
-    !isVisualizerMode &&
+    !effectiveIsVisualizerMode &&
     activeSidecar === 'lyrics' &&
     !isArtworkHidden &&
     !effectiveHasLyrics;
@@ -580,7 +634,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     >
       {/* Unified Full-Bleed Backdrop Layer */}
       <div className="absolute inset-0 z-0">
-        {!isVisualizerMode ? (
+        {!effectiveIsVisualizerMode ? (
           <>
             {/* GPU Fluid Mesh Background Canvas (640x360 hardware-accelerated OkLab shader with blur-[64px]) */}
             <AppleMusicFluidMeshCanvas
@@ -839,6 +893,19 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                       <span>Dolby Atmos</span>
                     </span>
                   )}
+                  {currentAutoSyncOffsetMs !== 0 && !isPlainUnsyncedLyrics && (
+                    <button
+                      type="button"
+                      onClick={() => resetAutoSyncOffsetMs(currentSongId)}
+                      title="Click to reset neural Auto-Sync offset to 0ms"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-[10px] font-semibold border border-emerald-400/30 cursor-pointer transition-colors"
+                    >
+                      <span>
+                        Auto-Sync {currentAutoSyncOffsetMs > 0 ? '+' : ''}
+                        {(currentAutoSyncOffsetMs / 1000).toFixed(2)}s · Reset
+                      </span>
+                    </button>
+                  )}
                 </div>
 
                 <span ref={remainingSpanRef}>-0:00</span>
@@ -1011,7 +1078,13 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                       <button
                         type="button"
                         onClick={() => {
-                          setKaraokeIsolateVocals((prev) => !prev);
+                          const nextIsolate = !karaokeIsolateVocals;
+                          setKaraokeIsolateVocals(nextIsolate);
+                          if (nextIsolate && karaokeVocalLevel < 0.1) {
+                            setKaraokeVocalLevel(1.0);
+                          } else if (!nextIsolate && karaokeVocalLevel > 0.9) {
+                            setKaraokeVocalLevel(0.0);
+                          }
                           if (!karaokeEnabled) setKaraokeEnabled(true);
                         }}
                         className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
@@ -1102,7 +1175,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                   : 'flex-1 w-full max-w-2xl ml-8 lg:ml-14 opacity-100'
               } ${
                 !isLyricsColumnCollapsed &&
-                (isVisualizerMode && activeSidecar === 'lyrics'
+                (effectiveIsVisualizerMode && activeSidecar === 'lyrics'
                   ? 'pointer-events-none'
                   : 'pointer-events-auto')
               }`}
@@ -1111,7 +1184,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                 <div className="now-playing-lyrics borderless-floating-lyrics relative flex-1 h-full flex flex-col justify-center overflow-hidden"
                   onContextMenu={handleOpenVizContextMenu}
                 >
-                  {!isVisualizerMode && (
+                  {!effectiveIsVisualizerMode && (
                     <SyllableLyricsEngine
                       lyricsData={lyricsData}
                       onSeek={seek}

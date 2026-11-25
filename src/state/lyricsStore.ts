@@ -124,53 +124,61 @@ export const useLyricsStore = create<LyricsState>((set, get) => ({
         if (joined) rawLyrics = joined;
       }
 
+      let embeddedPlainFallback: { text: string; provider: string } | null = null;
       if (rawLyrics) {
-        let parsed: ParsedLyrics;
         if (rawLyrics.includes('<tt') || rawLyrics.includes('<span')) {
-          parsed = LyricsService.parseTtml(rawLyrics, 'Embedded');
-        } else if (/\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]/.test(rawLyrics)) {
-          parsed = LyricsService.parseLrc(rawLyrics, 'Embedded');
-        } else {
-          parsed = {
-            type: 'UNSYNCED',
-            provider: 'Embedded',
-            isSynced: false,
-            isRtl: LyricsService.isRtlText(rawLyrics),
-            lines: rawLyrics
-              .split(/\r?\n/)
-              .map((t, i) => ({ lineIndex: i, startTimeMs: 0, endTimeMs: 0, text: t.trim() }))
-              .filter((l) => l.text.length > 0),
-          };
-        }
-
-        const enriched = LyricsService.enrichNonLatinLyrics(parsed);
-        if (get().currentTrackId === trackId) {
-          set({
-            lyricsData: enriched,
-            isLoading: false,
-            status: deriveSettledStatus(enriched),
-            error: null,
-          });
-          scheduleAsyncTranslation(trackId, enriched, get, set);
-        }
-        return;
-      }
-
-      // Check persistent disk cache before hitting network
-      if (typeof api?.getMetadataCache === 'function') {
-        try {
-          const cached = await api.getMetadataCache(cacheKeyArg);
-          if (get().currentTrackId !== trackId) return;
-          if (cached?.lyrics) {
-            const enriched = LyricsService.enrichNonLatinLyrics(cached.lyrics as ParsedLyrics);
+          const parsed = LyricsService.parseTtml(rawLyrics, 'Embedded');
+          const enriched = LyricsService.enrichNonLatinLyrics(parsed);
+          if (get().currentTrackId === trackId) {
             set({
               lyricsData: enriched,
               isLoading: false,
               status: deriveSettledStatus(enriched),
               error: null,
             });
-            scheduleAsyncTranslation(trackId, enriched, get, set, cacheKeyArg, api);
-            return;
+            scheduleAsyncTranslation(trackId, enriched, get, set);
+          }
+          return;
+        } else if (/\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]/.test(rawLyrics)) {
+          const parsed = LyricsService.parseLrc(rawLyrics, 'Embedded');
+          const enriched = LyricsService.enrichNonLatinLyrics(parsed);
+          if (get().currentTrackId === trackId) {
+            set({
+              lyricsData: enriched,
+              isLoading: false,
+              status: deriveSettledStatus(enriched),
+              error: null,
+            });
+            scheduleAsyncTranslation(trackId, enriched, get, set);
+          }
+          return;
+        } else {
+          // Embedded plain text only: preserve as fallback and continue searching synced providers
+          embeddedPlainFallback = { text: rawLyrics, provider: 'Embedded' };
+        }
+      }
+
+      // Check persistent disk cache before hitting network (return immediately only if synced)
+      let cachedPlainFallback: ParsedLyrics | null = null;
+      if (typeof api?.getMetadataCache === 'function') {
+        try {
+          const cached = await api.getMetadataCache(cacheKeyArg);
+          if (get().currentTrackId !== trackId) return;
+          if (cached?.lyrics) {
+            const enriched = LyricsService.enrichNonLatinLyrics(cached.lyrics as ParsedLyrics);
+            const isCachedSynced =
+              enriched.isSynced !== false && enriched.type !== 'UNSYNCED' && enriched.syncType !== 'plain';
+            if (isCachedSynced) {
+              set({
+                lyricsData: enriched,
+                isLoading: false,
+                status: deriveSettledStatus(enriched),
+                error: null,
+              });
+              scheduleAsyncTranslation(trackId, enriched, get, set, cacheKeyArg, api);
+              return;
+            }
+            cachedPlainFallback = enriched;
           }
         } catch {
           // Cache read failure is non-fatal
@@ -182,14 +190,16 @@ export const useLyricsStore = create<LyricsState>((set, get) => ({
         track.title || '',
         track.artist || '',
         track.albumName || track.album || undefined,
-        track.durationSec
+        track.durationSec,
+        embeddedPlainFallback
       );
 
       // Guard against track changing while fetch was in-flight
       if (get().currentTrackId !== trackId) return;
 
-      if (parsed) {
-        const enriched = LyricsService.enrichNonLatinLyrics(parsed);
+      const resolvedLyrics = parsed ?? cachedPlainFallback;
+      if (resolvedLyrics) {
+        const enriched = LyricsService.enrichNonLatinLyrics(resolvedLyrics);
         set({
           lyricsData: enriched,
           isLoading: false,

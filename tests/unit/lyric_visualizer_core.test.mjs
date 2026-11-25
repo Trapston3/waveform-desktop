@@ -77,7 +77,7 @@ function makeSolidRgba(r, g, b, a = 255, width = 8, height = 8) {
 // 1. Models & Contracts
 // ---------------------------------------------------------------------------
 
-test('models expose 12 consolidated visual styles, variations, legacy mappings, 8 bundled fonts, and Starlight Harbor demo', () => {
+test('models expose 14 consolidated visual styles, variations, legacy mappings, 8 bundled fonts, and Starlight Harbor demo', () => {
   const expectedIds = [
     'AppleMusicFlow',
     'TypewriterEditorial',
@@ -91,10 +91,12 @@ test('models expose 12 consolidated visual styles, variations, legacy mappings, 
     'StarfieldShip3D',
     'IosTextingMotion',
     'CodeEditorKinetic',
+    'FisheyeKinetic',
+    'MotionGeometry',
   ];
-  assert.equal(VISUAL_STYLE_DEFINITIONS.length, 12);
+  assert.equal(VISUAL_STYLE_DEFINITIONS.length, 14);
   const styleIds = new Set(VISUAL_STYLE_DEFINITIONS.map((s) => s.id));
-  assert.equal(styleIds.size, 12);
+  assert.equal(styleIds.size, 14);
   for (const id of expectedIds) {
     assert.ok(styleIds.has(id), `Missing consolidated style ${id}`);
   }

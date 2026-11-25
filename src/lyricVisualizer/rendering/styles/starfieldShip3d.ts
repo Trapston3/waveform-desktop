@@ -49,8 +49,8 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
   private scrollY = 0;
   private initialized = false;
   private lastKnownActiveIdx = -1;
-  // Pre-allocated AABB scratch for up to 6 non-overlapping 3D projected words (zero GC)
-  private readonly drawnWordRects = new Float32Array(24);
+  // Pre-allocated AABB scratch for up to 18 non-overlapping 3D projected words (zero GC)
+  private readonly drawnWordRects = new Float32Array(72);
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'nebula-run') return 1;
@@ -191,12 +191,15 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
         : 1.0;
 
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(focalLeft, 0, focalWidth, height);
+    ctx.clip();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Draw up to 6 non-overlapping words along the 3D flight corridor (nose-center collision + phrase stream)
+    // Draw up to 18 separated words along the 3D flight corridor (nose-center collision + rapid phrase stream)
     let drawnCount = 0;
-    for (let g = 0; g < gateCount && drawnCount < 6; g++) {
+    for (let g = 0; g < gateCount && drawnCount < 18; g++) {
       const gp = activeScene.getProjectedWordGate(g);
       if (!gp.text || gp.alpha <= 0.03) continue;
 
@@ -212,25 +215,39 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
 
       const minY = Math.max(44, wordFontPx * 0.65);
       const maxY = Math.max(minY, height - Math.max(52, wordFontPx * 0.75));
-      const drawY = Math.max(minY, Math.min(maxY, gp.screenY));
+      let drawY = Math.max(minY, Math.min(maxY, gp.screenY));
 
-      const pad = 10;
-      const rx0 = drawX - textW * 0.5 - pad;
-      const ry0 = drawY - wordFontPx * 0.52 - pad;
-      const rx1 = drawX + textW * 0.5 + pad;
-      const ry1 = drawY + wordFontPx * 0.52 + pad;
+      const pad = 8;
+      let rx0 = drawX - textW * 0.5 - pad;
+      let ry0 = drawY - wordFontPx * 0.52 - pad;
+      let rx1 = drawX + textW * 0.5 + pad;
+      let ry1 = drawY + wordFontPx * 0.52 + pad;
 
+      // Gently nudge stacked fast-tempo words vertically before falling back to skip
       let overlaps = false;
-      for (let d = 0; d < drawnCount; d++) {
-        const o = d * 4;
-        if (
-          rx0 < this.drawnWordRects[o + 2] &&
-          rx1 > this.drawnWordRects[o] &&
-          ry0 < this.drawnWordRects[o + 3] &&
-          ry1 > this.drawnWordRects[o + 1]
-        ) {
-          overlaps = true;
-          break;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        overlaps = false;
+        for (let d = 0; d < drawnCount; d++) {
+          const o = d * 4;
+          if (
+            rx0 < this.drawnWordRects[o + 2] &&
+            rx1 > this.drawnWordRects[o] &&
+            ry0 < this.drawnWordRects[o + 3] &&
+            ry1 > this.drawnWordRects[o + 1]
+          ) {
+            overlaps = true;
+            break;
+          }
+        }
+        if (!overlaps) break;
+        const nudge = (attempt + 1) * (wordFontPx * 0.92 + 10);
+        const altY = attempt % 2 === 0 ? drawY - nudge : drawY + nudge;
+        if (altY >= minY && altY <= maxY) {
+          drawY = altY;
+          rx0 = drawX - textW * 0.5 - pad;
+          ry0 = drawY - wordFontPx * 0.52 - pad;
+          rx1 = drawX + textW * 0.5 + pad;
+          ry1 = drawY + wordFontPx * 0.52 + pad;
         }
       }
       if (overlaps) continue;

@@ -19,6 +19,16 @@ export interface ElectronAPI {
   setTrayBehavior: (behavior: { minimizeToTray?: boolean; closeToTray?: boolean }) => Promise<void>;
   onMediaCommand: (callback: (command: 'toggle-playback' | 'next-track' | 'prev-track') => void) => () => void;
   fetch: (url: string, options?: Record<string, any>) => Promise<ElectronFetchResult>;
+  searchNetEaseLyrics: (payload: {
+    title: string;
+    artist?: string;
+    durationSec?: number;
+  }) => Promise<{ syncedLyrics: string | null; plainLyrics: string | null }>;
+  searchKugouLyrics: (payload: {
+    title: string;
+    artist?: string;
+    durationSec?: number;
+  }) => Promise<{ syncedLyrics: string | null; plainLyrics: string | null }>;
   searchAutoEq: (query: string, limit?: number) => Promise<any[]>;
   findAutoEqProfile: (nameOrId: string) => Promise<any | null>;
   getAutoEqStatus: () => Promise<any>;
@@ -133,6 +143,10 @@ const electronAPI: ElectronAPI = {
   },
   fetch: (url: string, options?: Record<string, any>) =>
     ipcRenderer.invoke('network-fetch', { url, options }),
+  searchNetEaseLyrics: (payload: { title: string; artist?: string; durationSec?: number }) =>
+    ipcRenderer.invoke('lyrics:neteaseSearch', payload),
+  searchKugouLyrics: (payload: { title: string; artist?: string; durationSec?: number }) =>
+    ipcRenderer.invoke('lyrics:kugouSearch', payload),
   searchAutoEq: (query: string, limit?: number) =>
     ipcRenderer.invoke('autoeq-search', query, limit),
   findAutoEqProfile: (nameOrId: string) =>

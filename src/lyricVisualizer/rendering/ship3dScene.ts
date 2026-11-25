@@ -21,9 +21,10 @@ const ASTEROID_VARIANTS = 7;
 const DEBRIS_COUNT = 220;
 const TRAIL_SEGMENTS = 36;
 const SHOCKWAVE_POOL = 6;
-const SPLASH_DROPLET_POOL = 96;
-const WORD_FLASH_POOL = 12;
-const GATE_POOL = 18;
+const SPLASH_DROPLET_POOL = 192;
+const WORD_FLASH_POOL = 48;
+const GATE_POOL = 36;
+const STAGGER_QUEUE_SIZE = 16;
 const SPARK_POOL = 72;
 const LASER_POOL = 8;
 const SHARD_POOL = 28;
@@ -655,6 +656,7 @@ function createSplashDropletMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
+    depthTest: false,
     blending: THREE.AdditiveBlending,
     vertexColors: true,
     uniforms: {
@@ -850,6 +852,11 @@ export class Ship3DScene {
   private readonly splashDroplets = new Float32Array(SPLASH_DROPLET_POOL * 11);
   private splashCursor = 0;
 
+  // Pre-allocated stagger queue for dense fast-tempo multi-word bursts (zero allocations)
+  private readonly staggerWordIndices = new Int32Array(STAGGER_QUEUE_SIZE).fill(-1);
+  private readonly staggerDelays = new Float32Array(STAGGER_QUEUE_SIZE);
+  private staggerCount = 0;
+
   // Software fallback spark / laser pools (zero allocations)
   private readonly swSparks = new Float32Array(SPARK_POOL * 6); // x, y, z, vx, vy, life
   private readonly swLasers = new Float32Array(LASER_POOL * 4); // active, x, y, z
@@ -915,6 +922,8 @@ export class Ship3DScene {
   private currentActiveWord = -1;
   private isInstrumental = false;
   private lastCollectedWordKey = -1;
+  private prevLyricTime = -1;
+  private contentInsetLeft = 0;
   private lastNearMissAsteroid = -1;
   private nearMissCooldown = 0;
 
@@ -1063,7 +1072,16 @@ export class Ship3DScene {
     const w = 0.78 * this.currentBpmFactor;
     const amp = this.currentReduceMotion ? 0.25 : 1.0;
     const semY = this.computeSemanticVertical(time, 0);
-    target.x = amp * (3.65 * Math.sin(w * time) + 1.15 * Math.sin(w * 0.47 * time + 0.85));
+    let rawX = amp * (3.65 * Math.sin(w * time) + 1.15 * Math.sin(w * 0.47 * time + 0.85));
+    // Clamp negative X excursion in Split View so the left wingtip & contrail stay right of contentInsetLeft
+    if (this.contentInsetLeft > 2 && this.width > 1) {
+      const splitRatio = Math.min(0.62, this.contentInsetLeft / this.width);
+      const minSplitX = -4.2 + splitRatio * 4.1;
+      if (rawX < minSplitX) {
+        rawX = minSplitX + (rawX - minSplitX) * 0.18;
+      }
+    }
+    target.x = rawX;
     target.y =
       SHIP_BASE_Y +
       amp * (0.48 * Math.sin(w * 0.65 * time + 0.35) + 0.18 * Math.cos(w * 1.11 * time) + semY);
@@ -1226,6 +1244,10 @@ export class Ship3DScene {
       this.cachedLyricsRef = lyrics;
       this.precomputedWords = [];
       this.lastCollectedWordKey = -1;
+      this.prevLyricTime = -1;
+      this.staggerWordIndices.fill(-1);
+      this.staggerDelays.fill(0);
+      this.staggerCount = 0;
       this.score = 0;
       this.combo = 0;
       this.nearMissCount = 0;
@@ -1262,6 +1284,10 @@ export class Ship3DScene {
 
     if (didSeekThisFrame) {
       this.lastCollectedWordKey = -1;
+      this.prevLyricTime = -1;
+      this.staggerWordIndices.fill(-1);
+      this.staggerDelays.fill(0);
+      this.staggerCount = 0;
       this.wordPop = 0;
       this.collectFlash = 0;
       this.collectLunge = 0;
@@ -2065,10 +2091,12 @@ export class Ship3DScene {
         opacity: 0,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        depthTest: false,
         side: THREE.DoubleSide,
       });
       const smesh = new THREE.Mesh(shockGeom, smat);
       smesh.visible = false;
+      smesh.renderOrder = 24;
       scene.add(smesh);
       shockwaveMeshes.push(smesh);
       shockwaveMats.push(smat);
@@ -2087,6 +2115,7 @@ export class Ship3DScene {
     const splashMat = createSplashDropletMaterial();
     const splashPoints = new THREE.Points(splashGeom, splashMat);
     splashPoints.frustumCulled = false;
+    splashPoints.renderOrder = 25;
     scene.add(splashPoints);
     disposables.push(splashGeom, splashMat);
 
@@ -2477,6 +2506,10 @@ export class Ship3DScene {
     this.combo = 0;
     this.nearMissCount = 0;
     this.lastCollectedWordKey = -1;
+    this.prevLyricTime = -1;
+    this.staggerWordIndices.fill(-1);
+    this.staggerDelays.fill(0);
+    this.staggerCount = 0;
     this.wordPop = 0;
     this.collectFlash = 0;
     this.collectLunge = 0;
@@ -3038,12 +3071,22 @@ export class Ship3DScene {
 
     const trailBright = isOverlayMode ? 0.55 : 0.88;
     const isRainbow = this.rainbowTimer > 0;
+    const hasSplitClip = this.contentInsetLeft > 2 && width > 1;
+    const splitFadeStart = this.contentInsetLeft + 10;
     for (let s = 0; s < TRAIL_SEGMENTS; s++) {
       const tNorm = 1 - s / (TRAIL_SEGMENTS - 1);
       const halfW = (0.042 + Math.min(0.04, Math.abs(this.shipVx) * 0.03)) * tNorm * (1 + this.warpSurge * 0.45);
-      const fade = tNorm * tNorm * trailBright;
       const ho = s * 3;
       const vo = s * 6;
+
+      let portFade = tNorm * tNorm * trailBright;
+      if (hasSplitClip) {
+        this.tmpVecC
+          .set(st.portTrailHistory[ho], st.portTrailHistory[ho + 1], st.portTrailHistory[ho + 2])
+          .project(st.camera);
+        const ptScreenX = (this.tmpVecC.x * 0.5 + 0.5) * width;
+        portFade *= Math.max(0, Math.min(1, (ptScreenX - splitFadeStart) / 36));
+      }
 
       st.portTrailPositions[vo] = st.portTrailHistory[ho];
       st.portTrailPositions[vo + 1] = st.portTrailHistory[ho + 1] + halfW;
@@ -3052,14 +3095,14 @@ export class Ship3DScene {
       st.portTrailPositions[vo + 4] = st.portTrailHistory[ho + 1] - halfW;
       st.portTrailPositions[vo + 5] = st.portTrailHistory[ho + 2];
 
-      let pr = (0.95 * 0.55 + this.tmpColorA.r * 0.45) * fade;
-      let pg = (0.24 * 0.55 + this.tmpColorA.g * 0.45) * fade;
-      let pb = (0.38 * 0.55 + this.tmpColorA.b * 0.45) * fade;
+      let pr = (0.95 * 0.55 + this.tmpColorA.r * 0.45) * portFade;
+      let pg = (0.24 * 0.55 + this.tmpColorA.g * 0.45) * portFade;
+      let pb = (0.38 * 0.55 + this.tmpColorA.b * 0.45) * portFade;
       if (isRainbow) {
         this.tmpColorC.setHSL((timeSeconds * 0.9 + s * 0.04) % 1, 0.95, 0.6);
-        pr = this.tmpColorC.r * fade;
-        pg = this.tmpColorC.g * fade;
-        pb = this.tmpColorC.b * fade;
+        pr = this.tmpColorC.r * portFade;
+        pg = this.tmpColorC.g * portFade;
+        pb = this.tmpColorC.b * portFade;
       }
       st.portTrailColors[vo] = pr;
       st.portTrailColors[vo + 1] = pg;
@@ -3068,6 +3111,15 @@ export class Ship3DScene {
       st.portTrailColors[vo + 4] = pg;
       st.portTrailColors[vo + 5] = pb;
 
+      let stbdFade = tNorm * tNorm * trailBright;
+      if (hasSplitClip) {
+        this.tmpVecC
+          .set(st.stbdTrailHistory[ho], st.stbdTrailHistory[ho + 1], st.stbdTrailHistory[ho + 2])
+          .project(st.camera);
+        const stScreenX = (this.tmpVecC.x * 0.5 + 0.5) * width;
+        stbdFade *= Math.max(0, Math.min(1, (stScreenX - splitFadeStart) / 36));
+      }
+
       st.stbdTrailPositions[vo] = st.stbdTrailHistory[ho];
       st.stbdTrailPositions[vo + 1] = st.stbdTrailHistory[ho + 1] + halfW;
       st.stbdTrailPositions[vo + 2] = st.stbdTrailHistory[ho + 2];
@@ -3075,14 +3127,14 @@ export class Ship3DScene {
       st.stbdTrailPositions[vo + 4] = st.stbdTrailHistory[ho + 1] - halfW;
       st.stbdTrailPositions[vo + 5] = st.stbdTrailHistory[ho + 2];
 
-      let sr = (0.14 * 0.5 + this.tmpColorA.r * 0.5) * fade;
-      let sg = (0.85 * 0.5 + this.tmpColorA.g * 0.5) * fade;
-      let sb = (0.95 * 0.5 + this.tmpColorA.b * 0.5) * fade;
+      let sr = (0.14 * 0.5 + this.tmpColorA.r * 0.5) * stbdFade;
+      let sg = (0.85 * 0.5 + this.tmpColorA.g * 0.5) * stbdFade;
+      let sb = (0.95 * 0.5 + this.tmpColorA.b * 0.5) * stbdFade;
       if (isRainbow) {
         this.tmpColorC.setHSL((timeSeconds * 0.9 + 0.5 + s * 0.04) % 1, 0.95, 0.6);
-        sr = this.tmpColorC.r * fade;
-        sg = this.tmpColorC.g * fade;
-        sb = this.tmpColorC.b * fade;
+        sr = this.tmpColorC.r * stbdFade;
+        sg = this.tmpColorC.g * stbdFade;
+        sb = this.tmpColorC.b * stbdFade;
       }
       st.stbdTrailColors[vo] = sr;
       st.stbdTrailColors[vo + 1] = sg;
@@ -3578,8 +3630,10 @@ export class Ship3DScene {
     variationId?: string,
     backgroundOpacity?: number,
     focalCenterX?: number,
-    hasWebGlBackdrop = false
+    hasWebGlBackdrop = false,
+    contentInsetLeft = 0
   ): void {
+    this.contentInsetLeft = Number.isFinite(contentInsetLeft) ? Math.max(0, contentInsetLeft) : 0;
     if (variationId !== undefined || backgroundOpacity !== undefined) {
       setShip3DSceneHint(variationId, backgroundOpacity);
     }
@@ -3756,31 +3810,88 @@ export class Ship3DScene {
     }
 
     // Build upcoming 3D Lyric Word Anchors directly along the ship's nose centerline
+    // Interval-sweep + micro-stagger queue guarantees zero skipped words at 180+ BPM
     this.gateProjectionCount = 0;
     const lyricT = this.currentLyricTime;
+    const prevT = this.prevLyricTime;
+    this.prevLyricTime = lyricT;
 
     if (!this.isInstrumental && this.precomputedWords.length > 0) {
+      // Drain queued fast-burst word splashes with 30ms stagger
+      for (let q = 0; q < STAGGER_QUEUE_SIZE; q++) {
+        const wIdx = this.staggerWordIndices[q];
+        if (wIdx < 0) continue;
+        this.staggerDelays[q] -= rawDt;
+        if (this.staggerDelays[q] <= 0) {
+          this.staggerWordIndices[q] = -1;
+          this.staggerDelays[q] = 0;
+          if (this.staggerCount > 0) this.staggerCount--;
+          if (wIdx < this.precomputedWords.length) {
+            const qw = this.precomputedWords[wIdx];
+            this.lastCollectedWordKey = qw.key;
+            this.triggerWordCollection(qw, SHIP_NOSE_Z, reduceMotion, palette);
+          }
+        }
+      }
+
+      const sweepStart =
+        prevT >= 0 && lyricT > prevT && lyricT - prevT < 1.5 ? prevT : lyricT - 0.04;
+      let triggeredInFrame = 0;
+      let lastProjStart = -1;
+      let lastProjZ = 0;
+      let fastAltIdx = 0;
+
       for (let i = 0; i < this.precomputedWords.length; i++) {
         const w = this.precomputedWords[i];
         const dtToWord = w.startSeconds - lyricT;
-        if (dtToWord < -0.38) continue;
+        if (dtToWord < -0.45) continue;
         if (dtToWord > GATE_LOOKAHEAD_SEC) break;
 
-        const wordZ = SHIP_NOSE_Z - dtToWord * GATE_TRAVEL_SPEED;
+        let wordZ = SHIP_NOSE_Z - dtToWord * GATE_TRAVEL_SPEED;
 
-        // Detect exact moment the ship's nose flies straight through the center of the word
-        if (dtToWord <= 0.025 && dtToWord >= -0.18 && w.key !== this.lastCollectedWordKey) {
-          this.lastCollectedWordKey = w.key;
-          this.triggerWordCollection(w, wordZ, reduceMotion, palette);
+        // Interval-sweep collision detection: never misses fast consecutive words between frames
+        const inSweep = w.startSeconds > sweepStart && w.startSeconds <= lyricT;
+        const inNoseWindow = dtToWord <= 0.025 && dtToWord >= -0.18;
+        if ((inSweep || inNoseWindow) && w.key !== this.lastCollectedWordKey) {
+          if (triggeredInFrame === 0) {
+            this.lastCollectedWordKey = w.key;
+            this.triggerWordCollection(w, wordZ, reduceMotion, palette);
+          } else {
+            // Queue simultaneous burst word with 30ms stagger so each splashes cleanly
+            for (let slot = 0; slot < STAGGER_QUEUE_SIZE; slot++) {
+              if (this.staggerWordIndices[slot] === i) break;
+              if (this.staggerWordIndices[slot] < 0) {
+                this.staggerWordIndices[slot] = i;
+                this.staggerDelays[slot] = triggeredInFrame * 0.03;
+                this.staggerCount++;
+                break;
+              }
+            }
+          }
+          triggeredInFrame++;
         }
 
         if (this.gateProjectionCount < GATE_POOL) {
+          const isTightCluster = lastProjStart >= 0 && w.startSeconds - lastProjStart < 0.22;
+          if (isTightCluster) {
+            wordZ = Math.min(wordZ, lastProjZ - 4.5);
+            fastAltIdx++;
+          } else {
+            fastAltIdx = 0;
+          }
+          lastProjStart = w.startSeconds;
+          lastProjZ = wordZ;
+
           const gp = this.gateProjections[this.gateProjectionCount++];
           const anchor = this.getFlightPosition(w.startSeconds, this.tmpFlightPos);
           const mergeFlash = this.getWordMergeFlash(w.key);
+          const fastXOff = isTightCluster ? ((fastAltIdx & 1) === 0 ? 1 : -1) * 0.28 : 0;
+          const fastYOff = isTightCluster ? (fastAltIdx % 2) * 0.22 : 0;
+          const elevLift = 0.45 * Math.max(0, Math.min(1, dtToWord / 0.8));
+
           gp.text = w.text;
-          gp.worldX = anchor.x;
-          gp.worldY = anchor.y;
+          gp.worldX = anchor.x + fastXOff;
+          gp.worldY = anchor.y + elevLift + fastYOff;
           gp.worldZ = wordZ;
           gp.lineIndex = w.lineIndex;
           gp.wordIndex = w.wordIndex;
@@ -3790,9 +3901,9 @@ export class Ship3DScene {
           if (wordZ >= 5.2) {
             gp.alpha = 0;
           } else if (dtToWord < 0) {
-            gp.alpha = Math.max(0, Math.min(1, 1.0 + dtToWord / 0.24));
+            gp.alpha = Math.max(0, Math.min(1, 1.0 + dtToWord / 0.45));
           } else {
-            gp.alpha = Math.max(0, Math.min(1, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.65));
+            gp.alpha = Math.max(0.08, Math.min(1, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.65));
           }
           const invZ = 1.0 / Math.max(0.4, 6.2 - gp.worldZ);
           gp.screenX = cx + (gp.worldX - this.shipX * 0.12) * fallbackFocal * invZ;

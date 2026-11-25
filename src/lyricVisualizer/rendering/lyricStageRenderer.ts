@@ -979,7 +979,8 @@ export class LyricStageRenderer {
         this.frameContext.variationId,
         this.frameContext.backgroundOpacity,
         focalCenterX,
-        this.frameContext.hasWebGlBackdrop
+        this.frameContext.hasWebGlBackdrop,
+        this.currentContentInsetLeft
       );
     } else {
       this.ship3dScene.clear();

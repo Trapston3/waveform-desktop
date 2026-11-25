@@ -3,6 +3,7 @@
 
 import { useEffect, useRef } from 'react';
 import { isDeadOrStaleRestoredStreamUrl } from '../../audio/AudioEngine';
+import { TransitionProcessor } from '../../audio/TransitionProcessor';
 import { getSharedWaveFormPlaybackBridge } from '../../lyricVisualizer/bridge/waveFormPlaybackBridge';
 import { useLyricVisualizerStore } from '../../lyricVisualizer/state/lyricVisualizerStore';
 import { MlAudioService } from '../../services/MlAudioService';
@@ -638,6 +639,138 @@ export function useAudioController() {
       cancelled = true;
     };
   }, [currentTrack?.videoId, currentTrack?.streamUrl, currentTrack?.localFilePath]);
+
+  // 8. Dual-deck Auto-Mix lookahead & beat-matched / vocal-aware smart crossfade
+  useEffect(() => {
+    if (playbackState !== 'PLAYING' || !currentTrack?.videoId) return;
+
+    let cancelled = false;
+    let preloadedPairKey: string | null = null;
+    let standbyReadyPairKey: string | null = null;
+    let triggeredTrackId: string | null = null;
+    let inFlightPreload = false;
+    let cachedOutgoingBeats: Awaited<ReturnType<typeof MlAudioService.getCachedTrackBeats>> | null = null;
+    let cachedIncomingBeats: Awaited<ReturnType<typeof MlAudioService.getCachedTrackBeats>> | null = null;
+
+    const peekNextTrack = () => {
+      const q = useQueueStore.getState();
+      const { repeatMode } = usePlayerStore.getState();
+      if (repeatMode === 'one') return null;
+      if (q.tiers.USER_QUEUE.length > 0) return q.tiers.USER_QUEUE[0];
+      if (q.tiers.CONTEXT.length > 0) {
+        const nextIdx = q.currentIndex + 1;
+        if (nextIdx < q.tiers.CONTEXT.length) return q.tiers.CONTEXT[nextIdx];
+        if (repeatMode === 'all') return q.tiers.CONTEXT[0];
+      }
+      if (q.autoplayEnabled && q.tiers.AUTOPLAY.length > 0) {
+        return q.tiers.AUTOPLAY[0];
+      }
+      return null;
+    };
+
+    const timer = setInterval(async () => {
+      if (cancelled) return;
+      const settings = useSettingsStore.getState().settings;
+      if (!settings['playback.automixEnabled']) return;
+      const mode = settings['playback.automixMode'] || 'neural_beat';
+      if (mode === 'gapless') return;
+
+      const player = usePlayerStore.getState();
+      const engine = player.audioEngine;
+      if (!engine || player.playbackState !== 'PLAYING' || player.isCrossfading) return;
+
+      const nextSong = peekNextTrack();
+      if (!nextSong || !nextSong.videoId || nextSong.videoId === currentTrack.videoId) return;
+
+      const durMs = player.durationMs || (currentTrack.durationSec ? currentTrack.durationSec * 1000 : 0);
+      const posMs = engine.getCurrentPositionMs();
+      if (durMs <= 20000 || posMs <= 0) return;
+
+      const durationSec = durMs / 1000;
+      const positionSec = posMs / 1000;
+      const remainingSec = durationSec - positionSec;
+      const pairKey = `${currentTrack.videoId}->${nextSong.videoId}`;
+
+      // ~18s prior to end: resolve stream and preload incoming song onto standby deck
+      if (remainingSec <= 18 && preloadedPairKey !== pairKey && !inFlightPreload) {
+        inFlightPreload = true;
+        preloadedPairKey = pairKey;
+        try {
+          let readySong = nextSong;
+          if (!readySong.streamUrl && !readySong.localFilePath) {
+            const resolver = new StreamResolver();
+            const resolved = await resolver.resolve(
+              nextSong.videoId,
+              nextSong.title,
+              nextSong.artist,
+              nextSong.durationSec
+            );
+            if (cancelled) return;
+            if (resolved?.url) {
+              readySong = {
+                ...nextSong,
+                streamUrl: resolved.url,
+                sourceQuality: resolved.quality || nextSong.sourceQuality,
+              };
+            }
+          }
+          if (readySong.streamUrl || readySong.localFilePath) {
+            await engine.loadTrack(readySong as any, 'standby');
+            if (cancelled) return;
+            standbyReadyPairKey = pairKey;
+            if (mode === 'neural_beat') {
+              cachedOutgoingBeats = await MlAudioService.getCachedTrackBeats(currentTrack.videoId);
+              cachedIncomingBeats = await MlAudioService.getCachedTrackBeats(nextSong.videoId);
+            }
+          }
+        } catch {
+          standbyReadyPairKey = null;
+        } finally {
+          inFlightPreload = false;
+        }
+      }
+
+      if (standbyReadyPairKey !== pairKey || triggeredTrackId === currentTrack.videoId) return;
+
+      const rawOverlap = Number(settings['playback.automixOverlapSec']) || 6;
+      const overlapSec = Math.max(2, Math.min(12, rawOverlap));
+      const avoidVocals = settings['playback.automixAvoidVocalOverlap'] !== false;
+      let triggerSec = Math.max(5, durationSec - overlapSec);
+
+      if (mode === 'neural_beat' && cachedOutgoingBeats?.downbeats?.length) {
+        const window = TransitionProcessor.findBestDownbeatTransitionWindow(
+          cachedOutgoingBeats.downbeats,
+          durationSec,
+          cachedIncomingBeats?.downbeats ?? [],
+          settings['playback.automixTransitionBars'] || 4,
+          avoidVocals ? cachedOutgoingBeats.vocalSilenceRanges : [],
+          cachedOutgoingBeats.bpm || 120
+        );
+        triggerSec = Math.min(durationSec - 2.0, Math.max(durationSec * 0.55, window.outgoingStartSec));
+      }
+
+      if (positionSec >= triggerSec) {
+        triggeredTrackId = currentTrack.videoId;
+        player.setAutoMixStatus(true, nextSong.title);
+        try {
+          await engine.crossfade('standby', overlapSec * 1000);
+          if (!cancelled) {
+            useQueueStore.getState().advanceQueue({ skipLoad: true });
+          }
+        } catch {
+          // Non-fatal: natural track-end listener handles fallback queue advance
+        } finally {
+          usePlayerStore.getState().setAutoMixStatus(false, null);
+        }
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      usePlayerStore.getState().setAutoMixStatus(false, null);
+    };
+  }, [playbackState, currentTrack?.videoId]);
 
   return {
     play: usePlayerStore.getState().play,

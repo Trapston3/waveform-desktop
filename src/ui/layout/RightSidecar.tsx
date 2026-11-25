@@ -17,6 +17,7 @@ import {
   ListPlus,
   Radio,
   Check,
+  Sparkles,
 } from 'lucide-react';
 import { ArtistCredits } from '../common/ArtistCredits';
 import { usePlayerStore } from '../../state/playerStore';
@@ -24,6 +25,7 @@ import { useQueueStore, type QueueTierType } from '../../state/queueStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { useLyricsStore } from '../../state/lyricsStore';
 import { useNavigationStore } from '../../state/navigationStore';
+import { useSettingsStore } from '../../state/settingsStore';
 import { useThemeStore } from '../theme/Theme';
 import { SyllableLyricsEngine } from '../player/SyllableLyricsEngine';
 import type { Song } from '../../models/Song';
@@ -100,6 +102,9 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
 
   const storeTrack = usePlayerStore((s) => s.currentTrack);
   const seek = usePlayerStore((s) => s.seek);
+  const autoMixStatus = usePlayerStore((s) => s.autoMixStatus);
+  const automixEnabled = useSettingsStore((s) => s.settings['playback.automixEnabled']);
+  const updateSettings = useSettingsStore((s) => s.updateSettings);
   const artworkPalette = useThemeStore((s) => s.artworkPalette);
 
   const activeTrack =
@@ -362,6 +367,21 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
               <div className="flex items-center gap-1">
                 <button
                   type="button"
+                  onClick={() =>
+                    void updateSettings({ 'playback.automixEnabled': !automixEnabled })
+                  }
+                  title={automixEnabled ? 'Auto-Mix On' : 'Auto-Mix Off'}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold transition-colors cursor-pointer ${
+                    automixEnabled
+                      ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)] border border-[var(--color-accent)]/40'
+                      : 'bg-white/5 text-[var(--color-on-surface-variant)] hover:text-white'
+                  }`}
+                >
+                  <Sparkles size={11} />
+                  <span>Auto-Mix</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => toggleAutoplay()}
                   title={autoplayEnabled ? 'Autoplay Radio On' : 'Autoplay Radio Off'}
                   className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold transition-colors cursor-pointer ${
@@ -400,6 +420,15 @@ export const RightSidecar: React.FC<RightSidecarProps> = memo(({
                 </button>
               </div>
             </div>
+
+            {autoMixStatus?.active && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/40 text-[11px] font-semibold text-white animate-pulse">
+                <Sparkles size={12} className="text-[var(--color-accent)] shrink-0" />
+                <span className="truncate">
+                  Mixing into {autoMixStatus.targetTitle || 'next track'}...
+                </span>
+              </div>
+            )}
 
             {/* Current Playing Item Card */}
             {currentPlaying && (

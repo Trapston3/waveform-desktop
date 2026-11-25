@@ -113,6 +113,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
   const [isFollowingPlayback, setIsFollowingPlayback] = useState(true);
   const [isHoveringLine, setIsHoveringLine] = useState(false);
   const [isDraggingStage, setIsDraggingStage] = useState(false);
+  const [isPlainUnsynced, setIsPlainUnsynced] = useState(false);
   const [liveBpm, setLiveBpm] = useState<number | undefined>(undefined);
   const lastBpmRef = useRef<number | undefined>(undefined);
   const dragStateRef = useRef<{
@@ -228,6 +229,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       if (config.sandboxEnabled) {
         lastTrackIdRef.current = STARLIGHT_HARBOR_TRACK.id;
         activeLyricsRef.current = STARLIGHT_HARBOR_LYRICS;
+        setIsPlainUnsynced(false);
         setActiveTrack(STARLIGHT_HARBOR_TRACK);
         setActiveLyrics(STARLIGHT_HARBOR_LYRICS);
         setCurrentSongKey(STARLIGHT_HARBOR_TRACK.id).catch(() => {});
@@ -242,12 +244,14 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       if (trackChanged) {
         lastTrackIdRef.current = nextTrackId;
         activeLyricsRef.current = null;
+        setIsPlainUnsynced(false);
         rendererRef.current?.setLyrics(null);
       }
 
       setActiveTrack(track);
       if (!track) {
         activeLyricsRef.current = null;
+        setIsPlainUnsynced(false);
         setActiveLyrics(null);
         setCurrentSongKey(null).catch(() => {});
         rendererRef.current?.setLyrics(null);
@@ -266,6 +270,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
       if (storeLyrics && storeLyrics.lines.length > 0) {
         activeLyricsRef.current = storeLyrics;
+        setIsPlainUnsynced(storeLyrics.sourceKind === 'Unsynced');
         setActiveLyrics(storeLyrics);
         rendererRef.current?.setLyrics(storeLyrics);
       } else if (pipelineRef.current) {
@@ -275,6 +280,7 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
         );
         if (!abortController.signal.aborted && lastTrackIdRef.current === track.id) {
           activeLyricsRef.current = resolved;
+          setIsPlainUnsynced(resolved?.sourceKind === 'Unsynced');
           setActiveLyrics(resolved);
           rendererRef.current?.setLyrics(resolved);
         }
@@ -695,6 +701,35 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
           )}
           <span>{syncTheme.label}</span>
         </button>
+      )}
+
+      {/* Plain unsynced lyrics fallback notice inside Visualizer */}
+      {isPlainUnsynced && !config.sandboxEnabled && !isOverlayMode && (
+        <div
+          data-testid="visualizer-plain-lyrics-notice"
+          style={{
+            left:
+              contentInsetLeft > 2
+                ? `calc(${Math.round(contentInsetLeft)}px + (100% - ${Math.round(contentInsetLeft)}px) / 2)`
+                : '50%',
+            transform: 'translate(-50%, -50%)',
+          }}
+          className="absolute top-1/2 z-20 flex flex-col items-center gap-3 px-6 py-5 rounded-2xl bg-black/55 border border-white/15 backdrop-blur-xl text-center shadow-2xl"
+        >
+          <p className="text-sm font-semibold text-white">No synced lyrics available</p>
+          <p className="text-xs text-white/65 max-w-xs">
+            Only plain text lyrics were found for this track.
+          </p>
+          {onSwitchToClassic && (
+            <button
+              type="button"
+              onClick={onSwitchToClassic}
+              className="px-3.5 py-1.5 rounded-full bg-white text-black text-xs font-bold hover:scale-[1.03] active:scale-[0.97] transition-all cursor-pointer"
+            >
+              View Plain Lyrics
+            </button>
+          )}
+        </div>
       )}
 
       {/* Small clear Sandbox Demo badge when Sandbox mode is active */}

@@ -56,7 +56,7 @@ export interface QueueActions {
   moveTrack: (tier: QueueTierType, fromIndex: number, toIndex: number) => void;
 
   // Queue Traversal (The Core Dispatch Algorithm)
-  advanceQueue: () => Song | null;
+  advanceQueue: (options?: any) => Song | null;
   previousTrack: () => Song | null;
   jumpToTrack: (tier: QueueTierType, index: number) => Song | null;
   setCurrentSong: (song: Song | null) => void;
@@ -313,9 +313,23 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
     });
   },
 
-  advanceQueue: (): Song | null => {
+  advanceQueue: (options?: any): Song | null => {
     const { tiers, currentSong, history, currentIndex } = get();
     const { repeatMode } = usePlayerStore.getState();
+    const skipLoad = Boolean(options && typeof options === 'object' && 'skipLoad' in options && options.skipLoad);
+
+    const applyNextTrack = (nextSong: Song) => {
+      if (skipLoad) {
+        usePlayerStore.setState({
+          currentTrack: nextSong,
+          activeStreamQuality: nextSong.sourceQuality || null,
+          playbackState: 'PLAYING',
+          positionMs: 0,
+        });
+      } else {
+        usePlayerStore.getState().loadTrack(nextSong, 'active', true);
+      }
+    };
 
     // Push previous song to history if valid
     const nextHistory = currentSong ? [currentSong, ...history].slice(0, 50) : history;
@@ -339,7 +353,7 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
         currentTier: 'USER_QUEUE',
         history: nextHistory,
       });
-      usePlayerStore.getState().loadTrack(nextSong, 'active', true);
+      applyNextTrack(nextSong);
       return nextSong;
     }
 
@@ -354,7 +368,7 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
           currentIndex: nextIndex,
           history: nextHistory,
         });
-        usePlayerStore.getState().loadTrack(nextSong, 'active', true);
+        applyNextTrack(nextSong);
         return nextSong;
       } else if (repeatMode === 'all') {
         // Loop back to beginning of context
@@ -365,7 +379,7 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
           currentIndex: 0,
           history: nextHistory,
         });
-        usePlayerStore.getState().loadTrack(nextSong, 'active', true);
+        applyNextTrack(nextSong);
         return nextSong;
       }
     }
@@ -382,7 +396,7 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
         currentTier: 'AUTOPLAY',
         history: nextHistory,
       });
-      usePlayerStore.getState().loadTrack(nextSong, 'active', true);
+      applyNextTrack(nextSong);
       if (remainingAutoplay.length <= 2) {
         void get().refreshAutoplayRadio(nextSong, true);
       }

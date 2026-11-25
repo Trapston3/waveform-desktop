@@ -39,15 +39,28 @@ function main() {
     .map((e) => e.name)
     .sort((a, b) => a.localeCompare(b));
 
-  if (exeFiles.length === 0) {
-    console.error(`[generate-checksums] No .exe artifacts found in ${releaseDir}`);
+  const checksumTargets = entries
+    .filter((e) => {
+      if (!e.isFile()) return false;
+      const lower = e.name.toLowerCase();
+      if (lower.endsWith('.exe') && !e.name.includes('__uninstaller')) return true;
+      if (lower.endsWith('.msi')) return true;
+      if (/^waveform-apppatch-.*\.zip$/i.test(e.name)) return true;
+      if (lower === 'install-manifest.tsv') return true;
+      return false;
+    })
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b));
+
+  if (checksumTargets.length === 0) {
+    console.error(`[generate-checksums] No release artifacts found in ${releaseDir}`);
     process.exit(1);
   }
 
   const sha256Lines = [];
   const metadataByFile = new Map();
 
-  for (const fileName of exeFiles) {
+  for (const fileName of checksumTargets) {
     const fullPath = path.join(releaseDir, fileName);
     const info = computeHashes(fullPath);
     metadataByFile.set(fileName, info);

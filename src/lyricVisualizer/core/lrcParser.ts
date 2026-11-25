@@ -224,14 +224,9 @@ export function parseLrc(raw: string, options: LrcParseOptions = {}): Lyrics | n
     if (unsyncedLines.length === 0) {
       return null;
     }
-    const fallbackDuration = Math.max(
-      unsyncedLines.length * 3,
-      options.trackDurationSeconds ?? unsyncedLines.length * 4,
-    );
-    const step = fallbackDuration / unsyncedLines.length;
-    const lines: LyricLine[] = unsyncedLines.map((text, idx) => ({
-      startSeconds: idx * step,
-      endSeconds: (idx + 1) * step,
+    const lines: LyricLine[] = unsyncedLines.map((text) => ({
+      startSeconds: 0,
+      endSeconds: 0,
       text,
       words: [],
       isSynthesizedWords: false,

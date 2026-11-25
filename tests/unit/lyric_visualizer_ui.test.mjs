@@ -356,11 +356,19 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
 
     const store = useLyricVisualizerStore.getState();
 
-    // 6a. 12 Consolidated Visual Styles (including CodeEditorKinetic), legacy migrations, & 8 Bundled Fonts
-    assert.strictEqual(VISUAL_STYLE_DEFINITIONS.length, 12);
+    // 6a. 14 Consolidated Visual Styles (including FisheyeKinetic & MotionGeometry), legacy migrations, & 8 Bundled Fonts
+    assert.strictEqual(VISUAL_STYLE_DEFINITIONS.length, 14);
     assert.ok(
       VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'IosTextingMotion'),
       'VISUAL_STYLE_DEFINITIONS must include IosTextingMotion'
+    );
+    assert.ok(
+      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'FisheyeKinetic'),
+      'VISUAL_STYLE_DEFINITIONS must include FisheyeKinetic'
+    );
+    assert.ok(
+      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'MotionGeometry'),
+      'VISUAL_STYLE_DEFINITIONS must include MotionGeometry'
     );
     assert.ok(
       VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'CodeEditorKinetic'),

@@ -631,6 +631,140 @@ ipcMain.handle('network-fetch', async (_event, payload: { url: string; options?:
   }
 });
 
+// NetEase Cloud Music synced LRC search (bypass CORS + Referer restrictions in main process)
+ipcMain.handle(
+  'lyrics:neteaseSearch',
+  async (
+    _event,
+    payload: { title?: string; artist?: string; durationSec?: number }
+  ): Promise<{ syncedLyrics: string | null; plainLyrics: string | null }> => {
+    const title = String(payload?.title || '').trim();
+    const artist = String(payload?.artist || '').trim();
+    const durationSec = typeof payload?.durationSec === 'number' ? payload.durationSec : 0;
+    if (!title) return { syncedLyrics: null, plainLyrics: null };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const q = `${title} ${artist}`.trim();
+      const searchRes = await fetch(
+        `https://music.163.com/api/search/get?s=${encodeURIComponent(q)}&type=1&limit=6`,
+        {
+          method: 'GET',
+          headers: {
+            Referer: 'https://music.163.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          },
+          signal: controller.signal,
+        }
+      );
+      if (!searchRes.ok) return { syncedLyrics: null, plainLyrics: null };
+      const searchJson: any = await searchRes.json();
+      const songs: any[] = searchJson?.result?.songs || [];
+      if (!Array.isArray(songs) || songs.length === 0) {
+        return { syncedLyrics: null, plainLyrics: null };
+      }
+
+      const best =
+        songs.find((s) => {
+          if (!s?.id) return false;
+          if (durationSec > 0 && typeof s.duration === 'number') {
+            return Math.abs(s.duration / 1000 - durationSec) <= 5;
+          }
+          return true;
+        }) || songs[0];
+
+      if (!best?.id) return { syncedLyrics: null, plainLyrics: null };
+      const lyricRes = await fetch(
+        `https://music.163.com/api/song/lyric?id=${best.id}&lv=1&tv=1`,
+        {
+          method: 'GET',
+          headers: {
+            Referer: 'https://music.163.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          },
+          signal: controller.signal,
+        }
+      );
+      if (!lyricRes.ok) return { syncedLyrics: null, plainLyrics: null };
+      const lyricJson: any = await lyricRes.json();
+      const rawLrc = typeof lyricJson?.lrc?.lyric === 'string' ? lyricJson.lrc.lyric.trim() : '';
+      const hasTimed = /\[\d{1,3}:\d{2}(?:\.\d{1,3})?\]/.test(rawLrc);
+      return {
+        syncedLyrics: hasTimed ? rawLrc : null,
+        plainLyrics: !hasTimed && rawLrc ? rawLrc : null,
+      };
+    } catch {
+      return { syncedLyrics: null, plainLyrics: null };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+);
+
+// Kugou Music synced LRC search (Base64-decoded LRC via main process)
+ipcMain.handle(
+  'lyrics:kugouSearch',
+  async (
+    _event,
+    payload: { title?: string; artist?: string; durationSec?: number }
+  ): Promise<{ syncedLyrics: string | null; plainLyrics: string | null }> => {
+    const title = String(payload?.title || '').trim();
+    const artist = String(payload?.artist || '').trim();
+    const durationMs =
+      typeof payload?.durationSec === 'number' && payload.durationSec > 0
+        ? Math.round(payload.durationSec * 1000)
+        : 0;
+    if (!title) return { syncedLyrics: null, plainLyrics: null };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const keyword = `${artist ? `${artist} - ` : ''}${title}`.trim();
+      const durQuery = durationMs > 0 ? `&duration=${durationMs}` : '';
+      const searchRes = await fetch(
+        `https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=${encodeURIComponent(keyword)}${durQuery}`,
+        {
+          method: 'GET',
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+          signal: controller.signal,
+        }
+      );
+      if (!searchRes.ok) return { syncedLyrics: null, plainLyrics: null };
+      const searchJson: any = await searchRes.json();
+      const candidates: any[] = searchJson?.candidates || [];
+      if (!Array.isArray(candidates) || candidates.length === 0) {
+        return { syncedLyrics: null, plainLyrics: null };
+      }
+
+      const best = candidates[0];
+      if (!best?.id || !best?.accesskey) return { syncedLyrics: null, plainLyrics: null };
+      const dlRes = await fetch(
+        `https://lyrics.kugou.com/download?ver=1&client=pc&id=${encodeURIComponent(String(best.id))}&accesskey=${encodeURIComponent(String(best.accesskey))}&fmt=lrc&charset=utf8`,
+        {
+          method: 'GET',
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+          signal: controller.signal,
+        }
+      );
+      if (!dlRes.ok) return { syncedLyrics: null, plainLyrics: null };
+      const dlJson: any = await dlRes.json();
+      const b64 = typeof dlJson?.content === 'string' ? dlJson.content.trim() : '';
+      if (!b64) return { syncedLyrics: null, plainLyrics: null };
+      const decoded = Buffer.from(b64, 'base64').toString('utf8').trim();
+      const hasTimed = /\[\d{1,3}:\d{2}(?:\.\d{1,3})?\]/.test(decoded);
+      return {
+        syncedLyrics: hasTimed ? decoded : null,
+        plainLyrics: !hasTimed && decoded ? decoded : null,
+      };
+    } catch {
+      return { syncedLyrics: null, plainLyrics: null };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+);
+
 // AutoEQ Database & Packaged Data Asset Resolution (`auto_eq.db`, `.onnx` models)
 export function resolveDataAssetCandidatePaths(filename: string): string[] {
   const safeName = path.basename(filename);

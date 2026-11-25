@@ -54,6 +54,8 @@ jobs:
           path: |
             release/WaveForm-Setup-*.exe
             release/WaveForm-Portable-*.exe
+            release/WaveForm-AppPatch-*.zip
+            release/install-manifest.tsv
             release/latest.yml
             release/SHA256SUMS.txt
           if-no-files-found: error
@@ -66,5 +68,7 @@ jobs:
           files: |
             release/WaveForm-Setup-*.exe
             release/WaveForm-Portable-*.exe
+            release/WaveForm-AppPatch-*.zip
+            release/install-manifest.tsv
             release/latest.yml
             release/SHA256SUMS.txt

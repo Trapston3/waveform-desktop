@@ -808,9 +808,12 @@ export class KaraokeProcessor {
 
   private sampleRate = 44100;
   private neuralBlend = 0;
-  private lpL = 0;
-  private hpL = 0;
-  private prevIn = 0;
+  private midLpA = 0;
+  private midLpB = 0;
+  private midHpA = 0;
+  private midHpB = 0;
+  private prevMid = 0;
+  private prevHpA = 0;
 
   constructor(sampleRate = 44100) {
     this.configure(sampleRate);
@@ -824,9 +827,12 @@ export class KaraokeProcessor {
 
   reset(): void {
     this.neuralBlend = 0;
-    this.lpL = 0;
-    this.hpL = 0;
-    this.prevIn = 0;
+    this.midLpA = 0;
+    this.midLpB = 0;
+    this.midHpA = 0;
+    this.midHpB = 0;
+    this.prevMid = 0;
+    this.prevHpA = 0;
   }
 
   process(
@@ -847,9 +853,11 @@ export class KaraokeProcessor {
     const leftOut = new Float32Array(len);
     const rightOut = new Float32Array(len);
 
-    // One-pole crossover coefficients isolating vocal formants (~220Hz - 4200Hz)
-    const hpAlpha = Math.exp((-2 * Math.PI * 220) / this.sampleRate);
-    const lpAlpha = 1 - Math.exp((-2 * Math.PI * 4200) / this.sampleRate);
+    // 2-stage phase-preserving 3-band Mid/Side crossover:
+    //   Side = 0.5*(L-R) (100% preserved in Karaoke)
+    //   MidLow (<180Hz) + MidHigh (>5500Hz) preserved; MidVocal (180..5500Hz) attenuated/isolated
+    const lp180Alpha = 1 - Math.exp((-2 * Math.PI * 180) / this.sampleRate);
+    const hp5500Alpha = Math.exp((-2 * Math.PI * 5500) / this.sampleRate);
     const hasStem = Boolean(vocalStem && vocalStem.left.length >= len && vocalStem.right.length >= len);
     const subScale = 1 - gain;
 
@@ -859,15 +867,31 @@ export class KaraokeProcessor {
       const mid = 0.5 * (l + r);
       const side = 0.5 * (l - r);
 
-      // Extract vocal-band component of center channel so kick/bass stays intact
-      const hp = hpAlpha * (this.hpL + mid - this.prevIn);
-      this.hpL = hp;
-      this.prevIn = mid;
-      this.lpL += lpAlpha * (hp - this.lpL);
-      const dspVocal = this.lpL;
+      this.midLpA += lp180Alpha * (mid - this.midLpA);
+      this.midLpB += lp180Alpha * (this.midLpA - this.midLpB);
+      const midLow = this.midLpB;
 
-      const dspL = this.isolateVocals ? dspVocal * gain : l - subScale * dspVocal;
-      const dspR = this.isolateVocals ? dspVocal * gain : r - subScale * dspVocal;
+      const hpA = hp5500Alpha * (this.midHpA + mid - this.prevMid);
+      this.midHpA = hpA;
+      this.prevMid = mid;
+      const hpB = hp5500Alpha * (this.midHpB + hpA - this.prevHpA);
+      this.midHpB = hpB;
+      this.prevHpA = hpA;
+      const midHigh = hpB;
+
+      const midEdges = midLow + midHigh;
+      const dspVocal = mid - midEdges;
+
+      let dspL: number;
+      let dspR: number;
+      if (this.isolateVocals) {
+        dspL = dspVocal * gain;
+        dspR = dspVocal * gain;
+      } else {
+        const outMid = subScale * midEdges + gain * mid;
+        dspL = outMid + side;
+        dspR = outMid - side;
+      }
 
       if (hasStem) {
         this.neuralBlend = Math.min(1, this.neuralBlend + 0.002);
@@ -880,11 +904,8 @@ export class KaraokeProcessor {
         rightOut[i] = Math.max(-1, Math.min(1, dspR * (1 - b) + nR * b));
       } else {
         this.neuralBlend = Math.max(0, this.neuralBlend - 0.002);
-        // Preserve low-end + side ambience during DSP fallback
-        const outL = this.isolateVocals ? dspL : l - subScale * dspVocal + side * 0.04 * subScale;
-        const outR = this.isolateVocals ? dspR : r - subScale * dspVocal - side * 0.04 * subScale;
-        leftOut[i] = Math.max(-1, Math.min(1, outL));
-        rightOut[i] = Math.max(-1, Math.min(1, outR));
+        leftOut[i] = Math.max(-1, Math.min(1, dspL));
+        rightOut[i] = Math.max(-1, Math.min(1, dspR));
       }
     }
 

@@ -70,6 +70,7 @@ export interface PlayerState {
   repeatMode: 'off' | 'all' | 'one';
   activeDeck: DeckName;
   isCrossfading: boolean;
+  autoMixStatus: { active: boolean; targetTitle: string | null };
   isNowPlayingModalOpen: boolean;
 
   // Active playing stream quality badge metadata
@@ -112,6 +113,7 @@ export interface PlayerActions {
   loadTrack: (track: Song, deck?: DeckName, autoPlay?: boolean) => Promise<void>;
   prepareRestoredTrack: (track: Song, positionMs?: number) => Promise<void>;
   crossfade: (targetDeck?: DeckName, durationMs?: number) => Promise<void>;
+  setAutoMixStatus: (active: boolean, targetTitle?: string | null) => void;
   setNowPlayingModalOpen: (open: boolean) => void;
 
   // DSP bridges
@@ -396,6 +398,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
   repeatMode: initialPlayer?.repeatMode || 'off',
   activeDeck: 'active',
   isCrossfading: false,
+  autoMixStatus: { active: false, targetTitle: null },
   isNowPlayingModalOpen: false,
 
   activeStreamQuality: initialPlayer?.currentTrack?.sourceQuality || null,
@@ -1022,6 +1025,10 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       console.warn('[playerStore] crossfade failed:', err);
       set({ isCrossfading: false });
     }
+  },
+
+  setAutoMixStatus: (active: boolean, targetTitle = null) => {
+    set({ autoMixStatus: { active: Boolean(active), targetTitle: active ? targetTitle : null } });
   },
 
   setNowPlayingModalOpen: (open: boolean) => {

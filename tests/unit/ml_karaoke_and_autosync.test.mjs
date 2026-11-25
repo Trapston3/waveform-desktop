@@ -61,27 +61,56 @@ describe('ONNX ML Audio Features: Karaoke DSP, Auto-Lyric Sync & Downbeat Auto-M
     assert.ok(Math.abs(acapella.leftOut[0] - 0.4) < 1e-5);
     assert.ok(Math.abs(acapella.rightOut[1] - 0.24) < 1e-5);
 
-    // KaraokeProcessor attenuates center vocal tone even in instant Mid/Side DSP mode
+    // KaraokeProcessor attenuates center vocal tone (<15%) while preserving stereo side + <180Hz sub-bass (>90%)
     const proc = new KaraokeProcessor(44100);
     proc.enabled = true;
     proc.vocalLevel = 0;
-    const len = 4096;
+    const len = 8192;
     const sineL = new Float32Array(len);
     const sineR = new Float32Array(len);
+    const bassRef = new Float32Array(len);
+    const sideRef = new Float32Array(len);
     for (let i = 0; i < len; i++) {
-      const vocal = Math.sin((2 * Math.PI * 1000 * i) / 44100) * 0.6;
+      const vocal = Math.sin((2 * Math.PI * 1000 * i) / 44100) * 0.55;
+      const kickBass = Math.sin((2 * Math.PI * 80 * i) / 44100) * 0.25;
       const sideInst = Math.sin((2 * Math.PI * 300 * i) / 44100) * 0.2;
-      sineL[i] = vocal + sideInst;
-      sineR[i] = vocal - sideInst;
+      bassRef[i] = kickBass;
+      sideRef[i] = sideInst;
+      sineL[i] = vocal + kickBass + sideInst;
+      sineR[i] = vocal + kickBass - sideInst;
     }
-    const { leftOut } = proc.process(sineL, sineR);
-    let inE = 0;
-    let outE = 0;
-    for (let i = 1024; i < len; i++) {
-      inE += sineL[i] * sineL[i];
-      outE += leftOut[i] * leftOut[i];
+    const { leftOut, rightOut } = proc.process(sineL, sineR);
+    let vocalMidE = 0;
+    let outMidVocalErr = 0;
+    let sideInE = 0;
+    let sideOutE = 0;
+    for (let i = 2048; i < len; i++) {
+      const midIn = 0.5 * (sineL[i] + sineR[i]);
+      const voxOnly = midIn - bassRef[i];
+      const midOut = 0.5 * (leftOut[i] + rightOut[i]);
+      const residualVocal = midOut - bassRef[i];
+      vocalMidE += voxOnly * voxOnly;
+      outMidVocalErr += residualVocal * residualVocal;
+      const sIn = 0.5 * (sineL[i] - sineR[i]);
+      const sOut = 0.5 * (leftOut[i] - rightOut[i]);
+      sideInE += sIn * sIn;
+      sideOutE += sOut * sOut;
     }
-    assert.ok(outE < inE * 0.35, `Expected center vocal energy attenuated cleanly (${outE} vs ${inE})`);
+    assert.ok(outMidVocalErr < vocalMidE * 0.15, `Expected center vocal attenuated (<15%), got ${(outMidVocalErr / vocalMidE * 100).toFixed(1)}%`);
+    assert.ok(sideOutE > sideInE * 0.9, `Expected stereo side instrument preserved (>90%), got ${(sideOutE / sideInE * 100).toFixed(1)}%`);
+
+    // Isolate Vocals mode outputs vocal band cleanly when vocalLevel = 1.0
+    const isoProc = new KaraokeProcessor(44100);
+    isoProc.enabled = true;
+    isoProc.isolateVocals = true;
+    isoProc.vocalLevel = 1.0;
+    const { leftOut: isoL, rightOut: isoR } = isoProc.process(sineL, sineR);
+    let isoSideE = 0;
+    for (let i = 2048; i < len; i++) {
+      const sIso = 0.5 * (isoL[i] - isoR[i]);
+      isoSideE += sIso * sIso;
+    }
+    assert.ok(isoSideE < 1e-6, 'Isolate Vocals should suppress non-center side channel');
   });
 
   test('estimateLyricOffsetMsFallback recovers planted timing shift between vocal envelope and lyrics', () => {

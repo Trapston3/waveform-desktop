@@ -34,14 +34,79 @@ export interface LyricLine {
   isRtl?: boolean;
 }
 
+export type LyricSyncType = 'word' | 'line' | 'plain' | 'none';
+
 export interface LyricsData {
   type: 'LINE_SYNCED' | 'SYLLABLE_SYNCED' | 'UNSYNCED';
-  provider: string; // 'AppleMusic' | 'LrcLib' | 'KuGou' | 'Local' | 'Embedded' | 'innertube'
+  syncType?: LyricSyncType;
+  provider: string; // 'AppleMusic' | 'LrcLib' | 'NetEase' | 'KuGou' | 'Local' | 'Embedded' | 'innertube'
   language?: string;
   isRtl?: boolean;
   lines: LyricLine[];
   isSynced?: boolean;
   sourceAttribution?: string;
+}
+
+export function detectSyncType(lyrics: Partial<LyricsData> | null | undefined): LyricSyncType {
+  if (!lyrics || !Array.isArray(lyrics.lines) || lyrics.lines.length === 0) return 'none';
+  if (lyrics.type === 'UNSYNCED' || lyrics.isSynced === false) return 'plain';
+  if (
+    lyrics.type === 'SYLLABLE_SYNCED' ||
+    lyrics.lines.some((l) => Array.isArray(l.syllables) && l.syllables.length > 0)
+  ) {
+    return 'word';
+  }
+  return 'line';
+}
+
+function normalizeMatchToken(s: string): string {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenOverlapScore(a: string, b: string): number {
+  const na = normalizeMatchToken(a);
+  const nb = normalizeMatchToken(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1.0;
+  if (na.includes(nb) || nb.includes(na)) return 0.85;
+  const wordsA = new Set(na.split(' '));
+  const wordsB = nb.split(' ');
+  let hit = 0;
+  for (const w of wordsB) {
+    if (wordsA.has(w)) hit++;
+  }
+  return hit / Math.max(wordsA.size, wordsB.length, 1);
+}
+
+export function scoreLrclibCandidate(
+  item: any,
+  targetTitle: string,
+  targetArtist: string,
+  targetDurationSec?: number
+): number {
+  if (!item || (!item.syncedLyrics && !item.plainLyrics)) return -1;
+  const titleSim = tokenOverlapScore(String(item.trackName || item.name || ''), targetTitle);
+  const artistSim = targetArtist
+    ? tokenOverlapScore(String(item.artistName || ''), targetArtist)
+    : 0.5;
+  // Require reasonable title and artist affinity so unrelated songs never match falsely
+  if (titleSim < 0.35 || (targetArtist && artistSim < 0.3)) return -1;
+
+  let score = titleSim * 45 + artistSim * 35;
+  if (typeof item.syncedLyrics === 'string' && /\[\d{1,3}:\d{2}/.test(item.syncedLyrics)) {
+    score += 30;
+  }
+  if (targetDurationSec && targetDurationSec > 0 && typeof item.duration === 'number') {
+    const diff = Math.abs(item.duration - targetDurationSec);
+    if (diff <= 4) score += 25;
+    else if (diff <= 10) score += 10;
+    else if (diff > 25) score -= 25;
+  }
+  return score;
 }
 
 export type ParsedLyrics = LyricsData;
@@ -143,6 +208,7 @@ export class LyricsService {
 
     return {
       type: 'LINE_SYNCED',
+      syncType: 'line',
       isSynced: true,
       provider,
       isRtl,
@@ -241,8 +307,10 @@ export class LyricsService {
       }
     }
 
+    const hasSyllables = lines.some((l) => l.syllables && l.syllables.length > 0);
     return {
-      type: lines.some((l) => l.syllables && l.syllables.length > 0) ? 'SYLLABLE_SYNCED' : 'LINE_SYNCED',
+      type: hasSyllables ? 'SYLLABLE_SYNCED' : 'LINE_SYNCED',
+      syncType: hasSyllables ? 'word' : 'line',
       isSynced: true,
       provider,
       isRtl,
@@ -392,6 +460,7 @@ export class LyricsService {
 
     return {
       type: 'UNSYNCED',
+      syncType: 'plain',
       isSynced: false,
       provider,
       isRtl,
@@ -672,7 +741,8 @@ export class LyricsService {
     titleOrArtist?: string,
     artistOrAlbum?: string,
     albumOrDuration?: string | number,
-    durationSec?: number
+    durationSec?: number,
+    embeddedPlainFallback?: { text: string; provider: string } | null
   ): Promise<LyricsData | null> {
     let songId = '';
     let rawTitle = '';
@@ -726,9 +796,21 @@ export class LyricsService {
     }
 
     const fetchPromise = (async (): Promise<LyricsData | null> => {
-      let plainFallback: string | null = null;
+      let plainFallback: { text: string; provider: string } | null = embeddedPlainFallback ?? null;
+      let plainParsedFallback: LyricsData | null = null;
 
-      // Tier 1: LRCLIB Exact GET
+      const buildSyncedLrc = (lrc: string, provider: string): LyricsData | null => {
+        const parsed = this.parseLrc(lrc, provider);
+        if (parsed.lines.length === 0) return null;
+        const hasWord = /\<\d{1,3}:\d{2}/.test(lrc);
+        parsed.lines = parsed.lines.map((l) => this.interpolateLineSyllables(l));
+        parsed.type = hasWord ? 'SYLLABLE_SYNCED' : 'LINE_SYNCED';
+        parsed.syncType = hasWord ? 'word' : 'line';
+        parsed.isSynced = true;
+        return parsed;
+      };
+
+      // Tier 1: LRCLIB Exact GET -> return only if synced; preserve plain as fallback
       if (title && artist) {
         try {
           const durParam = rawDuration && rawDuration > 0 ? `&duration=${Math.round(rawDuration)}` : '';
@@ -736,20 +818,18 @@ export class LyricsService {
           const res = await universalFetch(exactUrl, { method: 'GET' });
           if (res.ok) {
             const data = await res.json<any>();
-            if (data?.syncedLyrics) {
-              const parsed = this.parseLrc(data.syncedLyrics, 'lrclib');
-              parsed.lines = parsed.lines.map((l) => this.interpolateLineSyllables(l));
-              parsed.type = 'SYLLABLE_SYNCED';
-              parsed.isSynced = true;
-              return parsed;
-            } else if (data?.plainLyrics) {
-              plainFallback = data.plainLyrics;
+            if (data?.syncedLyrics && /\[\d{1,3}:\d{2}/.test(data.syncedLyrics)) {
+              const built = buildSyncedLrc(data.syncedLyrics, 'lrclib');
+              if (built) return built;
+            }
+            if (data?.plainLyrics && !plainFallback) {
+              plainFallback = { text: data.plainLyrics, provider: 'lrclib' };
             }
           }
         } catch {}
       }
 
-      // Tier 2: LRCLIB Fuzzy Search
+      // Tier 2: LRCLIB Fuzzy Search (ranked by title/artist match & duration ±4s)
       if (title) {
         try {
           const q = `${title} ${artist}`.trim();
@@ -758,35 +838,92 @@ export class LyricsService {
           if (res.ok) {
             const items = await res.json<any[]>();
             if (Array.isArray(items) && items.length > 0) {
-              const match = items.find((i) => i.syncedLyrics) || items[0];
-              if (match?.syncedLyrics) {
-                const parsed = this.parseLrc(match.syncedLyrics, 'lrclib');
-                parsed.lines = parsed.lines.map((l) => this.interpolateLineSyllables(l));
-                parsed.type = 'SYLLABLE_SYNCED';
-                parsed.isSynced = true;
-                return parsed;
-              } else if (match?.plainLyrics && !plainFallback) {
-                plainFallback = match.plainLyrics;
+              let bestSynced: any = null;
+              let bestSyncedScore = -1;
+              let bestPlain: any = null;
+              let bestPlainScore = -1;
+              for (const item of items) {
+                const sc = scoreLrclibCandidate(item, title, artist, rawDuration);
+                if (sc < 0) continue;
+                if (item.syncedLyrics && /\[\d{1,3}:\d{2}/.test(item.syncedLyrics)) {
+                  if (sc > bestSyncedScore) {
+                    bestSyncedScore = sc;
+                    bestSynced = item;
+                  }
+                } else if (item.plainLyrics && sc > bestPlainScore) {
+                  bestPlainScore = sc;
+                  bestPlain = item;
+                }
+              }
+              if (bestSynced?.syncedLyrics) {
+                const built = buildSyncedLrc(bestSynced.syncedLyrics, 'lrclib');
+                if (built) return built;
+              }
+              if (bestPlain?.plainLyrics && !plainFallback) {
+                plainFallback = { text: bestPlain.plainLyrics, provider: 'lrclib' };
               }
             }
           }
         } catch {}
       }
 
-      // Tier 3: InnerTube native YouTube Music Musixmatch lyrics fallback
+      const api =
+        typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+
+      // Tier 3: NetEase Cloud Music (synced LRC)
+      if (title && typeof api?.searchNetEaseLyrics === 'function') {
+        try {
+          const ne = await api.searchNetEaseLyrics({ title, artist, durationSec: rawDuration });
+          if (ne?.syncedLyrics && /\[\d{1,3}:\d{2}/.test(ne.syncedLyrics)) {
+            const built = buildSyncedLrc(ne.syncedLyrics, 'NetEase');
+            if (built) return built;
+          } else if (ne?.plainLyrics && !plainFallback) {
+            plainFallback = { text: ne.plainLyrics, provider: 'NetEase' };
+          }
+        } catch {}
+      }
+
+      // Tier 4: Kugou Music (synced LRC)
+      if (title && typeof api?.searchKugouLyrics === 'function') {
+        try {
+          const kg = await api.searchKugouLyrics({ title, artist, durationSec: rawDuration });
+          if (kg?.syncedLyrics && /\[\d{1,3}:\d{2}/.test(kg.syncedLyrics)) {
+            const built = buildSyncedLrc(kg.syncedLyrics, 'KuGou');
+            if (built) return built;
+          } else if (kg?.plainLyrics && !plainFallback) {
+            plainFallback = { text: kg.plainLyrics, provider: 'KuGou' };
+          }
+        } catch {}
+      }
+
+      // Tier 5: InnerTube native YouTube Music Musixmatch lyrics (synced only returns immediately; plain saved as fallback)
       if (songId) {
         try {
           const innerTube = new InnerTubeClient();
           const innerTubeLyrics = await innerTube.fetchTrackLyrics(songId);
           if (innerTubeLyrics && innerTubeLyrics.lines && innerTubeLyrics.lines.length > 0) {
-            return innerTubeLyrics;
+            const syncType = detectSyncType(innerTubeLyrics);
+            if (syncType === 'word' || syncType === 'line') {
+              return { ...innerTubeLyrics, syncType, isSynced: true };
+            }
+            if (!plainFallback && !plainParsedFallback) {
+              plainParsedFallback = {
+                ...innerTubeLyrics,
+                type: 'UNSYNCED',
+                syncType: 'plain',
+                isSynced: false,
+              };
+            }
           }
         } catch {}
       }
 
-      // Tier 4: Plain Lyrics Fallback
+      // Tier 6: Only after ALL synced providers fail, return plain unsynced lyrics with zero fake timestamps
       if (plainFallback) {
-        return this.parsePlainText(plainFallback, 'lrclib');
+        return this.parsePlainText(plainFallback.text, plainFallback.provider);
+      }
+      if (plainParsedFallback) {
+        return plainParsedFallback;
       }
 
       return null;

@@ -354,6 +354,9 @@ export interface AppUpdateState {
   publishedAt: string | null;
   assetName: string | null;
   assetSize: number | null;
+  updateStrategy?: 'direct_patch' | 'full_installer';
+  deltaChangedCount?: number | null;
+  deltaRemovedCount?: number | null;
   dismissedThisSession: boolean;
   progress: AppUpdateProgress | null;
   error: string | null;
@@ -382,6 +385,9 @@ const DEFAULT_UPDATE_STATE: AppUpdateState = {
   publishedAt: null,
   assetName: null,
   assetSize: null,
+  updateStrategy: 'full_installer',
+  deltaChangedCount: null,
+  deltaRemovedCount: null,
   dismissedThisSession: false,
   progress: null,
   error: null,

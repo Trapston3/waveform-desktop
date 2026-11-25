@@ -122,7 +122,15 @@ export const UpdatePromptModal: React.FC = () => {
         {/* Release Notes */}
         <div className="rounded-2xl bg-black/25 dark:bg-black/35 border border-white/10 p-3.5 max-h-48 overflow-y-auto space-y-1.5">
           <div className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-[var(--color-on-surface-variant)]">
-            <span>What&apos;s New</span>
+            <span>
+              {state.updateStrategy === 'direct_patch'
+                ? `What's New · Fast Direct Patch${
+                    typeof state.deltaChangedCount === 'number'
+                      ? ` (${state.deltaChangedCount} files)`
+                      : ''
+                  }`
+                : "What's New"}
+            </span>
             {state.assetSize ? (
               <span>{formatMegabytes(state.assetSize)}</span>
             ) : null}
@@ -139,7 +147,11 @@ export const UpdatePromptModal: React.FC = () => {
             <div className="flex items-center justify-between text-xs font-medium">
               <span className="flex items-center gap-1.5 text-[var(--color-primary)]">
                 <Download size={14} className="text-[var(--color-accent)] animate-bounce" />
-                <span>Downloading installer...</span>
+                <span>
+                  {state.updateStrategy === 'direct_patch'
+                    ? 'Downloading delta patch...'
+                    : 'Downloading installer...'}
+                </span>
               </span>
               <span className="text-[11px] font-mono text-[var(--color-on-surface-variant)]">
                 {formatMegabytes(progress?.bytesDownloaded ?? 0)} /{' '}
@@ -167,12 +179,16 @@ export const UpdatePromptModal: React.FC = () => {
             <div className="min-w-0">
               <div className="text-xs font-semibold text-[var(--color-primary)]">
                 {state.status === 'verifying'
-                  ? 'Verifying SHA-256 signature...'
+                  ? 'Verifying SHA-256 signatures...'
+                  : state.updateStrategy === 'direct_patch'
+                  ? 'Applying direct patch and relaunching WaveForm...'
                   : 'Installing update and relaunching WaveForm...'}
               </div>
               <div className="text-[11px] text-[var(--color-on-surface-variant)]">
                 {state.status === 'verifying'
-                  ? 'Checking downloaded installer integrity against SHA256SUMS.txt.'
+                  ? state.updateStrategy === 'direct_patch'
+                    ? 'Checking patch archive and every modified file against remote manifest.'
+                    : 'Checking downloaded installer integrity against SHA256SUMS.txt.'
                   : 'WaveForm will close briefly and reopen automatically on the new version.'}
               </div>
             </div>

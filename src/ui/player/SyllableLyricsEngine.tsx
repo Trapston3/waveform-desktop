@@ -470,7 +470,9 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
   // Check if lyrics are unsynchronized
   const isUnsynced = useMemo(() => {
     if (!lyricsData || !lyricsData.lines || lyricsData.lines.length === 0) return false;
-    if (lyricsData.type === 'UNSYNCED' || lyricsData.isSynced === false) return true;
+    if (lyricsData.syncType === 'plain' || lyricsData.type === 'UNSYNCED' || lyricsData.isSynced === false) {
+      return true;
+    }
     return lyricsData.lines.every((l) => l.startTimeMs === 0 && l.endTimeMs === 0);
   }, [lyricsData]);
 
@@ -960,38 +962,50 @@ export const SyllableLyricsEngine: React.FC<SyllableLyricsEngineProps> = React.m
 
   return (
     <div className={`relative flex flex-col h-full overflow-x-hidden select-none ${className}`}>
-      {/* Top Floating Control Bar: Romanization & Translation toggles (shown only when available) */}
-      {(hasRomanization || hasTranslation) && (
-        <div className="flex items-center justify-end gap-2 px-6 py-2.5 shrink-0 z-10 border-b border-white/5 bg-transparent">
-          {hasRomanization && (
-            <button
-              onClick={() => setManualRomanization(!showRomanization)}
-              title="Toggle Romanization (Pronunciation)"
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
-                showRomanization
-                  ? 'bg-white/15 text-white shadow-sm border border-white/20'
-                  : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
-              }`}
-            >
-              <Languages size={13} />
-              <span>Rom</span>
-            </button>
-          )}
+      {/* Top Floating Control Bar: Plain Lyrics indicator + Romanization/Translation toggles */}
+      {(isUnsynced || hasRomanization || hasTranslation) && (
+        <div className="flex items-center justify-between gap-2 px-6 py-2.5 shrink-0 z-10 border-b border-white/5 bg-transparent">
+          <div>
+            {isUnsynced && (
+              <span
+                data-testid="plain-lyrics-badge"
+                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-white/10 border border-white/15 text-white/80"
+              >
+                Plain Lyrics · Unsynced
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {hasRomanization && (
+              <button
+                onClick={() => setManualRomanization(!showRomanization)}
+                title="Toggle Romanization (Pronunciation)"
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                  showRomanization
+                    ? 'bg-white/15 text-white shadow-sm border border-white/20'
+                    : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
+                }`}
+              >
+                <Languages size={13} />
+                <span>Rom</span>
+              </button>
+            )}
 
-          {hasTranslation && (
-            <button
-              onClick={() => setManualTranslation(!showTranslation)}
-              title="Toggle English Translation"
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
-                showTranslation
-                  ? 'bg-white/15 text-[var(--color-accent)] shadow-sm border border-white/20'
-                  : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
-              }`}
-            >
-              <Globe size={13} />
-              <span>Trans</span>
-            </button>
-          )}
+            {hasTranslation && (
+              <button
+                onClick={() => setManualTranslation(!showTranslation)}
+                title="Toggle English Translation"
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                  showTranslation
+                    ? 'bg-white/15 text-[var(--color-accent)] shadow-sm border border-white/20'
+                    : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)]'
+                }`}
+              >
+                <Globe size={13} />
+                <span>Trans</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
 

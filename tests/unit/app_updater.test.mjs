@@ -97,6 +97,9 @@ const {
   compareSemVer,
   parseSha256Sums,
   selectReleaseAssets,
+  parseInstallManifest,
+  planDeltaUpdate,
+  buildDirectPatchApplierScript,
   verifyFileSha256,
   createAppUpdaterController,
   initAppUpdaterIpc,
@@ -582,5 +585,121 @@ describe('One-Click In-App Updater & Persistent Cold-Boot Reminder', () => {
       React.createElement(SettingsModal, { isOpen: true, onClose: () => {} })
     );
     assert.ok(settingsHtml.includes('App Updates'));
+  });
+
+  test('Direct delta-file updater: manifest planning, binary upgrade fallback, per-file SHA-256 verification, and PowerShell applier', async () => {
+    const hashOf = (s) => createHash('sha256').update(s).digest('hex');
+    const localTsv = [
+      'version\tsize\tsha256\trelPath',
+      `1.3.0\t1000\t${hashOf('old-asar')}\tresources\\app.asar`,
+      `1.3.0\t200\t${hashOf('same-dll')}\tWaveForm.exe`,
+      `1.3.0\t50\t${hashOf('obsolete-file')}\tresources\\old-asset.txt`,
+    ].join('\n');
+
+    const remoteTsvResourcesOnly = [
+      'version\tsize\tsha256\trelPath',
+      `1.3.1\t1024\t${hashOf('new-asar-payload')}\tresources\\app.asar`,
+      `1.3.1\t200\t${hashOf('same-dll')}\tWaveForm.exe`,
+    ].join('\n');
+
+    const localMap = parseInstallManifest(localTsv);
+    const remoteResMap = parseInstallManifest(remoteTsvResourcesOnly);
+    const deltaPlan = planDeltaUpdate(localMap, remoteResMap);
+    assert.equal(deltaPlan.strategy, 'direct_patch');
+    assert.equal(deltaPlan.requiresBinaryUpgrade, false);
+    assert.deepEqual(deltaPlan.changedFiles, ['resources\\app.asar']);
+    assert.deepEqual(deltaPlan.removedFiles, ['resources\\old-asset.txt']);
+
+    // Binary change forces full_installer
+    const remoteBinaryMap = parseInstallManifest([
+      'version\tsize\tsha256\trelPath',
+      `1.3.1\t1024\t${hashOf('new-asar-payload')}\tresources\\app.asar`,
+      `1.3.1\t220\t${hashOf('new-exe')}\tWaveForm.exe`,
+    ].join('\n'));
+    const fullPlan = planDeltaUpdate(localMap, remoteBinaryMap);
+    assert.equal(fullPlan.strategy, 'full_installer');
+    assert.equal(fullPlan.requiresBinaryUpgrade, true);
+
+    // Script asserts PID wait, backup/rollback, registry DisplayVersion, zero NSIS invocation, direct exe launch
+    const script = buildDirectPatchApplierScript({
+      targetPid: 4242,
+      installDir: 'C:\\Program Files\\WaveForm',
+      stagingDir: 'C:\\Temp\\staging',
+      updateDir: 'C:\\Temp\\WaveForm-Update',
+      relaunchExePath: 'C:\\Program Files\\WaveForm\\WaveForm.exe',
+      targetVersion: '1.3.1',
+      changedFiles: ['resources\\app.asar'],
+      removedFiles: ['resources\\old-asset.txt'],
+    });
+    assert.ok(script.includes('Get-Process -Id $TargetPid'));
+    assert.ok(script.includes('DisplayVersion'));
+    assert.ok(script.includes('BackupDir'));
+    assert.ok(script.includes('Start-Process -FilePath $RelaunchExe'));
+    assert.equal(script.includes('/S'), false);
+
+    // Controller end-to-end direct patch run
+    const installDir = path.join(tempRoot, 'install');
+    fs.mkdirSync(path.join(installDir, 'resources'), { recursive: true });
+    fs.writeFileSync(path.join(installDir, 'resources', 'install-manifest.tsv'), localTsv, 'utf-8');
+
+    const patchZipBytes = Buffer.from('mock-zip-archive-bytes');
+    const newAsarBytes = Buffer.from('new-asar-payload');
+    const sums = `${hashOf(patchZipBytes)}  WaveForm-AppPatch-1.3.1.zip\n`;
+
+    const spawnedCalls = [];
+    let quitCalled = false;
+    const ctrl = createAppUpdaterController({
+      currentVersion: '1.3.0',
+      tempDir: tempRoot,
+      installDir,
+      relaunchExePath: path.join(installDir, 'WaveForm.exe'),
+      pid: 9999,
+      quitDelayMs: 5,
+      fetchFn: async (url) => {
+        if (url.includes('releases/latest')) {
+          return makeJsonResponse({
+            tag_name: 'v1.3.1',
+            name: 'WaveForm v1.3.1',
+            body: 'Delta release test',
+            assets: [
+              { name: 'WaveForm-Setup-1.3.1.exe', browser_download_url: 'https://example.com/setup.exe', size: 90_000_000 },
+              { name: 'WaveForm-AppPatch-1.3.1.zip', browser_download_url: 'https://example.com/patch.zip', size: patchZipBytes.byteLength },
+              { name: 'install-manifest.tsv', browser_download_url: 'https://example.com/install-manifest.tsv', size: remoteTsvResourcesOnly.length },
+              { name: 'SHA256SUMS.txt', browser_download_url: 'https://example.com/SHA256SUMS.txt', size: sums.length },
+            ],
+          });
+        }
+        if (url.endsWith('install-manifest.tsv')) return new Response(remoteTsvResourcesOnly, { status: 200 });
+        if (url.endsWith('patch.zip')) return makeChunkedBinaryResponse([patchZipBytes]);
+        if (url.endsWith('SHA256SUMS.txt')) return new Response(sums, { status: 200 });
+        throw new Error(`Unexpected URL: ${url}`);
+      },
+      extractZipFn: async (_zipPath, stagingDir) => {
+        fs.mkdirSync(path.join(stagingDir, 'resources'), { recursive: true });
+        fs.writeFileSync(path.join(stagingDir, 'resources', 'app.asar'), newAsarBytes);
+        fs.writeFileSync(path.join(stagingDir, 'resources', 'install-manifest.tsv'), remoteTsvResourcesOnly);
+      },
+      spawnFn: (cmd, args, opts) => {
+        spawnedCalls.push({ cmd, args: [...args], opts });
+        return { unref() {} };
+      },
+      quitFn: () => {
+        quitCalled = true;
+      },
+    });
+
+    const avail = await ctrl.checkForUpdates(true);
+    assert.equal(avail.status, 'available');
+    assert.equal(avail.updateStrategy, 'direct_patch');
+    assert.equal(avail.assetName, 'WaveForm-AppPatch-1.3.1.zip');
+    assert.equal(avail.deltaChangedCount, 1);
+
+    const installed = await ctrl.downloadAndInstall();
+    assert.equal(installed.status, 'installing');
+    assert.equal(spawnedCalls.length, 1);
+    assert.ok(spawnedCalls[0].cmd.toLowerCase().includes('powershell'));
+    assert.ok(spawnedCalls[0].args.includes('-File'));
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(quitCalled, true);
   });
 });

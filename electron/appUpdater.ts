@@ -37,6 +37,9 @@ export interface AppUpdateState {
   publishedAt: string | null;
   assetName: string | null;
   assetSize: number | null;
+  updateStrategy?: 'direct_patch' | 'full_installer';
+  deltaChangedCount?: number | null;
+  deltaRemovedCount?: number | null;
   dismissedThisSession: boolean;
   progress: AppUpdateProgress | null;
   error: string | null;
@@ -58,17 +61,30 @@ export interface GitHubReleasePayload {
   assets?: GitHubReleaseAsset[];
 }
 
+export interface ReleaseAssetRef {
+  name: string;
+  url: string;
+  size: number | null;
+}
+
 export interface SelectedReleaseAssets {
-  installerAsset: {
-    name: string;
-    url: string;
-    size: number | null;
-  } | null;
-  checksumAsset: {
-    name: string;
-    url: string;
-    size: number | null;
-  } | null;
+  installerAsset: ReleaseAssetRef | null;
+  checksumAsset: ReleaseAssetRef | null;
+  patchAsset: ReleaseAssetRef | null;
+  manifestAsset: ReleaseAssetRef | null;
+}
+
+export interface ManifestEntry {
+  sha256: string;
+  size: number;
+}
+
+export interface DeltaUpdatePlan {
+  strategy: 'direct_patch' | 'full_installer';
+  changedFiles: string[];
+  removedFiles: string[];
+  requiresBinaryUpgrade: boolean;
+  estimatedBytes: number;
 }
 
 export interface AppUpdaterControllerOptions {
@@ -77,6 +93,8 @@ export interface AppUpdaterControllerOptions {
   tempDir?: string;
   installDir?: string;
   relaunchExePath?: string;
+  pid?: number;
+  extractZipFn?: (zipPath: string, destDir: string) => Promise<void> | void;
   spawnFn?: (
     command: string,
     args: readonly string[],
@@ -190,6 +208,8 @@ export function selectReleaseAssets(release: GitHubReleasePayload | null | undef
 
   let installerAsset: SelectedReleaseAssets['installerAsset'] = null;
   let checksumAsset: SelectedReleaseAssets['checksumAsset'] = null;
+  let patchAsset: SelectedReleaseAssets['patchAsset'] = null;
+  let manifestAsset: SelectedReleaseAssets['manifestAsset'] = null;
 
   for (const asset of assets) {
     if (!asset || typeof asset.name !== 'string' || typeof asset.browser_download_url !== 'string') {
@@ -203,10 +223,208 @@ export function selectReleaseAssets(release: GitHubReleasePayload | null | undef
       installerAsset = { name, url: asset.browser_download_url, size };
     } else if (!checksumAsset && lower === 'sha256sums.txt') {
       checksumAsset = { name, url: asset.browser_download_url, size };
+    } else if (!patchAsset && /^waveform-apppatch-.*\.zip$/i.test(name)) {
+      patchAsset = { name, url: asset.browser_download_url, size };
+    } else if (!manifestAsset && lower === 'install-manifest.tsv') {
+      manifestAsset = { name, url: asset.browser_download_url, size };
     }
   }
 
-  return { installerAsset, checksumAsset };
+  return { installerAsset, checksumAsset, patchAsset, manifestAsset };
+}
+
+function normalizeWinManifestRelPath(relPath: string): string {
+  return String(relPath || '').trim().replace(/\//g, '\\').replace(/^\\+/, '');
+}
+
+/**
+ * Parses resources/install-manifest.tsv (`version\tsize\tsha256\trelPath`) into Map<relPath, ManifestEntry>.
+ */
+export function parseInstallManifest(tsv: string): Map<string, ManifestEntry> {
+  const entries = new Map<string, ManifestEntry>();
+  if (typeof tsv !== 'string' || !tsv.trim()) return entries;
+
+  for (const rawLine of tsv.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || line.startsWith('version\t')) continue;
+    const cols = line.split('\t');
+    if (cols.length < 4) continue;
+    const size = Number.parseInt(cols[1], 10);
+    const sha256 = cols[2].trim().toLowerCase();
+    const relPath = normalizeWinManifestRelPath(cols.slice(3).join('\t'));
+    if (!relPath || !/^[a-f0-9]{64}$/.test(sha256) || !Number.isFinite(size) || size < 0) continue;
+    entries.set(relPath, { sha256, size });
+  }
+  return entries;
+}
+
+/**
+ * Computes direct delta vs full installer strategy by comparing local vs remote install manifests.
+ */
+export function planDeltaUpdate(
+  localManifest: Map<string, ManifestEntry>,
+  remoteManifest: Map<string, ManifestEntry>
+): DeltaUpdatePlan {
+  if (!localManifest || localManifest.size === 0 || !remoteManifest || remoteManifest.size === 0) {
+    return {
+      strategy: 'full_installer',
+      changedFiles: [],
+      removedFiles: [],
+      requiresBinaryUpgrade: true,
+      estimatedBytes: 0,
+    };
+  }
+
+  const changedFiles: string[] = [];
+  const removedFiles: string[] = [];
+  let requiresBinaryUpgrade = false;
+  let estimatedBytes = 0;
+
+  const isResourcePath = (rel: string): boolean => rel.toLowerCase().startsWith('resources\\');
+
+  for (const [relPath, remoteMeta] of remoteManifest.entries()) {
+    const localMeta = localManifest.get(relPath);
+    if (!localMeta || localMeta.sha256 !== remoteMeta.sha256 || localMeta.size !== remoteMeta.size) {
+      changedFiles.push(relPath);
+      estimatedBytes += remoteMeta.size;
+      if (!isResourcePath(relPath)) {
+        requiresBinaryUpgrade = true;
+      }
+    }
+  }
+
+  for (const oldRelPath of localManifest.keys()) {
+    if (!remoteManifest.has(oldRelPath)) {
+      removedFiles.push(oldRelPath);
+      if (!isResourcePath(oldRelPath)) {
+        requiresBinaryUpgrade = true;
+      }
+    }
+  }
+
+  changedFiles.sort((a, b) => a.localeCompare(b));
+  removedFiles.sort((a, b) => a.localeCompare(b));
+
+  return {
+    strategy: requiresBinaryUpgrade ? 'full_installer' : 'direct_patch',
+    changedFiles,
+    removedFiles,
+    requiresBinaryUpgrade,
+    estimatedBytes,
+  };
+}
+
+export interface DirectPatchScriptOptions {
+  targetPid: number;
+  installDir: string;
+  stagingDir: string;
+  updateDir: string;
+  relaunchExePath: string;
+  targetVersion: string;
+  changedFiles: readonly string[];
+  removedFiles: readonly string[];
+}
+
+/**
+ * Generates an atomic PowerShell patch applier with PID exit wait, per-file backup & rollback,
+ * obsolete file cleanup, Registry DisplayVersion sync, temp cleanup, and direct relaunch (no NSIS).
+ */
+export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): string {
+  const safeChanged = opts.changedFiles.map((f) => normalizeWinManifestRelPath(f));
+  const safeRemoved = opts.removedFiles.map((f) => normalizeWinManifestRelPath(f));
+  const manifestRel = 'resources\\install-manifest.tsv';
+  const filesToCopy = safeChanged.includes(manifestRel)
+    ? safeChanged
+    : [...safeChanged, manifestRel];
+
+  const changedLiteral = filesToCopy.map((f) => `  ${psSingleQuote(f)}`).join(',\n');
+  const removedLiteral = safeRemoved.map((f) => `  ${psSingleQuote(f)}`).join(',\n');
+
+  return [
+    '$ErrorActionPreference = "Stop"',
+    `$TargetPid = ${Math.max(0, Math.floor(opts.targetPid || 0))}`,
+    `$InstallDir = ${psSingleQuote(opts.installDir)}`,
+    `$StagingDir = ${psSingleQuote(opts.stagingDir)}`,
+    `$UpdateDir = ${psSingleQuote(opts.updateDir)}`,
+    `$BackupDir = Join-Path $UpdateDir "backup"`,
+    `$RelaunchExe = ${psSingleQuote(opts.relaunchExePath)}`,
+    `$TargetVersion = ${psSingleQuote(opts.targetVersion)}`,
+    `$ChangedFiles = @(\n${changedLiteral}\n)`,
+    `$RemovedFiles = @(\n${removedLiteral}\n)`,
+    '',
+    'if ($TargetPid -gt 0) {',
+    '  for ($i = 0; $i -lt 120; $i++) {',
+    '    $proc = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue',
+    '    if (-not $proc) { break }',
+    '    Start-Sleep -Milliseconds 250',
+    '  }',
+    '}',
+    'Start-Sleep -Milliseconds 350',
+    '',
+    'New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null',
+    '$BackedUp = @()',
+    '$CreatedNew = @()',
+    '',
+    'try {',
+    '  foreach ($rel in $ChangedFiles) {',
+    '    if ([string]::IsNullOrWhiteSpace($rel)) { continue }',
+    '    $src = Join-Path $StagingDir $rel',
+    '    $dst = Join-Path $InstallDir $rel',
+    '    if (-not (Test-Path -LiteralPath $src)) { continue }',
+    '    $dstParent = Split-Path -Parent $dst',
+    '    if (-not (Test-Path -LiteralPath $dstParent)) { New-Item -ItemType Directory -Force -Path $dstParent | Out-Null }',
+    '    if (Test-Path -LiteralPath $dst) {',
+    '      $bak = Join-Path $BackupDir $rel',
+    '      $bakParent = Split-Path -Parent $bak',
+    '      if (-not (Test-Path -LiteralPath $bakParent)) { New-Item -ItemType Directory -Force -Path $bakParent | Out-Null }',
+    '      Copy-Item -LiteralPath $dst -Destination $bak -Force',
+    '      $BackedUp += $rel',
+    '    } else {',
+    '      $CreatedNew += $rel',
+    '    }',
+    '    Copy-Item -LiteralPath $src -Destination $dst -Force',
+    '  }',
+    '  foreach ($rel in $RemovedFiles) {',
+    '    if ([string]::IsNullOrWhiteSpace($rel)) { continue }',
+    '    $dst = Join-Path $InstallDir $rel',
+    '    if (Test-Path -LiteralPath $dst) {',
+    '      $bak = Join-Path $BackupDir $rel',
+    '      $bakParent = Split-Path -Parent $bak',
+    '      if (-not (Test-Path -LiteralPath $bakParent)) { New-Item -ItemType Directory -Force -Path $bakParent | Out-Null }',
+    '      Copy-Item -LiteralPath $dst -Destination $bak -Force',
+    '      $BackedUp += $rel',
+    '      Remove-Item -LiteralPath $dst -Force',
+    '    }',
+    '  }',
+    '  $UninstallRoots = @(',
+    '    "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*",',
+    '    "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*"',
+    '  )',
+    '  foreach ($rootPattern in $UninstallRoots) {',
+    '    Get-ItemProperty -Path $rootPattern -ErrorAction SilentlyContinue | Where-Object {',
+    '      $_.DisplayName -like "WaveForm*"',
+    '    } | ForEach-Object {',
+    '      Set-ItemProperty -LiteralPath $_.PSPath -Name "DisplayVersion" -Value $TargetVersion -ErrorAction SilentlyContinue',
+    '    }',
+    '  }',
+    '} catch {',
+    '  foreach ($rel in $CreatedNew) {',
+    '    $dst = Join-Path $InstallDir $rel',
+    '    if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue }',
+    '  }',
+    '  foreach ($rel in $BackedUp) {',
+    '    $bak = Join-Path $BackupDir $rel',
+    '    $dst = Join-Path $InstallDir $rel',
+    '    if (Test-Path -LiteralPath $bak) { Copy-Item -LiteralPath $bak -Destination $dst -Force -ErrorAction SilentlyContinue }',
+    '  }',
+    '  if (Test-Path -LiteralPath $RelaunchExe) { Start-Process -FilePath $RelaunchExe }',
+    '  exit 1',
+    '}',
+    '',
+    'try { Remove-Item -LiteralPath $UpdateDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}',
+    'if (Test-Path -LiteralPath $RelaunchExe) { Start-Process -FilePath $RelaunchExe }',
+    '',
+  ].join('\n');
 }
 
 export async function computeFileSha256(filePath: string): Promise<string> {
@@ -348,7 +566,37 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
   const tempDir = options.tempDir ?? os.tmpdir();
   const installDir = options.installDir ?? path.dirname(process.execPath);
   const relaunchExePath = options.relaunchExePath ?? path.join(installDir, 'WaveForm.exe');
+  const targetPid = options.pid ?? process.pid;
   const spawnFn = options.spawnFn ?? spawn;
+  const extractZipFn =
+    options.extractZipFn ??
+    ((zipPath: string, destDir: string) =>
+      new Promise<void>((resolve, reject) => {
+        const psCmd = `Expand-Archive -LiteralPath ${psSingleQuote(zipPath)} -DestinationPath ${psSingleQuote(destDir)} -Force`;
+        const proc = spawnFn(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-WindowStyle',
+            'Hidden',
+            '-Command',
+            psCmd,
+          ],
+          { windowsHide: true, stdio: 'ignore' }
+        ) as ChildProcess;
+        if (!proc || typeof proc.on !== 'function') {
+          resolve();
+          return;
+        }
+        proc.on('error', reject);
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Expand-Archive failed with exit code ${code}`));
+        });
+      }));
   const quitFn = options.quitFn ?? (() => {});
   const openExternalFn = options.openExternalFn ?? (() => {});
   const githubRepo = options.githubRepo ?? DEFAULT_GITHUB_REPO;
@@ -356,7 +604,10 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
   const quitDelayMs = options.quitDelayMs ?? 250;
 
   let installerUrl: string | null = null;
+  let patchUrl: string | null = null;
   let checksumUrl: string | null = null;
+  let remoteManifestMap: Map<string, ManifestEntry> | null = null;
+  let plannedDelta: DeltaUpdatePlan | null = null;
   let coldBootTimer: ReturnType<typeof setTimeout> | null = null;
   let inFlightCheck: Promise<AppUpdateState> | null = null;
 
@@ -370,6 +621,9 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
     publishedAt: null,
     assetName: null,
     assetSize: null,
+    updateStrategy: 'full_installer',
+    deltaChangedCount: null,
+    deltaRemovedCount: null,
     dismissedThisSession: false,
     progress: null,
     error: null,
@@ -435,31 +689,78 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
           throw new Error('Latest GitHub release did not contain a valid version tag.');
         }
 
-        const { installerAsset, checksumAsset } = selectReleaseAssets(release);
+        const { installerAsset, checksumAsset, patchAsset, manifestAsset } =
+          selectReleaseAssets(release);
         const isNewer = compareSemVer(latestVersion, currentVersion) > 0;
         const now = Date.now();
 
-        if (isNewer && installerAsset) {
-          installerUrl = installerAsset.url;
+        if (isNewer && (installerAsset || patchAsset)) {
+          installerUrl = installerAsset?.url ?? null;
           checksumUrl = checksumAsset?.url ?? null;
+          patchUrl = null;
+          remoteManifestMap = null;
+          plannedDelta = null;
 
-          return emitState({
-            status: 'available',
-            latestVersion,
-            releaseName: release.name || `WaveForm v${latestVersion}`,
-            releaseNotes: release.body ?? '',
-            releaseUrl:
-              release.html_url || `https://github.com/${githubRepo}/releases/latest`,
-            publishedAt: release.published_at ?? null,
-            assetName: installerAsset.name,
-            assetSize: installerAsset.size,
-            progress: null,
-            error: null,
-            lastCheckedAt: now,
-          });
+          let chosenStrategy: 'direct_patch' | 'full_installer' = 'full_installer';
+          let chosenName = installerAsset?.name ?? patchAsset?.name ?? null;
+          let chosenSize = installerAsset?.size ?? patchAsset?.size ?? null;
+          let changedCount: number | null = null;
+          let removedCount: number | null = null;
+
+          const localManifestPath = path.join(installDir, 'resources', 'install-manifest.tsv');
+          if (patchAsset && manifestAsset && fs.existsSync(localManifestPath)) {
+            try {
+              const localText = fs.readFileSync(localManifestPath, 'utf-8');
+              const localMap = parseInstallManifest(localText);
+              const manResp = await fetchFn(manifestAsset.url, {
+                headers: {
+                  'User-Agent': `WaveForm-Desktop/${currentVersion}`,
+                  Accept: 'text/plain',
+                },
+                signal: controller.signal,
+              });
+              if (manResp.ok) {
+                const remoteText = await manResp.text();
+                const remoteMap = parseInstallManifest(remoteText);
+                const plan = planDeltaUpdate(localMap, remoteMap);
+                if (plan.strategy === 'direct_patch') {
+                  chosenStrategy = 'direct_patch';
+                  patchUrl = patchAsset.url;
+                  remoteManifestMap = remoteMap;
+                  plannedDelta = plan;
+                  chosenName = patchAsset.name;
+                  chosenSize = patchAsset.size ?? plan.estimatedBytes;
+                  changedCount = plan.changedFiles.length;
+                  removedCount = plan.removedFiles.length;
+                }
+              }
+            } catch {
+              // Fall back seamlessly to full installer when remote manifest check fails
+            }
+          }
+
+          if (chosenStrategy === 'direct_patch' || installerAsset) {
+            return emitState({
+              status: 'available',
+              latestVersion,
+              releaseName: release.name || `WaveForm v${latestVersion}`,
+              releaseNotes: release.body ?? '',
+              releaseUrl:
+                release.html_url || `https://github.com/${githubRepo}/releases/latest`,
+              publishedAt: release.published_at ?? null,
+              assetName: chosenName,
+              assetSize: chosenSize,
+              updateStrategy: chosenStrategy,
+              deltaChangedCount: changedCount,
+              deltaRemovedCount: removedCount,
+              progress: null,
+              error: null,
+              lastCheckedAt: now,
+            });
+          }
         }
 
-        if (isNewer && !installerAsset) {
+        if (isNewer && !installerAsset && !patchAsset) {
           installerUrl = null;
           checksumUrl = null;
           if (!manual) {
@@ -549,10 +850,14 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
       return getState();
     }
 
-    if (!installerUrl || !state.assetName) {
+    const useDirectPatch =
+      state.updateStrategy === 'direct_patch' && Boolean(patchUrl && plannedDelta && remoteManifestMap);
+    const activeDownloadUrl = useDirectPatch ? patchUrl : installerUrl;
+
+    if (!activeDownloadUrl || !state.assetName) {
       return emitState({
         status: 'error',
-        error: 'No downloadable update installer is currently available.',
+        error: 'No downloadable update package is currently available.',
         progress: null,
       });
     }
@@ -581,7 +886,7 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
         },
       });
 
-      const downloadResp = await fetchFn(installerUrl, {
+      const downloadResp = await fetchFn(activeDownloadUrl, {
         headers: {
           'User-Agent': `WaveForm-Desktop/${currentVersion}`,
           Accept: 'application/octet-stream',
@@ -664,6 +969,81 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
           progress: null,
           error: `SHA-256 checksum mismatch for ${safeAssetName}. Downloaded installer was deleted for safety.`,
         });
+      }
+
+      if (useDirectPatch && plannedDelta && remoteManifestMap) {
+        const stagingDir = path.join(updateDir, 'staging');
+        await fs.promises.mkdir(stagingDir, { recursive: true });
+        await extractZipFn(destPath, stagingDir);
+
+        for (const relPath of plannedDelta.changedFiles) {
+          const expectedEntry = remoteManifestMap.get(relPath);
+          if (!expectedEntry) continue;
+          const stagedFilePath = path.join(stagingDir, relPath.replace(/\\/g, path.sep));
+          if (!fs.existsSync(stagedFilePath)) {
+            await cleanupDownloadedInstaller();
+            return emitState({
+              status: 'error',
+              progress: null,
+              error: `Extracted patch missing modified file ${relPath}. Update aborted.`,
+            });
+          }
+          const ok = await verifyFileSha256(stagedFilePath, expectedEntry.sha256);
+          if (!ok) {
+            await cleanupDownloadedInstaller();
+            return emitState({
+              status: 'error',
+              progress: null,
+              error: `SHA-256 verification failed for extracted file ${relPath}. Update aborted.`,
+            });
+          }
+        }
+
+        emitState({
+          status: 'installing',
+          progress: null,
+          error: null,
+        });
+
+        const scriptText = buildDirectPatchApplierScript({
+          targetPid,
+          installDir,
+          stagingDir,
+          updateDir,
+          relaunchExePath,
+          targetVersion: state.latestVersion || currentVersion,
+          changedFiles: plannedDelta.changedFiles,
+          removedFiles: plannedDelta.removedFiles,
+        });
+        const scriptPath = path.join(updateDir, 'apply-patch.ps1');
+        await fs.promises.writeFile(scriptPath, scriptText, 'utf-8');
+
+        const child = spawnFn(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-WindowStyle',
+            'Hidden',
+            '-File',
+            scriptPath,
+          ],
+          {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          }
+        );
+        child?.unref?.();
+
+        const quitTimer = setTimeout(() => {
+          quitFn();
+        }, quitDelayMs);
+        quitTimer.unref?.();
+
+        return getState();
       }
 
       emitState({

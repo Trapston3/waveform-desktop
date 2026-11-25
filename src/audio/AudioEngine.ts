@@ -1161,8 +1161,10 @@ export class AudioEngine {
   private karaokeVocalLevel = 1.0;
   private karaokeIsolateVocals = false;
   private karaokeBypassGain: GainNode | null = null;
-  private karaokeDryGain: GainNode | null = null;
-  private karaokeMidCancelGain: GainNode | null = null;
+  private karaokeSideGain: GainNode | null = null;
+  private karaokeEdgeMidGain: GainNode | null = null;
+  private karaokeDirectMidGain: GainNode | null = null;
+  private karaokeVocalIsoGain: GainNode | null = null;
   private postKaraokeBus: GainNode | null = null;
   private activeBeatAnalysis: {
     bpm: number;
@@ -1264,42 +1266,90 @@ export class AudioEngine {
             this.decksBus.connect(bypassGain);
             bypassGain.connect(postBus);
 
+            const now = this.ctx.currentTime;
             const splitter = this.ctx.createChannelSplitter(2);
             const merger = this.ctx.createChannelMerger(2);
-            const dryGainL = this.ctx.createGain();
-            const dryGainR = this.ctx.createGain();
-            dryGainL.gain.setValueAtTime(0.0, this.ctx.currentTime);
-            dryGainR.gain.setValueAtTime(0.0, this.ctx.currentTime);
 
-            const midSum = this.ctx.createGain();
-            midSum.gain.setValueAtTime(0.5, this.ctx.currentTime);
-            const bandpass = this.ctx.createBiquadFilter();
-            bandpass.type = 'bandpass';
-            bandpass.frequency.setValueAtTime(1150, this.ctx.currentTime);
-            bandpass.Q.setValueAtTime(0.45, this.ctx.currentTime);
-            const midCancelGain = this.ctx.createGain();
-            midCancelGain.gain.setValueAtTime(0.0, this.ctx.currentTime);
+            // Phase-coherent Mid/Side 3-band Karaoke Matrix:
+            //   Mid = 0.5*(L+R), Side = 0.5*(L-R)
+            //   Standard Karaoke (0% vocal): Side + MidLow(<180Hz) + MidHigh(>5500Hz)
+            //   Isolate Vocals: Bandpassed Mid(180Hz..5500Hz)
+            const midNode = this.ctx.createGain();
+            midNode.gain.setValueAtTime(0.5, now);
+
+            const sideDiff = this.ctx.createGain();
+            sideDiff.gain.setValueAtTime(0.5, now);
+            const sideRightInv = this.ctx.createGain();
+            sideRightInv.gain.setValueAtTime(-0.5, now);
+
+            const sideGain = this.ctx.createGain();
+            sideGain.gain.setValueAtTime(0.0, now);
+            const sideOutInvR = this.ctx.createGain();
+            sideOutInvR.gain.setValueAtTime(-1.0, now);
+
+            const lp180 = this.ctx.createBiquadFilter();
+            lp180.type = 'lowpass';
+            lp180.frequency.setValueAtTime(180, now);
+            lp180.Q.setValueAtTime(0.707, now);
+
+            const hp5500 = this.ctx.createBiquadFilter();
+            hp5500.type = 'highpass';
+            hp5500.frequency.setValueAtTime(5500, now);
+            hp5500.Q.setValueAtTime(0.707, now);
+
+            const edgeMidGain = this.ctx.createGain();
+            edgeMidGain.gain.setValueAtTime(0.0, now);
+
+            const directMidGain = this.ctx.createGain();
+            directMidGain.gain.setValueAtTime(0.0, now);
+
+            const isoHp180 = this.ctx.createBiquadFilter();
+            isoHp180.type = 'highpass';
+            isoHp180.frequency.setValueAtTime(180, now);
+            isoHp180.Q.setValueAtTime(0.707, now);
+            const isoLp5500 = this.ctx.createBiquadFilter();
+            isoLp5500.type = 'lowpass';
+            isoLp5500.frequency.setValueAtTime(5500, now);
+            isoLp5500.Q.setValueAtTime(0.707, now);
+            const vocalIsoGain = this.ctx.createGain();
+            vocalIsoGain.gain.setValueAtTime(0.0, now);
 
             this.decksBus.connect(splitter);
-            splitter.connect(dryGainL, 0);
-            splitter.connect(dryGainR, 1);
-            dryGainL.connect(merger, 0, 0);
-            dryGainR.connect(merger, 0, 1);
+            splitter.connect(midNode, 0);
+            splitter.connect(midNode, 1);
 
-            // Share dryGain via dryGainL/dryGainR synchronized updates or use single shared dry bus:
-            splitter.connect(midSum, 0);
-            splitter.connect(midSum, 1);
-            midSum.connect(bandpass);
-            bandpass.connect(midCancelGain);
-            midCancelGain.connect(merger, 0, 0);
-            midCancelGain.connect(merger, 0, 1);
+            splitter.connect(sideDiff, 0);
+            splitter.connect(sideRightInv, 1);
+            sideRightInv.connect(sideDiff);
+            sideDiff.connect(sideGain);
+            sideGain.connect(merger, 0, 0);
+            sideGain.connect(sideOutInvR);
+            sideOutInvR.connect(merger, 0, 1);
+
+            midNode.connect(lp180);
+            lp180.connect(edgeMidGain);
+            midNode.connect(hp5500);
+            hp5500.connect(edgeMidGain);
+            edgeMidGain.connect(merger, 0, 0);
+            edgeMidGain.connect(merger, 0, 1);
+
+            midNode.connect(directMidGain);
+            directMidGain.connect(merger, 0, 0);
+            directMidGain.connect(merger, 0, 1);
+
+            midNode.connect(isoHp180);
+            isoHp180.connect(isoLp5500);
+            isoLp5500.connect(vocalIsoGain);
+            vocalIsoGain.connect(merger, 0, 0);
+            vocalIsoGain.connect(merger, 0, 1);
+
             merger.connect(postBus);
 
-            // Tie dryGainR to dryGainL value through helper reference on dryGainL
-            (dryGainL as any).__pairedDryR = dryGainR;
             this.karaokeBypassGain = bypassGain;
-            this.karaokeDryGain = dryGainL;
-            this.karaokeMidCancelGain = midCancelGain;
+            this.karaokeSideGain = sideGain;
+            this.karaokeEdgeMidGain = edgeMidGain;
+            this.karaokeDirectMidGain = directMidGain;
+            this.karaokeVocalIsoGain = vocalIsoGain;
             this.postKaraokeBus = postBus;
             prevNode = postBus;
           } catch {
@@ -2465,29 +2515,32 @@ export class AudioEngine {
     if (
       this.ctx &&
       this.karaokeBypassGain &&
-      this.karaokeDryGain &&
-      this.karaokeMidCancelGain
+      this.karaokeSideGain &&
+      this.karaokeEdgeMidGain &&
+      this.karaokeDirectMidGain &&
+      this.karaokeVocalIsoGain
     ) {
       const now = this.ctx.currentTime;
       const bypassVal = this.karaokeEnabled ? 0.0 : 1.0;
-      const dryVal = this.karaokeEnabled ? (this.karaokeIsolateVocals ? 0.0 : 1.0) : 0.0;
-      const midVal = this.karaokeEnabled
-        ? this.karaokeIsolateVocals
-          ? safeLevel
-          : -(1.0 - safeLevel)
-        : 0.0;
+      const sideVal = this.karaokeEnabled && !this.karaokeIsolateVocals ? 1.0 : 0.0;
+      const directMidVal =
+        this.karaokeEnabled && !this.karaokeIsolateVocals ? safeLevel : 0.0;
+      const edgeMidVal =
+        this.karaokeEnabled && !this.karaokeIsolateVocals ? 1.0 - safeLevel : 0.0;
+      const vocalIsoVal =
+        this.karaokeEnabled && this.karaokeIsolateVocals ? safeLevel : 0.0;
       try {
         this.karaokeBypassGain.gain.setTargetAtTime(bypassVal, now, 0.02);
-        this.karaokeDryGain.gain.setTargetAtTime(dryVal, now, 0.02);
-        const pairedR = (this.karaokeDryGain as any).__pairedDryR as GainNode | undefined;
-        pairedR?.gain.setTargetAtTime(dryVal, now, 0.02);
-        this.karaokeMidCancelGain.gain.setTargetAtTime(midVal, now, 0.02);
+        this.karaokeSideGain.gain.setTargetAtTime(sideVal, now, 0.02);
+        this.karaokeDirectMidGain.gain.setTargetAtTime(directMidVal, now, 0.02);
+        this.karaokeEdgeMidGain.gain.setTargetAtTime(edgeMidVal, now, 0.02);
+        this.karaokeVocalIsoGain.gain.setTargetAtTime(vocalIsoVal, now, 0.02);
       } catch {
         this.karaokeBypassGain.gain.value = bypassVal;
-        this.karaokeDryGain.gain.value = dryVal;
-        const pairedR = (this.karaokeDryGain as any).__pairedDryR as GainNode | undefined;
-        if (pairedR) pairedR.gain.value = dryVal;
-        this.karaokeMidCancelGain.gain.value = midVal;
+        this.karaokeSideGain.gain.value = sideVal;
+        this.karaokeDirectMidGain.gain.value = directMidVal;
+        this.karaokeEdgeMidGain.gain.value = edgeMidVal;
+        this.karaokeVocalIsoGain.gain.value = vocalIsoVal;
       }
     }
   }

@@ -15,5 +15,7 @@ export {
   type LyricEmbedCardKind,
 } from './iosTextingMotion';
 export { CodeEditorKineticStyle } from './codeEditorKinetic';
+export { FisheyeKineticStyle } from './fisheyeKinetic';
+export { MotionGeometryStyle } from './motionGeometry';
 export * from './iosTextingMotion';
 export * from './codeEditorKinetic';

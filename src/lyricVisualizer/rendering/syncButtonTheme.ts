@@ -207,6 +207,52 @@ export function getSyncButtonTheme(
         showDot: true,
       });
 
+    case 'FisheyeKinetic':
+      return buildTheme({
+        styleId: 'FisheyeKinetic',
+        variationId: resolvedVar,
+        label: 'Resync Stack',
+        background: accent,
+        border: '1px solid rgba(255, 255, 255, 0.28)',
+        borderColor: 'rgba(255, 255, 255, 0.28)',
+        textColor: '#ffffff',
+        accentColor: '#ffffff',
+        dotColor: '#ffffff',
+        boxShadow: '0 10px 26px rgba(0, 0, 0, 0.62)',
+        backdropFilter: 'blur(12px)',
+        borderRadius: '10px',
+        fontFamily: SF_PRO_DISPLAY_STACK,
+        fontSize: '12px',
+        fontWeight: 800,
+        letterSpacing: '0.02em',
+        textTransform: 'none',
+        padding: '7px 16px',
+        showDot: false,
+      });
+
+    case 'MotionGeometry':
+      return buildTheme({
+        styleId: 'MotionGeometry',
+        variationId: resolvedVar,
+        label: '✦ Resume Orbit',
+        background: 'rgba(6, 10, 22, 0.88)',
+        border: `1px solid ${accent}`,
+        borderColor: accent,
+        textColor: '#e2e8f0',
+        accentColor: accent,
+        dotColor: accentSecondary,
+        boxShadow: '0 8px 26px rgba(0, 0, 0, 0.65)',
+        backdropFilter: 'blur(14px)',
+        borderRadius: '9999px',
+        fontFamily: SF_PRO_DISPLAY_STACK,
+        fontSize: '12px',
+        fontWeight: 600,
+        letterSpacing: '0.02em',
+        textTransform: 'none',
+        padding: '7px 15px',
+        showDot: true,
+      });
+
     case 'IosTextingMotion': {
       const isGreen = resolvedVar === 'classic-sms';
       const isGlass = resolvedVar === 'liquid-glass';

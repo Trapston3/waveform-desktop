@@ -34,6 +34,7 @@ import {
   resolveStyleVariationId,
   VISUAL_STYLE_DEFINITIONS,
   type VisualStyleId,
+  VISUAL_STYLE_CATEGORIES,
 } from '../../lyricVisualizer/core';
 import {
   MAX_BACKGROUND_OPACITY,
@@ -464,38 +465,68 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
           <div
             data-testid="visualizer-submenu-styles"
             style={submenuPositionStyle}
-            className="liquid-glass-capsule w-64 rounded-2xl text-white p-1.5 max-h-[70vh] overflow-y-auto shadow-2xl border border-white/15"
+            className="liquid-glass-capsule w-72 rounded-2xl text-white p-1.5 max-h-[72vh] overflow-y-auto shadow-2xl border border-white/15 space-y-2"
           >
-            <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
-              Visual Styles ({VISUAL_STYLE_DEFINITIONS.length})
-            </div>
-            {VISUAL_STYLE_DEFINITIONS.map((style, idx) => {
-              const selected = config.styleId === style.id;
+            {VISUAL_STYLE_CATEGORIES.map((cat) => {
+              const catStyles = VISUAL_STYLE_DEFINITIONS.filter((s) => s.category === cat.id);
               return (
-                <button
-                  key={style.id}
-                  type="button"
-                  onClick={() => handleSelectStyle(style.id)}
-                  className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg transition-colors text-left cursor-pointer ${
-                    selected ? 'bg-white/15 text-white' : 'hover:bg-white/10 text-white/85'
-                  }`}
-                  title={style.description}
-                >
-                  <span className="flex items-center gap-2 min-w-0">
-                    <span className="text-[10px] font-mono text-white/40 w-4 shrink-0">
-                      {idx + 1}.
-                    </span>
-                    <span className="truncate font-medium">{style.label}</span>
-                  </span>
-                  <span className="flex items-center gap-1 shrink-0">
-                    {style.uses3D && (
-                      <span className="text-[9px] px-1 py-0.2 rounded bg-white/10 text-white/60">
-                        3D
-                      </span>
-                    )}
-                    {selected && <Check size={13} className="text-[var(--color-accent)]" />}
-                  </span>
-                </button>
+                <div key={cat.id} className="space-y-0.5">
+                  <div className="px-2.5 pt-1 pb-0.5">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-white/50">
+                      {cat.label}
+                    </div>
+                    <div className="text-[9.5px] text-white/35 truncate">{cat.description}</div>
+                  </div>
+                  {catStyles.map((style) => {
+                    const selected = config.styleId === style.id;
+                    return (
+                      <div key={style.id}>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectStyle(style.id)}
+                          className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg transition-colors text-left cursor-pointer ${
+                            selected ? 'bg-white/15 text-white' : 'hover:bg-white/10 text-white/85'
+                          }`}
+                          title={style.description}
+                        >
+                          <span className="truncate font-medium">{style.label}</span>
+                          <span className="flex items-center gap-1 shrink-0">
+                            {style.uses3D && (
+                              <span className="text-[9px] px-1 py-0.2 rounded bg-white/10 text-white/60">
+                                3D
+                              </span>
+                            )}
+                            {selected && <Check size={13} className="text-[var(--color-accent)]" />}
+                          </span>
+                        </button>
+                        {selected && style.variations.length > 1 && (
+                          <div className="flex flex-wrap gap-1 px-2.5 pb-1 pt-0.5">
+                            {style.variations.map((v) => {
+                              const varActive = activeVariationId === v.id;
+                              return (
+                                <button
+                                  key={v.id}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setStyleVariation(style.id, v.id);
+                                  }}
+                                  className={`px-1.5 py-0.5 rounded text-[9.5px] font-medium transition-colors cursor-pointer ${
+                                    varActive
+                                      ? 'bg-[var(--color-accent)] text-white'
+                                      : 'bg-white/5 hover:bg-white/15 text-white/70'
+                                  }`}
+                                >
+                                  {v.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               );
             })}
           </div>

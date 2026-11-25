@@ -546,14 +546,71 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     {
       id: 'automix',
       tab: 'playback',
-      title: 'Automix Transitions',
-      description: 'Filter sweep and tempo match between tracks',
-      keywords: 'automix tempo filter',
+      title: 'Auto-Mix & Smart Transitions',
+      description: 'Beat-matched downbeat crossfades and overlap shaping between tracks',
+      keywords: 'automix smart transition crossfade tempo downbeat',
       control: (
         <input
           type="checkbox"
           checked={settings['playback.automixEnabled']}
           onChange={(e) => handleUpdate({ 'playback.automixEnabled': e.target.checked })}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'automixMode',
+      tab: 'playback',
+      title: 'Auto-Mix Style',
+      description: 'Choose neural downbeat alignment, smooth crossfade, or gapless cut',
+      keywords: 'automix mode neural beat smooth crossfade gapless',
+      control: (
+        <select
+          value={settings['playback.automixMode']}
+          onChange={(e) =>
+            handleUpdate({
+              'playback.automixMode': e.target.value as 'neural_beat' | 'smooth_crossfade' | 'gapless',
+            })
+          }
+          className="px-3 py-1.5 rounded-lg bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs text-[var(--color-primary)]"
+        >
+          <option value="neural_beat">Neural Beat-Matched (AI)</option>
+          <option value="smooth_crossfade">Smooth Crossfade</option>
+          <option value="gapless">Gapless</option>
+        </select>
+      ),
+    },
+    {
+      id: 'automixOverlap',
+      tab: 'playback',
+      title: 'Auto-Mix Overlap Duration',
+      description: `Blend overlap length between tracks (${settings['playback.automixOverlapSec']}s)`,
+      keywords: 'automix overlap duration seconds crossfade',
+      control: (
+        <input
+          type="range"
+          min="2"
+          max="12"
+          step="1"
+          value={settings['playback.automixOverlapSec']}
+          onChange={(e) =>
+            handleUpdate({ 'playback.automixOverlapSec': parseInt(e.target.value, 10) || 6 })
+          }
+          className="w-32 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'automixAvoidVocalOverlap',
+      tab: 'playback',
+      title: 'Avoid Vocal Clashes in Auto-Mix',
+      description: 'Prefer instrumental outro windows when scheduling smart transitions',
+      keywords: 'automix vocal overlap clash outro downbeat',
+      control: (
+        <input
+          type="checkbox"
+          checked={settings['playback.automixAvoidVocalOverlap']}
+          onChange={(e) => handleUpdate({ 'playback.automixAvoidVocalOverlap': e.target.checked })}
           className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
         />
       ),
@@ -728,6 +785,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       ),
     },
     {
+      id: 'autoSyncOnStart',
+      tab: 'lyrics',
+      title: 'Auto-Sync Lyrics on Track Start',
+      description: 'Automatically align synced LRC timestamps to vocal acoustics on playback start',
+      keywords: 'lyrics autosync align vocal drift offset',
+      control: (
+        <input
+          type="checkbox"
+          checked={settings['lyrics.autoSyncOnStart']}
+          onChange={(e) => handleUpdate({ 'lyrics.autoSyncOnStart': e.target.checked })}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
       id: 'romanization',
       tab: 'lyrics',
       title: 'Romanization Support',
@@ -856,7 +928,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       tab: 'lyrics',
       title: 'Visualizer Style',
       description: activeVizStyle.description,
-      keywords: 'visualizer style theme 12 styles',
+      keywords: 'visualizer style theme 14 styles kinetic motion native',
       control: (
         <select
           value={vizConfig.styleId}
@@ -866,10 +938,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
           }}
           className="px-3 py-1.5 rounded-lg bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs text-[var(--color-primary)]"
         >
-          {VISUAL_STYLE_DEFINITIONS.map((style) => (
-            <option key={style.id} value={style.id}>
-              {style.label}
-            </option>
+          {(
+            [
+              { id: 'kinetic', label: 'Kinetic Type' },
+              { id: 'motion', label: 'Motion Scenes' },
+              { id: 'native', label: 'Native Phone UI' },
+            ] as const
+          ).map((group) => (
+            <optgroup key={group.id} label={group.label}>
+              {VISUAL_STYLE_DEFINITIONS.filter((s) => s.category === group.id).map((style) => (
+                <option key={style.id} value={style.id}>
+                  {style.label}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
       ),

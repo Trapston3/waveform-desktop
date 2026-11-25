@@ -3,6 +3,7 @@
 // Generates deterministic SHA-256 install-manifest.tsv in <appOutDir>/resources/install-manifest.tsv
 // and stages build/install-manifest.tsv + build/7za.exe for NSIS selective updates.
 
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -231,12 +232,56 @@ export default async function afterPack(context) {
   fs.mkdirSync(buildDir, { recursive: true });
   fs.writeFileSync(path.join(buildDir, 'install-manifest.tsv'), manifestText, 'utf-8');
 
+  const releaseDir = path.join(rootDir, 'release');
+  fs.mkdirSync(releaseDir, { recursive: true });
+  fs.writeFileSync(path.join(releaseDir, 'install-manifest.tsv'), manifestText, 'utf-8');
+
   const sevenZa = findBundled7zaExe();
   if (sevenZa) {
     fs.copyFileSync(sevenZa, path.join(buildDir, '7za.exe'));
     console.log(`[after-pack-manifest] Staged 7za.exe from ${sevenZa}`);
   } else {
     console.warn('[after-pack-manifest] Warning: 7za.exe not found; NSIS selective update will use full fallback.');
+  }
+
+  // Build compact WaveForm-AppPatch-<version>.zip containing resources/** + install-manifest.tsv for direct delta updates
+  const patchZipPath = path.join(releaseDir, `WaveForm-AppPatch-${version}.zip`);
+  try {
+    fs.rmSync(patchZipPath, { force: true });
+  } catch {}
+
+  const patchTargets = [];
+  if (fs.existsSync(path.join(resourcesDir, 'app.asar'))) {
+    patchTargets.push(path.join('resources', 'app.asar'));
+  }
+  if (fs.existsSync(path.join(resourcesDir, 'app.asar.unpacked'))) {
+    patchTargets.push(path.join('resources', 'app.asar.unpacked'));
+  }
+  if (fs.existsSync(outManifestPath)) {
+    patchTargets.push(path.join('resources', 'install-manifest.tsv'));
+  }
+
+  if (patchTargets.length > 0) {
+    if (sevenZa) {
+      const res = spawnSync(
+        sevenZa,
+        ['a', '-tzip', '-mx=5', patchZipPath, ...patchTargets],
+        { cwd: appOutDir, stdio: 'pipe' }
+      );
+      if (res.status === 0 && fs.existsSync(patchZipPath)) {
+        const sizeMb = (fs.statSync(patchZipPath).size / (1024 * 1024)).toFixed(2);
+        console.log(`[after-pack-manifest] Created ${patchZipPath} (${sizeMb} MB)`);
+      } else {
+        console.warn(`[after-pack-manifest] 7za patch zip failed (exit ${res.status}): ${res.stderr?.toString() || ''}`);
+      }
+    } else {
+      const quotedTargets = patchTargets.map((t) => `'${t.replace(/'/g, "''")}'`).join(', ');
+      const psCmd = `Compress-Archive -Path ${quotedTargets} -DestinationPath '${patchZipPath.replace(/'/g, "''")}' -Force`;
+      spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCmd], {
+        cwd: appOutDir,
+        stdio: 'pipe',
+      });
+    }
   }
 
   console.log(

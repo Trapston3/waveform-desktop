@@ -28,6 +28,9 @@ export interface AppSettings {
   'playback.crossfadeCurve': 'constant_power' | 'linear';
   'playback.gaplessEnabled': boolean;
   'playback.automixEnabled': boolean;
+  'playback.automixMode': 'neural_beat' | 'smooth_crossfade' | 'gapless';
+  'playback.automixOverlapSec': number;
+  'playback.automixAvoidVocalOverlap': boolean;
   'playback.automixTransitionBars': number;
   'playback.signalsmithStretchEnabled': boolean;
   'playback.replayGainMode': 'off' | 'track' | 'album';
@@ -63,6 +66,7 @@ export interface AppSettings {
   'lyrics.autoScrollSpeed': 'smooth' | 'instant';
   'lyrics.rtlSupport': boolean;
   'lyrics.providerPriority': string[];
+  'lyrics.autoSyncOnStart': boolean;
   'lyrics.alignment': 'left' | 'center';
   lyricsAlignment: 'left' | 'center';
 
@@ -128,6 +132,9 @@ export const defaultAppSettings: AppSettings = {
   'playback.crossfadeCurve': 'constant_power',
   'playback.gaplessEnabled': true,
   'playback.automixEnabled': true,
+  'playback.automixMode': 'neural_beat',
+  'playback.automixOverlapSec': 6,
+  'playback.automixAvoidVocalOverlap': true,
   'playback.automixTransitionBars': 4,
   'playback.signalsmithStretchEnabled': true,
   'playback.replayGainMode': 'track',
@@ -163,6 +170,7 @@ export const defaultAppSettings: AppSettings = {
   'lyrics.autoScrollSpeed': 'smooth',
   'lyrics.rtlSupport': true,
   'lyrics.providerPriority': ['AppleMusic', 'LrcLib', 'Musixmatch'],
+  'lyrics.autoSyncOnStart': true,
   'lyrics.alignment': 'left',
   lyricsAlignment: 'left',
 

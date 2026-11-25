@@ -14,17 +14,21 @@ import {
   Spatial3DDepthStyle,
   StarfieldShip3DStyle,
   TypewriterEditorialStyle,
+  FisheyeKineticStyle,
+  MotionGeometryStyle,
 } from './styles';
 import { CodeEditorKineticStyle } from './styles/codeEditorKinetic';
 
 export const ALL_VISUAL_STYLE_IDS: readonly VisualStyleId[] = [
   'AppleMusicFlow',
+  'FisheyeKinetic',
   'TypewriterEditorial',
   'MinimalSwiss',
   'LiquidMetal',
   'KaraokeStage',
   'BrutalistZine',
   'GenerativeParticleInk',
+  'MotionGeometry',
   'Spatial3DDepth',
   'CRTScanline',
   'StarfieldShip3D',
@@ -57,6 +61,8 @@ export class StyleRegistry {
       new StarfieldShip3DStyle(),
       new IosTextingMotionStyle(),
       new CodeEditorKineticStyle(),
+      new FisheyeKineticStyle(),
+      new MotionGeometryStyle(),
     ];
 
     this.styles = new Map<VisualStyleId, ILyricVisualStyle>();

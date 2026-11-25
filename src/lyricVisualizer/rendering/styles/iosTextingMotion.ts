@@ -27,6 +27,7 @@ import {
   type StyleMeasurementSpec,
 } from '../styleInterface';
 import { drawAppleEmoji, preloadAppleEmojis } from '../iosEmojiRenderer';
+import { drawWordIcon, resolveWordIcon, type WordIconId } from '../wordIconDictionary';
 import {
   chooseSmartTapback,
   detectLyricEmbedCard,
@@ -56,10 +57,14 @@ const IOS_FONT_STACK = "'SF Pro Display', -apple-system, BlinkMacSystemFont, san
 type BubbleSide = 'left' | 'right';
 type PresentationMode = 'embed' | 'tapback' | 'inlineEmoji';
 
+const GROUP_CONTACTS = ['Maya', 'Jordan', 'Sam', 'Alex'] as const;
+const WALLET_BADGE_COLORS = ['#0A84FF', '#30D158', '#FF9F0A', '#BF5AF2', '#FA2D48'] as const;
+
 interface PrecomputedBubble {
   readonly lineIndex: number;
   readonly side: BubbleSide;
   readonly showTail: boolean;
+  readonly senderName: string;
   readonly timestampLabel: string | null;
   readonly tapback: TapbackKind | null;
   readonly embedCard: LyricEmbedCard | null;
@@ -68,6 +73,7 @@ interface PrecomputedBubble {
   readonly presentationMode: PresentationMode;
   readonly wordEffects: readonly (MagicWordKind | null)[];
   readonly wordEmojis: readonly (string | null)[];
+  readonly lineIconId: WordIconId;
   readonly secondaryText: string | null;
   readonly bubbleW: number;
   readonly bubbleH: number;
@@ -228,7 +234,11 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     if (variationId === 'liquid-glass') return 1;
     if (variationId === 'cinema-edit') return 2;
     if (variationId === 'classic-sms') return 3;
-    return 0; // 'ios-dark'
+    if (variationId === 'wallet-payments') return 10;
+    if (variationId === 'city-walk-map') return 11;
+    if (variationId === 'lock-screen-alerts') return 12;
+    if (variationId === 'group-chat') return 13;
+    return 0; // 'kinetic-messages' (default) & 'ios-dark'
   }
 
   getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
@@ -456,10 +466,23 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       const cardGap = cardH > 0 ? 6 : 0;
       const rowTotalH = bubbleH + cardGap + cardH;
 
+      let lineIconId: WordIconId = 'music';
+      const wordsSplit = line.text.split(/\s+/);
+      for (let wi = 0; wi < wordsSplit.length; wi++) {
+        const hit = resolveWordIcon(wordsSplit[wi], line.text);
+        if (hit) {
+          lineIconId = hit;
+          break;
+        }
+      }
+      const senderName =
+        GROUP_CONTACTS[(bIdx + (trackSeed % GROUP_CONTACTS.length)) % GROUP_CONTACTS.length];
+
       result[bIdx] = {
         lineIndex: lineIdx,
         side,
         showTail,
+        senderName,
         timestampLabel: timestamps[bIdx],
         tapback,
         embedCard: card,
@@ -468,6 +491,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         presentationMode,
         wordEffects,
         wordEmojis,
+        lineIconId,
         secondaryText,
         bubbleW,
         bubbleH,
@@ -1478,6 +1502,51 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     const anchorY = height * (isTransparent ? 0.52 : 0.5);
     const unsyncedOrLineLevel = isUnsyncedLyrics(frame) || frame.activeWordIndex < 0;
 
+    if (variationIdx === 10) {
+      this.renderWalletLedger(
+        ctx,
+        frame,
+        lyrics,
+        layout,
+        focal.left,
+        focalWidth,
+        height,
+        activeIdx,
+        effectiveScrollY,
+        motionScale
+      );
+      return;
+    }
+    if (variationIdx === 11) {
+      this.renderCityWalkMap(
+        ctx,
+        frame,
+        lyrics,
+        layout,
+        focal.left,
+        focalWidth,
+        height,
+        activeIdx,
+        motionScale
+      );
+      return;
+    }
+    if (variationIdx === 12) {
+      this.renderLockScreenAlerts(
+        ctx,
+        frame,
+        lyrics,
+        layout,
+        focal.left,
+        focalWidth,
+        height,
+        activeIdx,
+        effectiveScrollY,
+        motionScale
+      );
+      return;
+    }
+
     // Subtle 3D tilt/drift + Cinema-Edit focal zoom (disabled in reduceMotion)
     const tiltAngle =
       motionScale === 0 ? 0 : Math.sin(frame.timeSeconds * 0.45) * 0.008 * motionScale;
@@ -1571,8 +1640,26 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ctx.restore();
       }
 
-      const bx = b.side === 'right' ? focalWidth - marginSide - b.bubbleW : marginSide;
+      const bx =
+        variationIdx === 13
+          ? b.side === 'right'
+            ? focalWidth - marginSide - b.bubbleW
+            : marginSide + 14
+          : b.side === 'right'
+          ? focalWidth - marginSide - b.bubbleW
+          : marginSide;
       const by = screenY;
+
+      if (variationIdx === 13 && b.side === 'left' && (isActive || isPast || dist <= 2)) {
+        ctx.save();
+        ctx.font = `600 10.5px ${IOS_FONT_STACK}`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#9ca3af';
+        ctx.globalAlpha = isActive ? 0.88 : 0.55;
+        ctx.fillText(b.senderName, bx + 6, by - 9);
+        ctx.restore();
+      }
       const rowAlpha = isActive
         ? 1.0 * frame.lineFadeAlpha
         : isHovered
@@ -1617,11 +1704,17 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ? clamp01(lineElapsed / 0.52)
         : 1.0;
 
-      // Pop-in scale on active bubble entrance + parent bubble nudge (1.0 -> 1.028 -> 1.0) on Tapback
+      // Pop-in scale + incoming rotational tilt (+/-3.5 deg -> 0) on active bubble entrance
       const enterScale =
         isActive && motionScale > 0 && lineElapsed < 0.35
           ? 0.94 + 0.06 * easeOutBack(lineElapsed / 0.35)
           : 1.0;
+      const enterTiltRad =
+        variationIdx === 0 && isActive && motionScale > 0 && lineElapsed < 0.38
+          ? ((b.side === 'left' ? -3.5 : 3.5) * (Math.PI / 180)) *
+            (1 - Math.min(1, lineElapsed / 0.38)) *
+            motionScale
+          : 0;
       const tapNudgeScale =
         isActive && showTapback && motionScale > 0 && tapPop > 0 && tapPop < 1
           ? 1.0 + 0.028 * Math.sin(tapPop * Math.PI)
@@ -1630,11 +1723,12 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
 
       ctx.save();
       ctx.globalAlpha = rowAlpha;
-      if (popScale !== 1.0) {
+      if (popScale !== 1.0 || enterTiltRad !== 0) {
         const pivotX = b.side === 'right' ? bx + b.bubbleW : bx;
         const pivotY = by + b.bubbleH * 0.5;
         ctx.translate(pivotX, pivotY);
-        ctx.scale(popScale, popScale);
+        if (popScale !== 1.0) ctx.scale(popScale, popScale);
+        if (enterTiltRad !== 0) ctx.rotate(enterTiltRad);
         ctx.translate(-pivotX, -pivotY);
       }
 
@@ -1667,11 +1761,15 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      if (variationIdx === 1 || isHovered) {
+      if (variationIdx === 1 || isHovered || (variationIdx === 0 && isActive)) {
         ctx.strokeStyle = isHovered
-          ? 'rgba(255, 255, 255, 0.42)'
+          ? 'rgba(255, 255, 255, 0.48)'
+          : variationIdx === 0 && isActive
+          ? b.side === 'right'
+            ? 'rgba(147, 197, 253, 0.85)'
+            : 'rgba(226, 232, 240, 0.45)'
           : 'rgba(255, 255, 255, 0.22)';
-        ctx.lineWidth = isHovered ? 1.5 : 1;
+        ctx.lineWidth = variationIdx === 0 && isActive ? 1.5 : isHovered ? 1.5 : 1;
         ctx.stroke();
       }
 
@@ -1759,9 +1857,12 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
               ctx.fillText(word.text, wx, wy);
             }
           } else {
+            // Kinetic Messages: blur-spring reveal — upcoming words stay softly tucked rather than dim grey pre-text
+            const upcomingAlpha = variationIdx === 0 ? 0.14 : 0.64;
+            const upcomingRise = variationIdx === 0 && motionScale > 0 ? 6 : 0;
             ctx.fillStyle = '#ffffff';
-            ctx.globalAlpha = 0.64;
-            ctx.fillText(word.text, wx, wy);
+            ctx.globalAlpha = upcomingAlpha;
+            ctx.fillText(word.text, wx, wy + upcomingRise);
           }
         }
       }
@@ -1818,10 +1919,18 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         );
       }
 
-      // Contextual embed card attached below bubble
+      // Contextual embed card attached below bubble (full-width card span in Kinetic Messages)
       if (b.embedCard && b.cardH > 0) {
-        const cardW = Math.min(Math.max(b.bubbleW, 230), Math.round(focalWidth * 0.68));
-        const cardX = b.side === 'right' ? focalWidth - marginSide - cardW : marginSide;
+        const cardW =
+          variationIdx === 0 && b.embedCard.kind === 'maps'
+            ? Math.max(240, focalWidth - marginSide * 2)
+            : Math.min(Math.max(b.bubbleW, 230), Math.round(focalWidth * 0.68));
+        const cardX =
+          variationIdx === 0 && b.embedCard.kind === 'maps'
+            ? marginSide
+            : b.side === 'right'
+            ? focalWidth - marginSide - cardW
+            : marginSide;
         const cardY = by + b.bubbleH + 6;
         ctx.globalAlpha = rowAlpha;
         this.drawEmbedCard(ctx, b.embedCard, cardX, cardY, cardW, b.cardH, frame, motionScale);
@@ -1920,5 +2029,329 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ctx.restore();
       }
     }
+  }
+
+  private renderWalletLedger(
+    ctx: CanvasRenderingContext2D,
+    frame: StyleFrameContext,
+    lyrics: Lyrics,
+    layout: LyricsLayout,
+    focalLeft: number,
+    focalWidth: number,
+    height: number,
+    activeIdx: number,
+    effectiveScrollY: number,
+    motionScale: number
+  ): void {
+    const cardW = Math.min(540, Math.max(260, focalWidth - 56));
+    const cardX = focalLeft + (focalWidth - cardW) * 0.5;
+    const anchorY = height * 0.48;
+    const bass = frame.audio.bassEnergy || 0;
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 13px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillText('Apple Wallet · Live Ledger', focalLeft + focalWidth * 0.5, 28);
+
+    for (let i = 0; i < this.bubbles.length; i++) {
+      const b = this.bubbles[i];
+      const lineObj = lyrics.lines[b.lineIndex];
+      const measured = layout.lines[b.lineIndex];
+      const rowH = Math.max(66, b.bubbleH + 18);
+      const y = anchorY + (b.topY - effectiveScrollY);
+      if (y + rowH < 52 || y > height + 30) continue;
+
+      const isActive = i === activeIdx && frame.activeLineIndex >= 0;
+      const dist = Math.abs(i - activeIdx);
+      const alpha = isActive ? 1.0 * frame.lineFadeAlpha : Math.max(0.22, 0.84 - dist * 0.16);
+      const priceCents = 240 + Math.round(((lineObj.text.length * 137 + i * 313) % 9500) * (1 + bass * 0.45));
+      const amountText = `$${(priceCents / 100).toFixed(2)}`;
+      const badgeColor = WALLET_BADGE_COLORS[i % WALLET_BADGE_COLORS.length];
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      drawRoundedRectPath(ctx, cardX, y, cardW, rowH, 16);
+      ctx.fillStyle = isActive ? '#202229' : '#18191e';
+      ctx.fill();
+      ctx.strokeStyle = isActive ? 'rgba(10, 132, 255, 0.65)' : 'rgba(255, 255, 255, 0.1)';
+      ctx.lineWidth = isActive ? 1.5 : 1;
+      ctx.stroke();
+
+      // Merchant rounded icon badge
+      const iconBox = 38;
+      const iconX = cardX + 14;
+      const iconY = y + (rowH - iconBox) * 0.5;
+      drawRoundedRectPath(ctx, iconX, iconY, iconBox, iconBox, 10);
+      ctx.fillStyle = badgeColor;
+      ctx.fill();
+      drawWordIcon(ctx, b.lineIconId, iconX + iconBox * 0.5, iconY + iconBox * 0.5, 20, '#ffffff', 1.0);
+
+      // Lyric memo + Apple Pay Approved sublabel
+      const textLeft = iconX + iconBox + 14;
+      const textMaxW = Math.max(100, cardW - 165);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = `${isActive ? 700 : 600} ${Math.min(18, layout.fontSizePx)}px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = '#ffffff';
+      const label = measured.text.length > 34 ? `${measured.text.slice(0, 32)}…` : measured.text;
+      ctx.fillText(label, textLeft, y + rowH * 0.38, textMaxW);
+
+      ctx.font = `500 11.5px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = '#9ca3af';
+      ctx.fillText('Apple Pay · Approved', textLeft, y + rowH * 0.68);
+
+      // Right amount + animated blue Apple Pay checkmark on active drop
+      ctx.textAlign = 'right';
+      ctx.font = `700 15px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = isActive ? '#ffffff' : '#d1d5db';
+      ctx.fillText(amountText, cardX + cardW - (isActive ? 42 : 16), y + rowH * 0.42);
+
+      if (isActive) {
+        const ringCx = cardX + cardW - 22;
+        const ringCy = y + rowH * 0.5;
+        const p = clamp01((frame.timeSeconds - lineObj.startSeconds) * 2.4);
+        ctx.strokeStyle = IMSG_BLUE;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.arc(ringCx, ringCy, 11, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * Math.max(0.25, p));
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(ringCx - 4.5, ringCy + 0.5);
+        ctx.lineTo(ringCx - 1.2, ringCy + 3.8);
+        ctx.lineTo(ringCx + 5, ringCy - 3.5);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  private renderCityWalkMap(
+    ctx: CanvasRenderingContext2D,
+    frame: StyleFrameContext,
+    lyrics: Lyrics,
+    layout: LyricsLayout,
+    focalLeft: number,
+    focalWidth: number,
+    height: number,
+    activeIdx: number,
+    motionScale: number
+  ): void {
+    const cx = focalLeft + focalWidth * 0.5;
+    const cy = height * 0.5;
+    const t = frame.timeSeconds || 0;
+
+    // Switch city labels dynamically based on lyric mentions
+    let cityLabel = 'San Francisco';
+    let streetA = 'Market St';
+    let streetB = 'Valencia St';
+    const sampleText = lyrics.lines[Math.min(lyrics.lines.length - 1, Math.max(0, activeIdx))]?.text ?? '';
+    if (/\btokyo|shibuya|harajuku\b/i.test(sampleText)) {
+      cityLabel = 'Tokyo';
+      streetA = 'Shibuya Crossing';
+      streetB = 'Omotesando';
+    } else if (/\bnew york|nyc|brooklyn|manhattan|broadway\b/i.test(sampleText)) {
+      cityLabel = 'New York';
+      streetA = 'Broadway';
+      streetB = '5th Ave';
+    } else if (/\blondon|soho|thames\b/i.test(sampleText)) {
+      cityLabel = 'London';
+      streetA = 'Oxford St';
+      streetB = 'Soho Sq';
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(focalLeft, 0, focalWidth, height);
+    ctx.clip();
+
+    // Dark Apple Maps vector terrain + street grid drifting smoothly with active line progress
+    const camX = activeIdx * 82 + (motionScale > 0 ? t * 14 : 0);
+    const camY = Math.sin(activeIdx * 0.55) * 32;
+    ctx.fillStyle = '#0c111b';
+    ctx.fillRect(focalLeft, 0, focalWidth, height);
+
+    ctx.strokeStyle = '#1d283a';
+    ctx.lineWidth = 2;
+    const gridStep = 64;
+    const offsetX = -(camX % gridStep);
+    const offsetY = -(camY % gridStep);
+    for (let x = focalLeft + offsetX - gridStep; x < focalLeft + focalWidth + gridStep; x += gridStep) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x + 28, height);
+      ctx.stroke();
+    }
+    for (let y = offsetY - gridStep; y < height + gridStep; y += gridStep) {
+      ctx.beginPath();
+      ctx.moveTo(focalLeft, y);
+      ctx.lineTo(focalLeft + focalWidth, y - 18);
+      ctx.stroke();
+    }
+
+    // Subtle district watermark
+    ctx.font = `600 12px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.55)';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Apple Maps · ${cityLabel} · ${streetA} / ${streetB}`, focalLeft + 20, 28);
+
+    // Walking blue route polyline connecting previous & current lyric waypoints
+    const startIdx = Math.max(0, activeIdx - 3);
+    const endIdx = Math.min(this.bubbles.length - 1, activeIdx + 1);
+    ctx.strokeStyle = IMSG_BLUE;
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = IMSG_BLUE;
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    for (let i = startIdx; i <= endIdx; i++) {
+      const px = cx + (i - activeIdx) * 140 - Math.min(1, frame.wordProgress || 0) * 18 * motionScale;
+      const py = cy + Math.sin(i * 1.15) * 68;
+      if (i === startIdx) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Animated pins & dark-glass callout pills
+    for (let i = startIdx; i <= endIdx; i++) {
+      const b = this.bubbles[i];
+      const measured = layout.lines[b.lineIndex];
+      const isAct = i === activeIdx;
+      const px = cx + (i - activeIdx) * 140 - Math.min(1, frame.wordProgress || 0) * 18 * motionScale;
+      const py = cy + Math.sin(i * 1.15) * 68;
+
+      ctx.fillStyle = isAct ? '#FA2D48' : '#0A84FF';
+      ctx.beginPath();
+      ctx.arc(px, py, isAct ? 10 : 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(px, py, isAct ? 4 : 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      const pillText = measured.text.length > 36 ? `${measured.text.slice(0, 34)}…` : measured.text;
+      ctx.font = `${isAct ? 700 : 500} ${isAct ? 16 : 12.5}px ${IOS_FONT_STACK}`;
+      const pw = Math.min(focalWidth * 0.72, Math.max(110, ctx.measureText(pillText).width + 26));
+      const ph = isAct ? 38 : 28;
+      const boxX = Math.max(focalLeft + 14, Math.min(focalLeft + focalWidth - pw - 14, px - pw * 0.5));
+      const boxY = py - ph - 18;
+
+      ctx.globalAlpha = isAct ? 0.98 * frame.lineFadeAlpha : 0.62;
+      drawRoundedRectPath(ctx, boxX, boxY, pw, ph, 12);
+      ctx.fillStyle = isAct ? 'rgba(22, 24, 34, 0.94)' : 'rgba(22, 24, 34, 0.76)';
+      ctx.fill();
+      ctx.strokeStyle = isAct ? IMSG_BLUE : 'rgba(255, 255, 255, 0.16)';
+      ctx.lineWidth = isAct ? 1.5 : 1;
+      ctx.stroke();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(pillText, boxX + pw * 0.5, boxY + ph * 0.5, pw - 18);
+    }
+
+    ctx.restore();
+  }
+
+  private renderLockScreenAlerts(
+    ctx: CanvasRenderingContext2D,
+    frame: StyleFrameContext,
+    lyrics: Lyrics,
+    layout: LyricsLayout,
+    focalLeft: number,
+    focalWidth: number,
+    height: number,
+    activeIdx: number,
+    effectiveScrollY: number,
+    motionScale: number
+  ): void {
+    const cx = focalLeft + focalWidth * 0.5;
+    const bannerW = Math.min(520, Math.max(250, focalWidth - 48));
+    const bannerX = cx - bannerW * 0.5;
+
+    ctx.save();
+    // Top Lock Screen clock header
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 48px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.fillText('9:41', cx, 56);
+    ctx.font = `600 12px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = 'rgba(226, 232, 240, 0.7)';
+    ctx.fillText(frame.trackMetadata?.artist || 'Now Playing', cx, 88);
+
+    const anchorY = height * 0.52;
+    const trackTitle = frame.trackMetadata?.title || 'WaveForm';
+
+    for (let i = 0; i < this.bubbles.length; i++) {
+      const b = this.bubbles[i];
+      const measured = layout.lines[b.lineIndex];
+      const rowH = Math.max(64, b.bubbleH + 20);
+      const y = anchorY + (b.topY - effectiveScrollY);
+      if (y + rowH < 108 || y > height - 70) continue;
+
+      const isActive = i === activeIdx && frame.activeLineIndex >= 0;
+      const dist = Math.abs(i - activeIdx);
+      const alpha = isActive ? 1.0 * frame.lineFadeAlpha : Math.max(0.24, 0.86 - dist * 0.18);
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      drawRoundedRectPath(ctx, bannerX, y, bannerW, rowH, 18);
+      ctx.fillStyle = isActive ? 'rgba(34, 36, 46, 0.88)' : 'rgba(26, 28, 36, 0.72)';
+      ctx.fill();
+      ctx.strokeStyle = isActive ? 'rgba(255, 255, 255, 0.24)' : 'rgba(255, 255, 255, 0.1)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // App / Track icon badge
+      const iconBox = 34;
+      drawRoundedRectPath(ctx, bannerX + 12, y + 14, iconBox, iconBox, 9);
+      ctx.fillStyle = frame.palette.accentPrimary || '#FA2D48';
+      ctx.fill();
+      drawWordIcon(ctx, b.lineIconId, bannerX + 29, y + 31, 18, '#ffffff', 1.0);
+
+      // Sender + "now" badge
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = `700 12px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillText(trackTitle, bannerX + 56, y + 21, bannerW - 120);
+      ctx.textAlign = 'right';
+      ctx.font = `500 11px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = 'rgba(226, 232, 240, 0.6)';
+      ctx.fillText(isActive ? 'now' : `${Math.max(1, dist)}m`, bannerX + bannerW - 14, y + 21);
+
+      ctx.textAlign = 'left';
+      ctx.font = `500 ${Math.min(16, layout.fontSizePx)}px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(measured.text, bannerX + 56, y + rowH * 0.66, bannerW - 72);
+      ctx.restore();
+    }
+
+    // Compact Live-Activity waveform widget at bottom
+    const liveW = Math.min(280, bannerW);
+    const liveX = cx - liveW * 0.5;
+    const liveY = height - 46;
+    drawRoundedRectPath(ctx, liveX, liveY, liveW, 32, 16);
+    ctx.fillStyle = 'rgba(20, 22, 30, 0.85)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.stroke();
+
+    const barCount = 12;
+    const barStart = cx - ((barCount * 8) * 0.5);
+    for (let k = 0; k < barCount; k++) {
+      const e = 0.25 + 0.75 * Math.abs(Math.sin((frame.timeSeconds || 0) * 5.2 + k * 0.7)) * (0.4 + frame.audio.bassEnergy * 0.8) * Math.max(0.2, motionScale);
+      const bh = Math.max(4, Math.min(18, Math.round(16 * e)));
+      ctx.fillStyle = frame.palette.accentPrimary || '#FA2D48';
+      ctx.fillRect(barStart + k * 8, liveY + 16 - bh * 0.5, 4, bh);
+    }
+
+    ctx.restore();
   }
 }

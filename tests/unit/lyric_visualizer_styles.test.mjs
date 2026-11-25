@@ -28,7 +28,7 @@ export async function resolve(specifier, context, nextResolve) {
 `;
 register(`data:text/javascript,${encodeURIComponent(resolverHook)}`, import.meta.url);
 
-const { VISUAL_STYLE_DEFINITIONS, parseLrc } = await import('../../src/lyricVisualizer/core/index.ts');
+const { VISUAL_STYLE_DEFINITIONS, VISUAL_STYLE_CATEGORIES, parseLrc } = await import('../../src/lyricVisualizer/core/index.ts');
 const {
   ALL_VISUAL_STYLE_IDS,
   StyleRegistry,
@@ -38,6 +38,9 @@ const {
   LyricStageRenderer,
   CRTScanlineStyle,
   LiquidMetalStyle,
+  Ship3DScene,
+  resolveWordIcon,
+  drawWordIcon,
   getSyncButtonTheme,
   detectLyricEmbedCard,
   detectMagicWordEffect,
@@ -46,14 +49,16 @@ const {
   detectCodeWordEffect,
 } = await import('../../src/lyricVisualizer/rendering/index.ts');
 
-const EXPECTED_12_STYLES = [
+const EXPECTED_14_STYLES = [
   'AppleMusicFlow',
+  'FisheyeKinetic',
   'TypewriterEditorial',
   'MinimalSwiss',
   'LiquidMetal',
   'KaraokeStage',
   'BrutalistZine',
   'GenerativeParticleInk',
+  'MotionGeometry',
   'Spatial3DDepth',
   'CRTScanline',
   'StarfieldShip3D',
@@ -211,13 +216,13 @@ const UNSYNCED_LYRICS = {
   ],
 };
 
-describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
-  test('StyleRegistry registers all 12 consolidated visual style IDs', () => {
+describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
+  test('StyleRegistry registers all 14 consolidated visual style IDs', () => {
     const registry = new StyleRegistry();
-    assert.equal(ALL_VISUAL_STYLE_IDS.length, 12);
-    assert.deepEqual([...registry.listIds()], EXPECTED_12_STYLES);
+    assert.equal(ALL_VISUAL_STYLE_IDS.length, 14);
+    assert.deepEqual([...registry.listIds()], EXPECTED_14_STYLES);
 
-    for (const id of EXPECTED_12_STYLES) {
+    for (const id of EXPECTED_14_STYLES) {
       assert.equal(registry.has(id), true, `Missing style ID: ${id}`);
       const style = registry.get(id);
       assert.equal(style.id, id);
@@ -228,7 +233,7 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     }
   });
 
-  test('All 12 styles and every variation render cleanly across modes', () => {
+  test('All 14 styles and every variation render cleanly across modes', () => {
     const canvas = createMockCanvas();
     const webGlCanvas = createMockCanvas();
     const renderer = new LyricStageRenderer({
@@ -986,7 +991,7 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     assert.deepEqual(followEvents, [false, true]);
     renderer.dispose();
 
-    for (const id of ['Classic', ...EXPECTED_12_STYLES]) {
+    for (const id of ['Classic', ...EXPECTED_14_STYLES]) {
       const theme = getSyncButtonTheme(id, undefined, SAMPLE_PALETTE);
       assert.equal(theme.styleId, id);
       assert.ok(theme.label.length > 0);
@@ -1574,7 +1579,7 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     );
 
     // Check remaining styles never draw [Instrumental] or blank text boxes when given unfiltered lines
-    for (const styleId of EXPECTED_12_STYLES) {
+    for (const styleId of EXPECTED_14_STYLES) {
       if (styleId === 'IosTextingMotion') continue;
       renderer.setStyle(styleId);
       renderer.setLyrics(unfilteredLyrics);
@@ -1780,5 +1785,107 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     assert.equal(drawnTexts.includes('Across the velvet dark'), false);
 
     renderer.dispose();
+  });
+
+  test('v1.3.1 Visualizer expansion: wordIconDictionary, FisheyeKinetic, MotionGeometry, CodeEditorKinetic codestyle-visual & IosTextingMotion 5 Native Phone UI modes', () => {
+    assert.equal(VISUAL_STYLE_CATEGORIES.length, 3);
+    assert.equal(resolveWordIcon('wait'), 'hourglass');
+    assert.equal(resolveWordIcon('minute', 'wait a minute'), 'clock');
+    assert.equal(resolveWordIcon('drive', 'night drive'), 'car');
+    const iconCtx = createMockCanvas2DContext();
+    drawWordIcon(iconCtx, 'hourglass', 100, 100, 24, '#FA2D48', 1.0);
+    assert.ok(iconCtx.ops.length > 0);
+
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'FisheyeKinetic',
+      variationId: 'fisheye-visual',
+      palette: SAMPLE_PALETTE,
+    });
+    renderer.resize(1024, 600, 1);
+    renderer.setLyrics(SYNCED_LYRICS);
+
+    for (const [styleId, variationId] of [
+      ['FisheyeKinetic', 'fisheye-visual'],
+      ['FisheyeKinetic', 'fisheye'],
+      ['FisheyeKinetic', 'visual-stack'],
+      ['MotionGeometry', 'constellation'],
+      ['MotionGeometry', 'branches'],
+      ['MotionGeometry', 'web'],
+      ['CodeEditorKinetic', 'codestyle-visual'],
+      ['IosTextingMotion', 'kinetic-messages'],
+      ['IosTextingMotion', 'wallet-payments'],
+      ['IosTextingMotion', 'city-walk-map'],
+      ['IosTextingMotion', 'lock-screen-alerts'],
+      ['IosTextingMotion', 'group-chat'],
+    ]) {
+      canvas.ctx2d.ops.length = 0;
+      renderer.setStyle(styleId, variationId);
+      renderer.setSyncState({
+        timeSeconds: 2.2,
+        activeLineIndex: 0,
+        activeWordIndex: 2,
+        wordProgress: 0.5,
+        didSeekThisFrame: true,
+        hasLyrics: true,
+      });
+      assert.equal(
+        renderer.renderFrame(2200, { rmsLevel: 0.7, bassEnergy: 0.85, midEnergy: 0.6, trebleEnergy: 0.5, beatDetected: true, isDownbeat: true }),
+        true,
+        `${styleId}/${variationId} must render cleanly`
+      );
+      const fillTextCount = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').length;
+      assert.ok(fillTextCount > 0, `${styleId}/${variationId} should draw text`);
+    }
+
+    renderer.dispose();
+  });
+
+  test('Spaceship 3D sweeps 180+ BPM dense bursts without skipping words and clamps Split View X excursions', () => {
+    const scene = new Ship3DScene(null);
+    const rapidWords = Array.from({ length: 12 }, (_, idx) => ({
+      text: `w${idx + 1}`,
+      startSeconds: 1.0 + idx * 0.08,
+      endSeconds: 1.0 + (idx + 1) * 0.08,
+    }));
+    const lyrics = {
+      lines: [
+        {
+          startSeconds: 1.0,
+          endSeconds: 2.0,
+          text: rapidWords.map((w) => w.text).join(' '),
+          isSynthesizedWords: false,
+          words: rapidWords,
+        },
+      ],
+    };
+
+    const mockCtx = createMockCanvas2DContext();
+    const audio = { rmsLevel: 0.7, bassEnergy: 0.8, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: false, estimatedBpm: 185 };
+
+    // Simulate a coarse 50ms frame jump across fast consecutive words
+    scene.syncLyricsState(lyrics, 1.02, 0, 0, false, true);
+    scene.render(mockCtx, 1280, 720, 1.02, 0.016, audio, SAMPLE_PALETTE, false, false, 'deep-space', 0.95, 860, false, 440);
+    scene.syncLyricsState(lyrics, 1.25, 0, 3, false, false);
+    scene.render(mockCtx, 1280, 720, 1.25, 0.05, audio, SAMPLE_PALETTE, false, false, 'deep-space', 0.95, 860, false, 440);
+
+    // Gate pool must hold all visible rapid words (up to 36 slots) and enforce >= 4.5 unit Z spacing
+    const count = scene.getProjectedWordGateCount();
+    assert.ok(count >= 10, `Expected >= 10 rapid words projected, got ${count}`);
+    for (let i = 1; i < count; i++) {
+      const prevZ = scene.getProjectedWordGate(i - 1).worldZ;
+      const curZ = scene.getProjectedWordGate(i).worldZ;
+      assert.ok(prevZ - curZ >= 4.4, `Tight fast words must keep >=4.5 Z spacing (${prevZ} -> ${curZ})`);
+    }
+
+    // Split View clamp keeps negative excursion safely bounded rightward
+    let minSplitX = 999;
+    for (let t = 0; t < 12; t += 0.25) {
+      const p = scene.getFlightPosition(t);
+      if (p.x < minSplitX) minSplitX = p.x;
+    }
+    assert.ok(minSplitX > -3.5, `Expected Split View left excursion clamped rightward, got ${minSplitX}`);
+    scene.dispose();
   });
 });

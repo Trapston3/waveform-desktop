@@ -39,6 +39,28 @@ export interface ElectronAPI {
   discordRpcClear: () => Promise<boolean>;
   discordRpcGetStatus: () => Promise<any>;
   discordRpcConfigure: (config: Record<string, any>) => Promise<any>;
+  scrobbleConfigure: (config: Record<string, any>) => Promise<any>;
+  scrobbleNowPlaying: (track: Record<string, any>) => Promise<any>;
+  scrobbleSubmit: (track: Record<string, any>) => Promise<any>;
+  scrobbleValidateListenBrainz: (token: string) => Promise<any>;
+  scrobbleTestLastFm: (cfg: Record<string, any>) => Promise<any>;
+  scrobbleFlushQueue: () => Promise<any>;
+  scrobbleGetStatus: () => Promise<any>;
+  getCustomLyrics: (trackKey: string) => Promise<any>;
+  saveCustomLyrics: (trackKey: string, rawText: string, offsetMs?: number) => Promise<any>;
+  deleteCustomLyrics: (trackKey: string) => Promise<boolean>;
+  setCustomLyricsOffset: (trackKey: string, offsetMs: number) => Promise<number>;
+  getCustomLyricsOffset: (trackKey: string) => Promise<number>;
+  hotkeysConfigure: (config: Record<string, any>) => Promise<any>;
+  hotkeysGetStatus: () => Promise<any>;
+  hotkeysResetDefaults: () => Promise<any>;
+  onHotkeyTriggered: (callback: (action: string) => void) => () => void;
+  offlineCachePin: (input: Record<string, any>) => Promise<any>;
+  offlineCacheUnpin: (trackId: string) => Promise<any>;
+  offlineCacheResolve: (trackId: string) => Promise<any>;
+  offlineCacheGetStats: () => Promise<any>;
+  offlineCacheSetLimitGb: (gb: number) => Promise<any>;
+  offlineCacheClearUnpinned: () => Promise<any>;
   selectLocalFolder: () => Promise<{ canceled: boolean; folderPath: string | null }>;
   scanLocalFolder: (folderPath: string) => Promise<any[]>;
   loadLocalLibraryCache: () => Promise<{ version: number; folders: string[]; tracks: any[]; updatedAt?: number } | null>;
@@ -167,6 +189,42 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.invoke('discordRpc:getStatus'),
   discordRpcConfigure: (config: Record<string, any>) =>
     ipcRenderer.invoke('discordRpc:configure', config),
+  scrobbleConfigure: (config: Record<string, any>) =>
+    ipcRenderer.invoke('scrobble:configure', config),
+  scrobbleNowPlaying: (track: Record<string, any>) =>
+    ipcRenderer.invoke('scrobble:nowPlaying', track),
+  scrobbleSubmit: (track: Record<string, any>) =>
+    ipcRenderer.invoke('scrobble:submit', track),
+  scrobbleValidateListenBrainz: (token: string) =>
+    ipcRenderer.invoke('scrobble:validateListenBrainz', token),
+  scrobbleTestLastFm: (cfg: Record<string, any>) =>
+    ipcRenderer.invoke('scrobble:testLastFm', cfg),
+  scrobbleFlushQueue: () => ipcRenderer.invoke('scrobble:flushQueue'),
+  scrobbleGetStatus: () => ipcRenderer.invoke('scrobble:getStatus'),
+  getCustomLyrics: (trackKey: string) => ipcRenderer.invoke('lyrics:getCustom', trackKey),
+  saveCustomLyrics: (trackKey: string, rawText: string, offsetMs?: number) =>
+    ipcRenderer.invoke('lyrics:saveCustom', trackKey, rawText, offsetMs),
+  deleteCustomLyrics: (trackKey: string) => ipcRenderer.invoke('lyrics:deleteCustom', trackKey),
+  setCustomLyricsOffset: (trackKey: string, offsetMs: number) =>
+    ipcRenderer.invoke('lyrics:setOffset', trackKey, offsetMs),
+  getCustomLyricsOffset: (trackKey: string) => ipcRenderer.invoke('lyrics:getOffset', trackKey),
+  hotkeysConfigure: (config: Record<string, any>) =>
+    ipcRenderer.invoke('hotkeys:configure', config),
+  hotkeysGetStatus: () => ipcRenderer.invoke('hotkeys:getStatus'),
+  hotkeysResetDefaults: () => ipcRenderer.invoke('hotkeys:resetDefaults'),
+  onHotkeyTriggered: (callback: (action: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, action: string) => callback(action);
+    ipcRenderer.on('hotkeys:triggered', handler);
+    return () => {
+      ipcRenderer.removeListener('hotkeys:triggered', handler);
+    };
+  },
+  offlineCachePin: (input: Record<string, any>) => ipcRenderer.invoke('offlineCache:pin', input),
+  offlineCacheUnpin: (trackId: string) => ipcRenderer.invoke('offlineCache:unpin', trackId),
+  offlineCacheResolve: (trackId: string) => ipcRenderer.invoke('offlineCache:resolve', trackId),
+  offlineCacheGetStats: () => ipcRenderer.invoke('offlineCache:getStats'),
+  offlineCacheSetLimitGb: (gb: number) => ipcRenderer.invoke('offlineCache:setLimitGb', gb),
+  offlineCacheClearUnpinned: () => ipcRenderer.invoke('offlineCache:clearUnpinned'),
   selectLocalFolder: () => ipcRenderer.invoke('select-local-folder'),
   scanLocalFolder: (folderPath: string) => ipcRenderer.invoke('scan-local-folder', folderPath),
   loadLocalLibraryCache: () => ipcRenderer.invoke('local-library-load-cache'),

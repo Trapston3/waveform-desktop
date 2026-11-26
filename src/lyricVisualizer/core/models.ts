@@ -218,15 +218,19 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     id: 'IosTextingMotion',
     label: 'iOS Native Design',
     category: 'native',
-    description: 'Authentic dark-mode iOS Messages, Apple Wallet Pay cards, Apple Maps walk route & Lock Screen stacks.',
+    description: 'Authentic dark-mode iOS Messages, Cinema Edit, Apple Glass, Wallet Pay, Maps & Lock Screen alerts.',
     usesWebGl: false,
     defaultVariationId: 'kinetic-messages',
     variations: [
-      { id: 'kinetic-messages', label: 'Kinetic Messages', description: 'Blur-spring word reveal, tilted bubbles, glowing contour halo & Maps cards' },
-      { id: 'wallet-payments', label: 'Wallet / Payments', description: 'Dark Apple Wallet / Apple Pay transaction cards with merchant icons & checkmark' },
-      { id: 'city-walk-map', label: 'City Walk Map', description: 'Dark Apple Maps vector grid gliding along a polyline with callout pins' },
-      { id: 'lock-screen-alerts', label: 'Lock Screen Alerts', description: 'Stacked frosted iOS Lock Screen banners, clock & live waveform widget' },
-      { id: 'group-chat', label: 'Group Chat', description: 'Multi-speaker dark iMessage thread with staggered Tapback bursts' },
+      { id: 'kinetic-messages', label: 'Kinetic Messages', description: 'Zero-preview macro iMessage bubbles with blur-spring reveal, contour halo & dark Maps cards' },
+      { id: 'cinema-edit', label: 'Cinema Edit', description: 'Dramatic beat-synced camera punch, widescreen framing & bold blue/glass dialogue' },
+      { id: 'ios-dark', label: 'Classic iMessage', description: 'Authentic dark-mode iMessage thread with spring physics & tapbacks' },
+      { id: 'liquid-glass', label: 'Apple Glass', description: 'Translucent iOS liquid-glass specular bubbles over ambient album aura' },
+      { id: 'classic-sms', label: 'Classic SMS Green', description: 'Retro iOS green SMS bubbles with crisp high-contrast legibility' },
+      { id: 'group-chat', label: 'Group Chat', description: 'Multi-speaker dark iMessage thread with circular initials avatars' },
+      { id: 'wallet-payments', label: 'Wallet / Payments', description: 'Apple Card pass & beat-reactive Apple Pay transaction ledger' },
+      { id: 'city-walk-map', label: 'City Walk Map', description: 'Procedural dark Apple Maps city canvas with following GPS beacon & waypoint pins' },
+      { id: 'lock-screen-alerts', label: 'Lock Screen Alerts', description: 'iOS Lock Screen clock, depth-stacked frosted glass alerts & Dynamic Island waveform' },
     ],
   },
   {
@@ -272,15 +276,6 @@ export function resolveStyleVariationId(
       : undefined;
   if (rawCandidate && def.variations.some((v) => v.id === rawCandidate)) {
     return rawCandidate;
-  }
-  if (
-    def.id === 'IosTextingMotion' &&
-    (rawCandidate === 'ios-dark' ||
-      rawCandidate === 'liquid-glass' ||
-      rawCandidate === 'cinema-edit' ||
-      rawCandidate === 'classic-sms')
-  ) {
-    return 'kinetic-messages';
   }
   if (styleId === 'HoloVaporwave' && def.variations.some((v) => v.id === 'holo-vaporwave')) {
     return 'holo-vaporwave';
@@ -526,6 +521,10 @@ export type MotionIntensity = 'subtle' | 'normal' | 'vivid';
 export type NowPlayingLayoutMode = 'split' | 'lyrics-focus' | 'artwork-focus' | 'ambient';
 export type LyricTextAlign = 'center' | 'left';
 
+export const MIN_IOS_KINETIC_ZOOM = 0.75;
+export const MAX_IOS_KINETIC_ZOOM = 1.85;
+export const DEFAULT_IOS_KINETIC_ZOOM = 1.45;
+
 export function normalizeNowPlayingLayout(val: unknown): NowPlayingLayoutMode {
   if (val === 'centered' || val === 'lyrics-focus') return 'lyrics-focus';
   if (val === 'artwork-focus') return 'artwork-focus';
@@ -563,6 +562,8 @@ export interface StyleFrameContext {
   readonly hasWebGlBackdrop?: boolean;
   readonly contentInsetLeft?: number;
   readonly motionIntensity?: MotionIntensity;
+  readonly beatCameraThump?: boolean;
+  readonly iosKineticZoom?: number;
   readonly didSeekThisFrame: boolean;
   readonly variationId: string;
   readonly manualScrollY: number;
@@ -597,6 +598,8 @@ export interface LyricVisualizerConfig {
   readonly audioReactive: boolean;
   readonly reduceMotion: boolean;
   readonly motionIntensity?: MotionIntensity;
+  readonly beatCameraThump: boolean;
+  readonly iosKineticZoom: number;
   readonly backgroundOpacity: number;
   readonly vignetteStrength: number;
   readonly textAlign: LyricTextAlign;
@@ -622,6 +625,8 @@ export const DEFAULT_LYRIC_VISUALIZER_CONFIG: LyricVisualizerConfig = {
   audioReactive: true,
   reduceMotion: false,
   motionIntensity: 'normal',
+  beatCameraThump: true,
+  iosKineticZoom: DEFAULT_IOS_KINETIC_ZOOM,
   backgroundOpacity: 0.95,
   vignetteStrength: 0.55,
   textAlign: 'center',

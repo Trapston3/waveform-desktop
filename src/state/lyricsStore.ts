@@ -7,6 +7,7 @@ import type { ParsedLyrics } from '../services/LyricsService';
 import { LyricsService } from '../services/LyricsService';
 import { hasNonLatinScript } from '../utils/transliterate';
 import { useSettingsStore } from './settingsStore';
+import { useLyricVisualizerStore } from '../lyricVisualizer/state/lyricVisualizerStore';
 
 export type LyricsStatus = 'idle' | 'loading' | 'found' | 'not_found' | 'empty' | 'error';
 
@@ -18,6 +19,7 @@ export interface LyricsState {
   error: string | null;
 
   fetchLyricsForTrack: (track: Song | null) => Promise<void>;
+  reloadLyricsForTrack: (track: Song | null) => Promise<void>;
   clearLyrics: () => void;
   setLyricsData: (lyrics: ParsedLyrics | null) => void;
 }
@@ -110,6 +112,51 @@ export const useLyricsStore = create<LyricsState>((set, get) => ({
     };
 
     try {
+      // Check per-track custom .lrc/.txt override & persisted offset first
+      if (typeof api?.getCustomLyrics === 'function') {
+        try {
+          const customRec = await api.getCustomLyrics(trackId);
+          if (get().currentTrackId !== trackId) return;
+          if (customRec && typeof customRec.rawText === 'string' && customRec.rawText.trim()) {
+            const isLrc = /\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]/.test(customRec.rawText);
+            const parsedCustom = isLrc
+              ? LyricsService.parseLrc(customRec.rawText, 'Custom')
+              : LyricsService.parsePlainText(customRec.rawText, 'Custom');
+            if (isLrc) {
+              parsedCustom.lines = parsedCustom.lines.map((l) =>
+                LyricsService.interpolateLineSyllables(l)
+              );
+              parsedCustom.isSynced = true;
+            }
+            const enrichedCustom = LyricsService.enrichNonLatinLyrics(parsedCustom);
+            set({
+              lyricsData: enrichedCustom,
+              isLoading: false,
+              status: deriveSettledStatus(enrichedCustom),
+              error: null,
+            });
+            if (typeof customRec.offsetMs === 'number' && Number.isFinite(customRec.offsetMs)) {
+              useLyricVisualizerStore.getState().setSongOffsetMs(customRec.offsetMs, trackId);
+            }
+            scheduleAsyncTranslation(trackId, enrichedCustom, get, set, cacheKeyArg, api);
+            return;
+          }
+        } catch {
+          // Non-fatal custom lyrics read failure
+        }
+      }
+
+      if (typeof api?.getCustomLyricsOffset === 'function') {
+        try {
+          const savedOffset = await api.getCustomLyricsOffset(trackId);
+          if (typeof savedOffset === 'number' && Number.isFinite(savedOffset) && savedOffset !== 0) {
+            useLyricVisualizerStore.getState().setSongOffsetMs(savedOffset, trackId);
+          }
+        } catch {
+          // Non-fatal offset read failure
+        }
+      }
+
       // Check embedded track metadata first
       const rawLyricsValue = (track as any).lyrics;
       let rawLyrics: string | null = null;
@@ -227,6 +274,13 @@ export const useLyricsStore = create<LyricsState>((set, get) => ({
           error: err?.message || 'FETCH_FAILED',
         });
       }
+    }
+  },
+
+  reloadLyricsForTrack: async (track: Song | null) => {
+    set({ currentTrackId: null, lyricsData: null, isLoading: false, status: 'idle', error: null });
+    if (track) {
+      await get().fetchLyricsForTrack(track);
     }
   },
 

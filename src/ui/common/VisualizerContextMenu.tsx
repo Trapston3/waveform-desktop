@@ -39,9 +39,11 @@ import {
 import {
   MAX_BACKGROUND_OPACITY,
   MAX_FONT_SIZE_SCALE,
+  MAX_IOS_KINETIC_ZOOM,
   MAX_VIGNETTE_STRENGTH,
   MIN_BACKGROUND_OPACITY,
   MIN_FONT_SIZE_SCALE,
+  MIN_IOS_KINETIC_ZOOM,
   MIN_VIGNETTE_STRENGTH,
   type MotionIntensity,
   useLyricVisualizerStore,
@@ -56,6 +58,7 @@ export interface VisualizerContextMenuProps {
   onClose: () => void;
   isFullBleed?: boolean;
   onToggleFullBleed?: () => void;
+  onOpenLrcEditor?: () => void;
   context?: 'now-playing' | 'ambient' | 'overlay';
 }
 
@@ -120,6 +123,7 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   onClose,
   isFullBleed = false,
   onToggleFullBleed,
+  onOpenLrcEditor,
   context = 'now-playing',
 }) => {
   const [activeSubmenu, setActiveSubmenu] = useState<SubmenuId>('none');
@@ -144,6 +148,8 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   const setAudioReactive = useLyricVisualizerStore((s) => s.setAudioReactive);
   const setReduceMotion = useLyricVisualizerStore((s) => s.setReduceMotion);
   const setMotionIntensity = useLyricVisualizerStore((s) => s.setMotionIntensity);
+  const setBeatCameraThump = useLyricVisualizerStore((s) => s.setBeatCameraThump);
+  const setIosKineticZoom = useLyricVisualizerStore((s) => s.setIosKineticZoom);
   const setBackgroundOpacity = useLyricVisualizerStore((s) => s.setBackgroundOpacity);
   const setVignetteStrength = useLyricVisualizerStore((s) => s.setVignetteStrength);
   const setTextAlign = useLyricVisualizerStore((s) => s.setTextAlign);
@@ -590,6 +596,54 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
               </>
             )}
 
+            {/* Kinetic Messages Zoom Slider */}
+            {config.styleId === 'IosTextingMotion' && activeVariationId === 'kinetic-messages' && (
+              <>
+                <div className="space-y-1.5 px-1">
+                  <div className="flex items-center justify-between text-[11px] text-white/75">
+                    <span>Kinetic Zoom</span>
+                    <span className="font-mono text-white font-semibold">
+                      {(config.iosKineticZoom ?? 1.45).toFixed(2)}x
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {[
+                      { label: '0.85x', value: 0.85 },
+                      { label: '1.45x', value: 1.45 },
+                      { label: '1.80x', value: 1.8 },
+                    ].map((preset) => {
+                      const active = Math.abs((config.iosKineticZoom ?? 1.45) - preset.value) < 0.04;
+                      return (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          onClick={() => setIosKineticZoom(preset.value)}
+                          className={`py-1 rounded-md text-[10px] font-mono transition-colors cursor-pointer ${
+                            active
+                              ? 'bg-white/25 text-white font-bold'
+                              : 'bg-white/5 hover:bg-white/15 text-white/70'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <input
+                    aria-label="iOS Kinetic Zoom"
+                    type="range"
+                    min={MIN_IOS_KINETIC_ZOOM}
+                    max={MAX_IOS_KINETIC_ZOOM}
+                    step="0.05"
+                    value={config.iosKineticZoom ?? 1.45}
+                    onChange={(e) => setIosKineticZoom(parseFloat(e.target.value))}
+                    className="w-full h-1.5 accent-[var(--color-accent)] bg-white/20 rounded-lg cursor-pointer"
+                  />
+                </div>
+                <div className="h-[1px] bg-white/10" />
+              </>
+            )}
+
             {/* Lyric Justification: Centered / Left */}
             <div className="space-y-1.5 px-1">
               <div className="text-[10px] font-bold uppercase tracking-wider text-white/45">
@@ -796,6 +850,18 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
 
               <button
                 type="button"
+                onClick={() => setBeatCameraThump(!(config.beatCameraThump ?? true))}
+                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <Sparkles size={13} className="text-white/75" />
+                  <span>Beat Camera Thump</span>
+                </span>
+                {(config.beatCameraThump ?? true) && <Check size={13} className="text-pink-400" />}
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setReduceMotion(!config.reduceMotion)}
                 className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
               >
@@ -977,6 +1043,10 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                 resetSongOffsetMs();
                 resetAutoSyncOffsetMs();
                 setAutoSyncMessage(null);
+                const tKey = usePlayerStore.getState().currentTrack?.videoId || activeTrack?.id || '';
+                if (tKey) {
+                  void (window as any)?.electronAPI?.setCustomLyricsOffset?.(tKey, 0)?.catch?.(() => {});
+                }
               }}
               className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
             >
@@ -986,6 +1056,26 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
               </span>
               <span className="font-mono text-[10px] text-white/55">0ms</span>
             </button>
+
+            {onOpenLrcEditor && (
+              <>
+                <div className="h-[1px] bg-white/10 my-1" />
+                <button
+                  type="button"
+                  data-testid="open-lrc-editor-btn"
+                  onClick={() => {
+                    onClose();
+                    onOpenLrcEditor();
+                  }}
+                  className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer text-white font-semibold"
+                >
+                  <span className="flex items-center gap-2">
+                    <Sparkles size={12} className="text-[#FA2D48]" />
+                    <span>Open Lyrics Editor & Offset...</span>
+                  </span>
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

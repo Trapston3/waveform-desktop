@@ -80,10 +80,12 @@ export interface AppSettings {
   'storage.syncLocalMetadata': boolean;
   'storage.embedArtworkInCache': boolean;
 
-  // External Integrations & Scrobbling (13 items)
+  // External Integrations & Scrobbling (15 items)
   'scrobble.lastFmEnabled': boolean;
   'scrobble.lastFmApiKey': string;
+  'scrobble.lastFmApiSecret': string;
   'scrobble.lastFmSessionKey': string;
+  'scrobble.lastFmUsername': string;
   'scrobble.listenBrainzEnabled': boolean;
   'scrobble.listenBrainzToken': string;
   'scrobble.discordRpcEnabled': boolean;
@@ -95,11 +97,13 @@ export interface AppSettings {
   'listenTogether.serverUrl': string;
   'listenTogether.nickname': string;
 
-  // UI Navigation & Ergonomics (8 items)
+  // UI Navigation & Ergonomics (10 items)
   'ui.startInFullScreen': boolean;
   'ui.minimizeToTray': boolean;
   'ui.closeToTray': boolean;
   'ui.hardwareMediaKeys': boolean;
+  'hotkeys.enabled': boolean;
+  'hotkeys.bindings': Record<string, string>;
   'ui.mouseWheelVolumeStep': number;
   'ui.enable3dCoverFlow': boolean;
   'ui.enableCanvasVideo': boolean;
@@ -184,10 +188,12 @@ export const defaultAppSettings: AppSettings = {
   'storage.syncLocalMetadata': true,
   'storage.embedArtworkInCache': true,
 
-  // External Integrations & Scrobbling (13 items)
+  // External Integrations & Scrobbling (15 items)
   'scrobble.lastFmEnabled': false,
   'scrobble.lastFmApiKey': '',
+  'scrobble.lastFmApiSecret': '',
   'scrobble.lastFmSessionKey': '',
+  'scrobble.lastFmUsername': '',
   'scrobble.listenBrainzEnabled': false,
   'scrobble.listenBrainzToken': '',
   'scrobble.discordRpcEnabled': true,
@@ -199,11 +205,21 @@ export const defaultAppSettings: AppSettings = {
   'listenTogether.serverUrl': 'wss://party.waveform.app/ws',
   'listenTogether.nickname': 'DesktopListener',
 
-  // UI Navigation & Ergonomics (8 items)
+  // UI Navigation & Ergonomics (10 items)
   'ui.startInFullScreen': false,
   'ui.minimizeToTray': true,
   'ui.closeToTray': false,
   'ui.hardwareMediaKeys': true,
+  'hotkeys.enabled': true,
+  'hotkeys.bindings': {
+    playPause: 'CommandOrControl+Alt+P',
+    nextTrack: 'CommandOrControl+Alt+Right',
+    prevTrack: 'CommandOrControl+Alt+Left',
+    toggleKaraoke: 'CommandOrControl+Alt+K',
+    cycleVisualizerTheme: 'CommandOrControl+Alt+V',
+    jumpBack5s: 'CommandOrControl+Alt+J',
+    toggleFullscreenAmbient: 'CommandOrControl+Alt+F',
+  },
   'ui.mouseWheelVolumeStep': 0.05,
   'ui.enable3dCoverFlow': true,
   'ui.enableCanvasVideo': true,

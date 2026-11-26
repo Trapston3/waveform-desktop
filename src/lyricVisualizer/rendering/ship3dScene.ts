@@ -23,7 +23,7 @@ const TRAIL_SEGMENTS = 36;
 const SHOCKWAVE_POOL = 6;
 const SPLASH_DROPLET_POOL = 192;
 const WORD_FLASH_POOL = 48;
-const GATE_POOL = 36;
+const GATE_POOL = 48;
 const STAGGER_QUEUE_SIZE = 16;
 const SPARK_POOL = 72;
 const LASER_POOL = 8;
@@ -31,6 +31,8 @@ const SHARD_POOL = 28;
 const LIGHTNING_SEGMENTS = 18;
 
 const SHIP_WIDTH = 1.45;
+const SHIP_HALF_SPAN = SHIP_WIDTH * 0.5;
+const DODGE_CLEARANCE = SHIP_HALF_SPAN * 1.25;
 const SHIP_WORLD_Z = 0.35;
 const SHIP_NOSE_Z = SHIP_WORLD_Z - 0.85;
 const SHIP_BASE_Y = -0.15;
@@ -104,6 +106,8 @@ export interface Ship3DWordGateProjection {
   readonly worldZ: number;
   readonly lineIndex: number;
   readonly wordIndex: number;
+  readonly consumed?: boolean;
+  readonly key?: number;
 }
 
 export interface Ship3DHudTelemetry {
@@ -825,6 +829,8 @@ export class Ship3DScene {
     worldZ: number;
     lineIndex: number;
     wordIndex: number;
+    consumed: boolean;
+    key: number;
   }> = Array.from({ length: GATE_POOL }, () => ({
     text: '',
     screenX: 0,
@@ -839,6 +845,8 @@ export class Ship3DScene {
     worldZ: 0,
     lineIndex: -1,
     wordIndex: -1,
+    consumed: false,
+    key: -1,
   }));
   private gateProjectionCount = 0;
 
@@ -972,6 +980,11 @@ export class Ship3DScene {
   private warpSurge = 0;
   private shockwaveProgress = 0;
   private surgeCooldown = 0;
+  private laserBeatCounter = 0;
+  private laserSalvoCooldown = 0;
+  private totalLaserSalvosFired = 0;
+  private currentBeatCameraThump = true;
+  private currentMotionScale = 1.0;
   private gridScrollZ = 0;
 
   // Software fallback cached scalars
@@ -1139,6 +1152,10 @@ export class Ship3DScene {
     return this.gateProjections[index];
   }
 
+  getLaserSalvoCount(): number {
+    return this.totalLaserSalvosFired;
+  }
+
   /**
    * Returns the minimum surface-to-surface clearance (worldDist - (rA + rB)) across all active asteroids.
    * Used by unit tests to verify zero asteroid-to-asteroid clipping.
@@ -1182,7 +1199,7 @@ export class Ship3DScene {
       const astWY = -0.25 + this.asteroids[idx + 1] * 3.4;
       const astWZ = 5.0 - this.asteroids[idx + 2] * 6.2;
       const astRad = this.asteroids[idx + 6] * 3.2;
-      const exclR = SHIP_WIDTH * 1.8 + astRad;
+      const exclR = DODGE_CLEARANCE + astRad;
       const tAtZ = this.currentSceneTime + (SHIP_WORLD_Z - astWZ) / astWorldSpeed;
 
       for (let s = 0; s < 4; s++) {
@@ -1209,11 +1226,11 @@ export class Ship3DScene {
       const astWY = -0.25 + this.asteroids[idx + 1] * 3.4;
       const astWZ = 5.0 - this.asteroids[idx + 2] * 6.2;
       const astRad = this.asteroids[idx + 6] * 3.2;
-      const exclR = SHIP_WIDTH * 1.8 + astRad;
+      const exclR = DODGE_CLEARANCE + astRad;
 
       for (let g = 0; g < this.gateProjectionCount; g++) {
         const gp = this.gateProjections[g];
-        if (!gp.text) continue;
+        if (!gp.text || gp.consumed) continue;
         if (Math.abs(astWZ - gp.worldZ) < 5.0) {
           const clearance = Math.hypot(astWX - gp.worldX, astWY - gp.worldY) - exclR;
           if (clearance < minClearance) minClearance = clearance;
@@ -1252,6 +1269,8 @@ export class Ship3DScene {
       this.combo = 0;
       this.nearMissCount = 0;
       this.gateProjectionCount = 0;
+      this.laserBeatCounter = 0;
+      this.laserSalvoCooldown = 0;
       this.wordFlashKeys.fill(-1);
       this.wordFlashValues.fill(0);
 
@@ -1295,6 +1314,8 @@ export class Ship3DScene {
       this.cameraSpringVel = 0;
       this.maneuverKind = 0;
       this.maneuverProgress = 0;
+      this.laserBeatCounter = 0;
+      this.laserSalvoCooldown = 0;
       this.barrelRollActive = false;
       this.barrelRollPhase = 0;
       this.bulletTimeTimer = 0;
@@ -1373,8 +1394,8 @@ export class Ship3DScene {
     let astWY = -0.25 + this.asteroids[idx + 1] * 3.4;
     const astWZ = 5.0 - this.asteroids[idx + 2] * 6.2;
     const astRad = this.asteroids[idx + 6] * 3.2;
-    const exclR = SHIP_WIDTH * 1.8 + astRad;
-    const padExclR = exclR + 0.08;
+    const exclR = DODGE_CLEARANCE + astRad;
+    const padExclR = exclR + 0.06;
     const maxSkyY = 2.1 - astRad * 1.1;
 
     const astWorldSpeed = Math.max(2.0, this.lastAstWorldSpeed);
@@ -1384,11 +1405,45 @@ export class Ship3DScene {
     let pushVx = 0;
     let pushVy = 0;
 
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; pass < 3; pass++) {
       if (astWY > maxSkyY) {
         astWY = maxSkyY;
         pushVy = Math.min(pushVy, 0);
         pushed = true;
+      }
+
+      for (let g = 0; g < this.gateProjectionCount; g++) {
+        const gp = this.gateProjections[g];
+        if (!gp.text || gp.consumed) continue;
+        if (Math.abs(astWZ - gp.worldZ) < 5.0) {
+          const dx = astWX - gp.worldX;
+          const dy = astWY - gp.worldY;
+          const distXY = Math.hypot(dx, dy);
+          if (distXY < padExclR) {
+            let nx: number;
+            let ny: number;
+            if (distXY > 0.001) {
+              nx = dx / distXY;
+              ny = dy / distXY;
+            } else {
+              const ang = ((slotIdx + g) * 2.39996) % (Math.PI * 2);
+              nx = Math.cos(ang);
+              ny = Math.sin(ang);
+            }
+            astWX = gp.worldX + nx * padExclR;
+            astWY = gp.worldY + ny * padExclR;
+            if (astWY > maxSkyY) {
+              const side = astWX >= gp.worldX ? 1 : -1;
+              astWY = maxSkyY;
+              const dyC = astWY - gp.worldY;
+              const reqDx = Math.sqrt(Math.max(0.01, padExclR * padExclR - dyC * dyC));
+              astWX = gp.worldX + side * Math.max(Math.abs(astWX - gp.worldX), reqDx);
+            }
+            pushVx += nx * 1.6;
+            pushVy += ny * 1.1;
+            pushed = true;
+          }
+        }
       }
 
       for (let s = 0; s < 4; s++) {
@@ -1424,40 +1479,34 @@ export class Ship3DScene {
           pushed = true;
         }
       }
+    }
 
-      for (let g = 0; g < this.gateProjectionCount; g++) {
-        const gp = this.gateProjections[g];
-        if (!gp.text) continue;
-        if (Math.abs(astWZ - gp.worldZ) < 5.0) {
-          const dx = astWX - gp.worldX;
-          const dy = astWY - gp.worldY;
-          const distXY = Math.hypot(dx, dy);
-          if (distXY < padExclR) {
-            let nx: number;
-            let ny: number;
-            if (distXY > 0.001) {
-              nx = dx / distXY;
-              ny = dy / distXY;
-            } else {
-              const ang = ((slotIdx + g) * 2.39996) % (Math.PI * 2);
-              nx = Math.cos(ang);
-              ny = Math.sin(ang);
-            }
-            astWX = gp.worldX + nx * padExclR;
-            astWY = gp.worldY + ny * padExclR;
-            if (astWY > maxSkyY) {
-              const side = astWX >= gp.worldX ? 1 : -1;
-              astWY = maxSkyY;
-              const dyC = astWY - gp.worldY;
-              const reqDx = Math.sqrt(Math.max(0.01, padExclR * padExclR - dyC * dyC));
-              astWX = gp.worldX + side * Math.max(Math.abs(astWX - gp.worldX), reqDx);
-            }
-            pushVx += nx * 1.6;
-            pushVy += ny * 1.1;
-            pushed = true;
-          }
-        }
+    // Monotonic corridor guard: if rapid sideways S-curve motion wedged asteroid between spline samples, push below/outside envelope
+    let minFx = Infinity;
+    let maxFx = -Infinity;
+    let minFy = Infinity;
+    let needsEscape = false;
+    for (let s = 0; s < 4; s++) {
+      if (s === 3 && Math.abs(astWZ - SHIP_WORLD_Z) >= 4.5) continue;
+      const ts = s === 0 ? tAtZ - 0.35 : s === 1 ? tAtZ : s === 2 ? tAtZ + 0.35 : timeSeconds;
+      const fp = this.getFlightPosition(ts, this.tmpFlightPos);
+      if (fp.x < minFx) minFx = fp.x;
+      if (fp.x > maxFx) maxFx = fp.x;
+      if (fp.y < minFy) minFy = fp.y;
+      if (Math.hypot(astWX - fp.x, astWY - fp.y) < padExclR) {
+        needsEscape = true;
       }
+    }
+    if (needsEscape && Number.isFinite(minFy)) {
+      const targetLowY = minFy - padExclR - 0.08;
+      if (astWY <= targetLowY) {
+        astWY = targetLowY;
+      } else {
+        const leftDist = Math.abs(astWX - (minFx - padExclR - 0.08));
+        const rightDist = Math.abs(astWX - (maxFx + padExclR + 0.08));
+        astWX = leftDist <= rightDist ? minFx - padExclR - 0.08 : maxFx + padExclR + 0.08;
+      }
+      pushed = true;
     }
 
     if (pushed) {
@@ -1479,7 +1528,7 @@ export class Ship3DScene {
     const idx = index * ASTEROID_STRIDE;
     const scale = 0.09 + this.nextRand() * 0.13;
     const myRadius = scale * 3.2;
-    const exclR = SHIP_WIDTH * 1.8 + myRadius;
+    const exclR = DODGE_CLEARANCE + myRadius;
 
     let bestX = 0;
     let bestY = 0;
@@ -1493,14 +1542,36 @@ export class Ship3DScene {
       let candX: number;
       let candY: number;
 
-      if (attempt < 10 && index % 3 !== 2) {
-        // Deliberate alternating flank / inside-bend placement along the S-curve spline
-        const tAtZ = this.currentSceneTime + (SHIP_WORLD_Z - wz) / astWorldSpeed;
-        const fp = this.getFlightPosition(tAtZ, this.tmpFlightPos);
-        const side = (index + attempt) % 2 === 0 ? 1 : -1;
-        const targetWx = fp.x + side * (exclR + 0.55 + this.nextRand() * 1.35);
+      const tAtZ = this.currentSceneTime + (SHIP_WORLD_Z - wz) / astWorldSpeed;
+      // Deliberately place mid-corridor obstacle rocks between consecutive words so the ship visibly weaves around them
+      let targetTime = tAtZ;
+      let preferInsideBend = false;
+      if (this.precomputedWords.length >= 2 && attempt < 8 && index % 2 === 0) {
+        for (let wi = 0; wi < this.precomputedWords.length - 1; wi++) {
+          const w1 = this.precomputedWords[wi];
+          const w2 = this.precomputedWords[wi + 1];
+          if (w2.startSeconds >= this.currentLyricTime + 0.25 && w2.startSeconds - w1.startSeconds >= 0.22) {
+            targetTime = (w1.startSeconds + w2.startSeconds) * 0.5 + (index % 3) * 0.15;
+            preferInsideBend = true;
+            break;
+          }
+        }
+      }
+
+      if (attempt < 10 && (preferInsideBend || index % 3 !== 2)) {
+        // Alternating flank / inside-bend obstacle placement along the S-curve spline
+        const fp = this.getFlightPosition(targetTime, this.tmpFlightPos);
+        const side = preferInsideBend
+          ? fp.x >= 0
+            ? -1
+            : 1
+          : (index + attempt) % 2 === 0
+          ? 1
+          : -1;
+        const gap = preferInsideBend ? 0.24 + this.nextRand() * 0.62 : 0.45 + this.nextRand() * 1.15;
+        const targetWx = fp.x + side * (exclR + gap);
         candX = Math.max(-1.85, Math.min(1.85, targetWx / 5.2));
-        const targetWy = fp.y + (this.nextRand() - 0.5) * 0.85;
+        const targetWy = fp.y + (this.nextRand() - 0.5) * 0.78;
         candY = Math.max(-0.68, Math.min(0.52, (targetWy + 0.25) / 3.4));
       } else {
         const lane = ((index + attempt) % 7) - 3;
@@ -2160,6 +2231,8 @@ export class Ship3DScene {
       });
       const lmesh = new THREE.Mesh(laserGeom, lmat);
       lmesh.visible = false;
+      lmesh.frustumCulled = false;
+      lmesh.renderOrder = 22;
       scene.add(lmesh);
       laserMeshes.push(lmesh);
       laserMats.push(lmat);
@@ -2502,6 +2575,9 @@ export class Ship3DScene {
     this.warpSurge = 0;
     this.shockwaveProgress = 0;
     this.surgeCooldown = 0;
+    this.laserBeatCounter = 0;
+    this.laserSalvoCooldown = 0;
+    this.totalLaserSalvosFired = 0;
     this.score = 0;
     this.combo = 0;
     this.nearMissCount = 0;
@@ -2674,14 +2750,15 @@ export class Ship3DScene {
   }
 
   private fireTwinLasers(shipWorldX: number, shipWorldY: number): void {
-    // Find nearest forward asteroid to target
+    this.totalLaserSalvosFired += 1;
+    // Find nearest forward asteroid in firing corridor to target & shatter
     let targetAst = -1;
     let bestZ = 99;
     for (let a = 0; a < ASTEROID_COUNT; a++) {
       const idx = a * ASTEROID_STRIDE;
       if (this.asteroids[idx + 11] < 0.5) continue;
       const az = this.asteroids[idx + 2];
-      if (az > 1.2 && az < bestZ) {
+      if (az > 0.7 && az < 6.5 && az < bestZ) {
         bestZ = az;
         targetAst = a;
       }
@@ -2749,10 +2826,13 @@ export class Ship3DScene {
     this.wordPop = 1.0;
     this.collectFlash = 1.0;
     this.collectLunge = reduceMotion ? 0 : 1.0;
-    if (!reduceMotion) {
-      this.cameraSpringVel += 1.35;
+    if (!reduceMotion && this.currentBeatCameraThump) {
+      this.cameraSpringVel += 1.35 * this.currentMotionScale;
     }
-    this.cameraTrauma = Math.min(reduceMotion ? 0.12 : 1.0, this.cameraTrauma + (reduceMotion ? 0.04 : 0.11));
+    this.cameraTrauma = Math.min(
+      reduceMotion || !this.currentBeatCameraThump ? 0.08 : 1.0,
+      this.cameraTrauma + (reduceMotion || !this.currentBeatCameraThump ? 0.02 : 0.11 * this.currentMotionScale)
+    );
 
     this.recordWordMergeFlash(wordGate.key);
 
@@ -3631,9 +3711,13 @@ export class Ship3DScene {
     backgroundOpacity?: number,
     focalCenterX?: number,
     hasWebGlBackdrop = false,
-    contentInsetLeft = 0
+    contentInsetLeft = 0,
+    beatCameraThump = true,
+    motionIntensityScale = 1.0
   ): void {
     this.contentInsetLeft = Number.isFinite(contentInsetLeft) ? Math.max(0, contentInsetLeft) : 0;
+    this.currentBeatCameraThump = beatCameraThump;
+    this.currentMotionScale = Number.isFinite(motionIntensityScale) ? Math.max(0.3, Math.min(1.6, motionIntensityScale)) : 1.0;
     if (variationId !== undefined || backgroundOpacity !== undefined) {
       setShip3DSceneHint(variationId, backgroundOpacity);
     }
@@ -3715,24 +3799,36 @@ export class Ship3DScene {
     this.shipVx = curVel.x;
     this.shipVy = curVel.y;
 
-    // Strong-beat warp surge & choreographed S-bank / barrel-roll detection
+    // Strong-beat warp surge, choreographed S-bank / barrel-roll & persistent beat-locked laser salvos
     this.surgeCooldown = Math.max(0, this.surgeCooldown - rawDt);
+    this.laserSalvoCooldown = Math.max(0, this.laserSalvoCooldown - rawDt);
     const beatStrength = audio.beatStrength ?? (audio.beatDetected ? 1.0 : audio.bassEnergy);
-    const strongBeat = !reduceMotion && (audio.beatDetected || beatStrength > 0.72);
+    const strongBeat = !reduceMotion && (audio.beatDetected || beatStrength > 0.72 || Boolean((audio as any).isDownbeat));
     if (strongBeat && this.surgeCooldown <= 0) {
       this.warpSurge = 1.0;
       this.shockwaveProgress = 0.02;
       this.surgeCooldown = 0.24;
-      this.cameraTrauma = Math.min(1.0, this.cameraTrauma + (beatStrength > 0.86 ? 0.58 : 0.34));
+      this.laserBeatCounter += 1;
+      if (this.currentBeatCameraThump) {
+        const kick = (beatStrength > 0.86 ? 0.58 : 0.34) * this.currentMotionScale;
+        this.cameraTrauma = Math.min(1.0, this.cameraTrauma + kick);
+        this.cameraSpringVel += 1.25 * this.currentMotionScale;
+      }
       this.chromaticPulse = Math.max(this.chromaticPulse, beatStrength > 0.85 ? 0.75 : 0.35);
-      this.cameraSpringVel += 1.1;
 
       if (((audio as any).isDownbeat || beatStrength > 0.88) && this.maneuverKind === 0 && this.maneuverCooldown <= 0) {
         const dir = this.shipVx >= 0 ? 1 : -1;
         this.startChoreographedManeuver(beatStrength > 0.92 ? 1 : 2, 1.15, dir);
       }
 
-      if (this.isInstrumental && beatStrength > 0.86) {
+      // Consistent beat-locked twin plasma laser salvos across the ENTIRE song (every 4 beats or downbeat cadence)
+      const fireOnCadence =
+        (Boolean((audio as any).isDownbeat) && this.laserBeatCounter >= 2) ||
+        this.laserBeatCounter >= 4 ||
+        (this.isInstrumental && beatStrength > 0.72);
+      if (fireOnCadence && this.laserSalvoCooldown <= 0) {
+        this.laserBeatCounter = 0;
+        this.laserSalvoCooldown = 1.5;
         this.fireTwinLasers(this.shipX, this.shipY);
       }
     } else {
@@ -3746,6 +3842,8 @@ export class Ship3DScene {
     if (reduceMotion) {
       this.maneuverKind = 0;
       this.maneuverProgress = 0;
+      this.laserBeatCounter = 0;
+      this.laserSalvoCooldown = 0;
       this.barrelRollActive = false;
       this.barrelRollPhase = 0;
       this.rollAngle = Math.atan2(curVel.x * 0.34 + curAcc.x * 0.22, 1.0);
@@ -3873,10 +3971,18 @@ export class Ship3DScene {
 
         if (this.gateProjectionCount < GATE_POOL) {
           const isTightCluster = lastProjStart >= 0 && w.startSeconds - lastProjStart < 0.22;
+          const isConsumed = dtToWord <= 0;
+          const mergeFlash = this.getWordMergeFlash(w.key);
+          // Once consumed at nose impact, drop cleanly as soon as splash fades out (never drift past ship tail!)
+          if (isConsumed && mergeFlash <= 0.01 && dtToWord < -0.08) {
+            continue;
+          }
+
           if (isTightCluster) {
-            wordZ = Math.min(wordZ, lastProjZ - 4.5);
+            wordZ = Math.min(isConsumed ? SHIP_NOSE_Z : wordZ, lastProjZ - 4.5);
             fastAltIdx++;
           } else {
+            wordZ = isConsumed ? SHIP_NOSE_Z : Math.min(SHIP_NOSE_Z - 0.02, wordZ);
             fastAltIdx = 0;
           }
           lastProjStart = w.startSeconds;
@@ -3884,26 +3990,26 @@ export class Ship3DScene {
 
           const gp = this.gateProjections[this.gateProjectionCount++];
           const anchor = this.getFlightPosition(w.startSeconds, this.tmpFlightPos);
-          const mergeFlash = this.getWordMergeFlash(w.key);
-          const fastXOff = isTightCluster ? ((fastAltIdx & 1) === 0 ? 1 : -1) * 0.28 : 0;
-          const fastYOff = isTightCluster ? (fastAltIdx % 2) * 0.22 : 0;
-          const elevLift = 0.45 * Math.max(0, Math.min(1, dtToWord / 0.8));
+          const fastXOff = isTightCluster && !isConsumed ? ((fastAltIdx & 1) === 0 ? 1 : -1) * 0.28 : 0;
+          const fastYOff = isTightCluster && !isConsumed ? (fastAltIdx % 2) * 0.22 : 0;
 
           gp.text = w.text;
-          gp.worldX = anchor.x + fastXOff;
-          gp.worldY = anchor.y + elevLift + fastYOff;
+          gp.key = w.key;
+          gp.consumed = isConsumed;
+          // Deterministic world position from frame 0 (ZERO lower-spawn elevLift Y-snap!)
+          gp.worldX = isConsumed ? this.shipX : anchor.x + fastXOff;
+          gp.worldY = isConsumed ? this.shipY : anchor.y + fastYOff;
           gp.worldZ = wordZ;
           gp.lineIndex = w.lineIndex;
           gp.wordIndex = w.wordIndex;
           gp.isActive = w.lineIndex === this.currentActiveLine && w.wordIndex === this.currentActiveWord;
           gp.semanticMask = w.semanticMask;
           gp.mergeFlash = mergeFlash;
-          if (wordZ >= 5.2) {
-            gp.alpha = 0;
-          } else if (dtToWord < 0) {
-            gp.alpha = Math.max(0, Math.min(1, 1.0 + dtToWord / 0.45));
+          if (isConsumed) {
+            gp.alpha = Math.max(0, Math.min(1, mergeFlash));
           } else {
-            gp.alpha = Math.max(0.08, Math.min(1, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.65));
+            // Strictly monotonic opacity fade-in over first 0.25s, then locked 1.0 until nose impact
+            gp.alpha = Math.max(0.08, Math.min(1.0, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.25));
           }
           const invZ = 1.0 / Math.max(0.4, 6.2 - gp.worldZ);
           gp.screenX = cx + (gp.worldX - this.shipX * 0.12) * fallbackFocal * invZ;
@@ -3969,8 +4075,8 @@ export class Ship3DScene {
           this.nearMissCooldown <= 0 &&
           a !== this.lastNearMissAsteroid &&
           Math.abs(astWZ - SHIP_WORLD_Z) < 1.3 &&
-          distXY < SHIP_WIDTH * 1.8 + astRad + 1.4 &&
-          distXY >= SHIP_WIDTH * 1.4
+          distXY < DODGE_CLEARANCE + astRad + 1.35 &&
+          distXY >= DODGE_CLEARANCE + astRad - 0.05
         ) {
           this.lastNearMissAsteroid = a;
           this.nearMissCooldown = 0.9;

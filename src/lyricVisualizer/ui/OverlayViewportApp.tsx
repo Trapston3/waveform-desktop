@@ -177,6 +177,8 @@ export const OverlayViewportApp: React.FC = () => {
       palette: state.activePalette ?? DEMO_FALLBACK_PALETTE,
       reduceMotion: state.config.reduceMotion,
       motionIntensity: state.config.motionIntensity,
+      beatCameraThump: state.config.beatCameraThump,
+      iosKineticZoom: state.config.iosKineticZoom,
       backgroundOpacity: state.config.backgroundOpacity,
       vignetteStrength: state.config.vignetteStrength,
       textAlign: state.config.textAlign,
@@ -249,6 +251,7 @@ export const OverlayViewportApp: React.FC = () => {
       backgroundOpacity: config.backgroundOpacity,
       vignetteStrength: config.vignetteStrength,
       textAlign: config.textAlign,
+      iosKineticZoom: config.iosKineticZoom,
     });
     const resolvedTrack = config.sandboxEnabled ? STARLIGHT_HARBOR_TRACK : activeTrack;
     renderer.setTrackMetadata(
@@ -267,6 +270,7 @@ export const OverlayViewportApp: React.FC = () => {
     renderer.setModes({
       reduceMotion: config.reduceMotion,
       motionIntensity: config.motionIntensity,
+      beatCameraThump: config.beatCameraThump,
       isOverlayMode: true,
       isAmbientMode: false,
       audioReactive: config.audioReactive,
@@ -280,6 +284,8 @@ export const OverlayViewportApp: React.FC = () => {
     config.albumArtColorMatch,
     config.reduceMotion,
     config.motionIntensity,
+    config.beatCameraThump,
+    config.iosKineticZoom,
     config.audioReactive,
     config.backgroundOpacity,
     config.vignetteStrength,

@@ -29,6 +29,7 @@ import {
   MoreHorizontal,
   ChevronRight,
   Music2,
+  Pin,
 } from 'lucide-react';
 import {
   useLibraryStore,
@@ -41,6 +42,7 @@ import {
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
+import { useOfflineCacheStore } from '../../services/OfflineCacheService';
 import { AlbumCoverFlow, type CoverFlowAlbum } from '../player/AlbumCoverFlow';
 import { PlayerPlayIcon } from '../common/WaveFormIcons';
 import { DesktopTrackTable } from '../components/DesktopTrackTable';
@@ -171,6 +173,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
 
   const loadTrack = usePlayerStore((s) => s.loadTrack);
   const { setContextQueue } = useQueueStore();
+  const pinnedIds = useOfflineCacheStore((s) => s.pinnedIds);
+  const pinTracks = useOfflineCacheStore((s) => s.pinTracks);
+  const unpinTracks = useOfflineCacheStore((s) => s.unpinTracks);
   const {
     setCreatePlaylistOpen,
     setImportPlaylistOpen,
@@ -898,13 +903,40 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                 />
               </div>
               {filteredFavoriteSongs.length > 0 && (
-                <button
-                  onClick={() => handlePlaySong(filteredFavoriteSongs[0], filteredFavoriteSongs)}
-                  className="spring-press flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-[#FA2D48] hover:bg-[#e0263f] text-white text-xs font-bold cursor-pointer shadow-md shadow-[#FA2D48]/20 transition-all"
-                >
-                  <Play size={13} className="fill-current" />
-                  <span>Play All</span>
-                </button>
+                <>
+                  {(() => {
+                    const allPinned = filteredFavoriteSongs.every((s) =>
+                      s.videoId && pinnedIds.includes(s.videoId)
+                    );
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (allPinned) {
+                            void unpinTracks(filteredFavoriteSongs.map((s) => s.videoId).filter(Boolean));
+                          } else {
+                            void pinTracks(filteredFavoriteSongs);
+                          }
+                        }}
+                        className={`spring-press flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border text-xs font-semibold cursor-pointer transition-all ${
+                          allPinned
+                            ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-200'
+                            : 'bg-white/[0.06] hover:bg-white/[0.12] border-white/10 text-white'
+                        }`}
+                      >
+                        <Pin size={12} className={allPinned ? 'fill-current' : ''} />
+                        <span>{allPinned ? 'Pinned Offline' : 'Pin Offline'}</span>
+                      </button>
+                    );
+                  })()}
+                  <button
+                    onClick={() => handlePlaySong(filteredFavoriteSongs[0], filteredFavoriteSongs)}
+                    className="spring-press flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-[#FA2D48] hover:bg-[#e0263f] text-white text-xs font-bold cursor-pointer shadow-md shadow-[#FA2D48]/20 transition-all"
+                  >
+                    <Play size={13} className="fill-current" />
+                    <span>Play All</span>
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -1084,16 +1116,45 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
 
                     <div className="flex items-center gap-2.5">
                       {spotifyPlaylistTracks.length > 0 && (
-                        <button
-                          onClick={() => {
-                            setContextQueue(spotifyPlaylistTracks, 0);
-                            loadTrack(spotifyPlaylistTracks[0], 'active', true);
-                          }}
-                          className="spring-press flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#1DB954] hover:bg-[#1aa34a] text-black text-xs font-bold cursor-pointer shadow-md shadow-[#1DB954]/20 transition-all"
-                        >
-                          <Play size={13} className="fill-current" />
-                          <span>Play All</span>
-                        </button>
+                        <>
+                          {(() => {
+                            const allPinned = spotifyPlaylistTracks.every((s) =>
+                              s.videoId && pinnedIds.includes(s.videoId)
+                            );
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (allPinned) {
+                                    void unpinTracks(
+                                      spotifyPlaylistTracks.map((s) => s.videoId).filter(Boolean)
+                                    );
+                                  } else {
+                                    void pinTracks(spotifyPlaylistTracks);
+                                  }
+                                }}
+                                className={`spring-press flex items-center gap-1.5 px-3.5 py-2 rounded-full border text-xs font-semibold cursor-pointer transition-all ${
+                                  allPinned
+                                    ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-200'
+                                    : 'bg-white/[0.06] hover:bg-white/[0.12] border-white/10 text-white'
+                                }`}
+                              >
+                                <Pin size={12} className={allPinned ? 'fill-current' : ''} />
+                                <span>{allPinned ? 'Pinned Offline' : 'Pin Playlist'}</span>
+                              </button>
+                            );
+                          })()}
+                          <button
+                            onClick={() => {
+                              setContextQueue(spotifyPlaylistTracks, 0);
+                              loadTrack(spotifyPlaylistTracks[0], 'active', true);
+                            }}
+                            className="spring-press flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#1DB954] hover:bg-[#1aa34a] text-black text-xs font-bold cursor-pointer shadow-md shadow-[#1DB954]/20 transition-all"
+                          >
+                            <Play size={13} className="fill-current" />
+                            <span>Play All</span>
+                          </button>
+                        </>
                       )}
                       <button
                         onClick={() => {

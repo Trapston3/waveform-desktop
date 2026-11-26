@@ -2,6 +2,8 @@
 // Renderer bridge for bundled ONNX ML audio intelligence (Beat This! + Open-Unmix Vocals)
 // with deterministic TypeScript fallbacks for tests and browser-only environments.
 
+import { deriveBarsFromBeatAnalysis } from '../utils/practiceLoop';
+
 export interface TimeRange {
   startSec: number;
   endSec: number;
@@ -12,6 +14,7 @@ export interface TrackBeatAnalysis {
   bpm: number;
   beats: number[];
   downbeats: number[];
+  bars?: number[];
   chorusStartSec: number;
   vocalSilenceRanges: TimeRange[];
   vocalEnvelope: number[];
@@ -184,6 +187,33 @@ class MlAudioServiceImpl {
   private readonly inflightBeats = new Map<string, Promise<TrackBeatAnalysis | null>>();
   private readonly stemCache = new Map<string, VocalStemData>();
   private readonly inflightStems = new Map<string, Promise<VocalStemData | null>>();
+  private activeStemTrackId: string | null = null;
+  private readonly MAX_BEAT_CACHE_ENTRIES = 48;
+  private readonly MAX_STEM_CACHE_ENTRIES = 2;
+
+  private setBeatCacheEntry(trackId: string, analysis: TrackBeatAnalysis): void {
+    if (this.beatCache.has(trackId)) this.beatCache.delete(trackId);
+    this.beatCache.set(trackId, analysis);
+    while (this.beatCache.size > this.MAX_BEAT_CACHE_ENTRIES) {
+      const oldest = this.beatCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.beatCache.delete(oldest);
+    }
+  }
+
+  private setStemCacheEntry(trackId: string, data: VocalStemData): void {
+    if (this.stemCache.has(trackId)) this.stemCache.delete(trackId);
+    this.stemCache.set(trackId, data);
+    while (this.stemCache.size > this.MAX_STEM_CACHE_ENTRIES) {
+      const oldest = this.stemCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.stemCache.delete(oldest);
+    }
+  }
+
+  cancelPendingVocalSeparation(activeTrackId?: string | null): void {
+    this.activeStemTrackId = activeTrackId ?? null;
+  }
 
   getCachedTrackBeatsSync(trackId: string): TrackBeatAnalysis | null {
     return this.beatCache.get(trackId) ?? null;
@@ -203,11 +233,13 @@ class MlAudioServiceImpl {
     try {
       const res = await api.mlAnalyzeTrackBeats({ trackId });
       if (res?.ok && Array.isArray(res.beats)) {
+        const downbeats: number[] = Array.isArray(res.downbeats) ? res.downbeats : [];
         const parsed: TrackBeatAnalysis = {
           usedOnnx: Boolean(res.usedOnnx),
           bpm: Number(res.bpm) || 120,
           beats: res.beats,
-          downbeats: Array.isArray(res.downbeats) ? res.downbeats : [],
+          downbeats,
+          bars: Array.isArray(res.bars) ? res.bars : deriveBarsFromBeatAnalysis(res.beats, downbeats),
           chorusStartSec: Number(res.chorusStartSec) || 0,
           vocalSilenceRanges: Array.isArray(res.vocalSilenceRanges) ? res.vocalSilenceRanges : [],
           vocalEnvelope: Array.isArray(res.vocalEnvelope) ? res.vocalEnvelope : [],
@@ -216,7 +248,7 @@ class MlAudioServiceImpl {
           cached: true,
           error: res.error ?? null,
         };
-        this.beatCache.set(trackId, parsed);
+        this.setBeatCacheEntry(trackId, parsed);
         return parsed;
       }
     } catch {
@@ -260,11 +292,16 @@ class MlAudioServiceImpl {
       });
       if (!res?.ok) return null;
 
+      const freshBeats: number[] = Array.isArray(res.beats) ? res.beats : [];
+      const freshDownbeats: number[] = Array.isArray(res.downbeats) ? res.downbeats : [];
       const parsed: TrackBeatAnalysis = {
         usedOnnx: Boolean(res.usedOnnx),
         bpm: Number(res.bpm) || 120,
-        beats: Array.isArray(res.beats) ? res.beats : [],
-        downbeats: Array.isArray(res.downbeats) ? res.downbeats : [],
+        beats: freshBeats,
+        downbeats: freshDownbeats,
+        bars: Array.isArray(res.bars)
+          ? res.bars
+          : deriveBarsFromBeatAnalysis(freshBeats, freshDownbeats),
         chorusStartSec: Number(res.chorusStartSec) || 0,
         vocalSilenceRanges: Array.isArray(res.vocalSilenceRanges) ? res.vocalSilenceRanges : [],
         vocalEnvelope: Array.isArray(res.vocalEnvelope) ? res.vocalEnvelope : [],
@@ -273,7 +310,7 @@ class MlAudioServiceImpl {
         cached: Boolean(res.cached),
         error: res.error ?? null,
       };
-      this.beatCache.set(trackId, parsed);
+      this.setBeatCacheEntry(trackId, parsed);
       return parsed;
     })();
 
@@ -291,6 +328,7 @@ class MlAudioServiceImpl {
     pcm?: { left: Float32Array; right: Float32Array; sampleRate: number }
   ): Promise<VocalStemData | null> {
     if (!trackId) return null;
+    this.activeStemTrackId = trackId;
     const mem = this.stemCache.get(trackId);
     if (mem) return mem;
 
@@ -304,6 +342,7 @@ class MlAudioServiceImpl {
       // Try disk stem cache first
       try {
         const cachedRes = await api.mlSeparateVocals({ trackId });
+        if (this.activeStemTrackId && this.activeStemTrackId !== trackId) return null;
         if (cachedRes?.ok && cachedRes.vocalsLeft?.length > 0) {
           const data: VocalStemData = {
             usedOnnx: Boolean(cachedRes.usedOnnx),
@@ -318,7 +357,7 @@ class MlAudioServiceImpl {
             sampleRate: Number(cachedRes.sampleRate) || 44100,
             cached: true,
           };
-          this.stemCache.set(trackId, data);
+          this.setStemCacheEntry(trackId, data);
           return data;
         }
       } catch {
@@ -329,6 +368,7 @@ class MlAudioServiceImpl {
       if (!stereo && audioUrl) {
         stereo = await decodeUrlToStereoPcm(audioUrl);
       }
+      if (this.activeStemTrackId && this.activeStemTrackId !== trackId) return null;
       if (!stereo || stereo.left.length === 0) return null;
 
       const res = await api.mlSeparateVocals({
@@ -337,6 +377,7 @@ class MlAudioServiceImpl {
         rightPcm: stereo.right,
         sampleRate: stereo.sampleRate,
       });
+      if (this.activeStemTrackId && this.activeStemTrackId !== trackId) return null;
       if (!res?.ok || !res.vocalsLeft) return null;
 
       const data: VocalStemData = {
@@ -353,7 +394,7 @@ class MlAudioServiceImpl {
         cached: Boolean(res.cached),
         error: res.error ?? null,
       };
-      this.stemCache.set(trackId, data);
+      this.setStemCacheEntry(trackId, data);
       return data;
     })();
 

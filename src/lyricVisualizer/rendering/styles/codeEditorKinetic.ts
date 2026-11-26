@@ -655,7 +655,10 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     focalWidth: number,
     scriptMode: LyricsScriptMode
   ): void {
-    const codeFontSize = Math.max(15, Math.min(30, Math.round(layout.fontSizePx * 0.88)));
+    const codeFontSize = Math.max(
+      14,
+      Math.min(26, Math.round(layout.fontSizePx * 0.80), Math.round(focalWidth * 0.025))
+    );
     if (
       this.cachedLyrics === lyrics &&
       this.cachedLayout === layout &&
@@ -681,7 +684,8 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     lineToCodeIdx.fill(-1);
     const result: PrecomputedCodeLine[] = [];
     const gutterWidth = Math.max(54, Math.round(focalWidth * 0.08));
-    const maxCodeLineWidth = Math.max(180, focalWidth - gutterWidth - 48);
+    // Reserve headroom for macro zoom (1.11x) + pan + gutter offset so code never clips off the right edge
+    const maxCodeLineWidth = Math.max(160, Math.round((focalWidth - gutterWidth - 88) * 0.80));
     const rowHeight = Math.round(codeFontSize * 1.62);
     const lineGap = Math.round(codeFontSize * 0.52);
 

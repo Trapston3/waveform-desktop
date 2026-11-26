@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, session, shell } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, Tray, nativeImage, session, shell } from 'electron';
 import * as electronNs from 'electron';
 const protocol = (electronNs as any).protocol as Electron.Protocol | undefined;
 const dialog = (electronNs as any).dialog as Electron.Dialog;
@@ -54,6 +54,20 @@ import {
   type DiscordPlaybackInput,
   type DiscordRpcConfig,
 } from './discordRpc.js';
+import {
+  ScrobblerManager,
+  testLastFmConnection,
+  validateListenBrainzToken,
+  type ScrobbleTrackInput,
+  type ScrobblerConfig,
+} from './scrobbler.js';
+import { CustomLyricsStore } from './customLyricsStore.js';
+import {
+  GlobalHotkeyManager,
+  type GlobalHotkeyAction,
+  type GlobalHotkeyConfig,
+} from './globalHotkeys.js';
+import { OfflineCacheManager, type OfflineCachePinInput } from './offlineCache.js';
 import { initAppUpdaterIpc } from './appUpdater.js';
 import { getNativeCore, getNativeCoreInfo } from './nativeCore.js';
 import {
@@ -853,6 +867,131 @@ ipcMain.handle('discordRpc:configure', async (_event, config: DiscordRpcConfig) 
   });
 });
 
+let sharedScrobblerManager: ScrobblerManager | null = null;
+function getSharedScrobbler(): ScrobblerManager {
+  if (!sharedScrobblerManager) {
+    sharedScrobblerManager = new ScrobblerManager(app.getPath('userData'));
+  }
+  return sharedScrobblerManager;
+}
+
+ipcMain.handle('scrobble:configure', async (_event, config: Partial<ScrobblerConfig>) => {
+  return getSharedScrobbler().configure(config || {});
+});
+
+ipcMain.handle('scrobble:nowPlaying', async (_event, track: ScrobbleTrackInput) => {
+  return getSharedScrobbler().nowPlaying(track);
+});
+
+ipcMain.handle('scrobble:submit', async (_event, track: ScrobbleTrackInput) => {
+  return getSharedScrobbler().submitScrobble(track);
+});
+
+ipcMain.handle('scrobble:validateListenBrainz', async (_event, token: string) => {
+  return validateListenBrainzToken(token);
+});
+
+ipcMain.handle(
+  'scrobble:testLastFm',
+  async (
+    _event,
+    cfg: Pick<ScrobblerConfig, 'lastFmApiKey' | 'lastFmApiSecret' | 'lastFmSessionKey'>
+  ) => {
+    return testLastFmConnection(
+      cfg || { lastFmApiKey: '', lastFmApiSecret: '', lastFmSessionKey: '' }
+    );
+  }
+);
+
+ipcMain.handle('scrobble:flushQueue', async () => {
+  return getSharedScrobbler().flushQueue();
+});
+
+ipcMain.handle('scrobble:getStatus', async () => {
+  return getSharedScrobbler().getStatus();
+});
+
+let sharedCustomLyricsStore: CustomLyricsStore | null = null;
+function getSharedCustomLyricsStore(): CustomLyricsStore {
+  if (!sharedCustomLyricsStore) {
+    sharedCustomLyricsStore = new CustomLyricsStore(app.getPath('userData'));
+  }
+  return sharedCustomLyricsStore;
+}
+
+ipcMain.handle('lyrics:getCustom', async (_event, trackKey: string) => {
+  return getSharedCustomLyricsStore().getCustomLyrics(trackKey);
+});
+
+ipcMain.handle(
+  'lyrics:saveCustom',
+  async (_event, trackKey: string, rawText: string, offsetMs?: number) => {
+    return getSharedCustomLyricsStore().saveCustomLyrics(trackKey, rawText, offsetMs);
+  }
+);
+
+ipcMain.handle('lyrics:deleteCustom', async (_event, trackKey: string) => {
+  return getSharedCustomLyricsStore().deleteCustomLyrics(trackKey);
+});
+
+ipcMain.handle('lyrics:setOffset', async (_event, trackKey: string, offsetMs: number) => {
+  return getSharedCustomLyricsStore().setTrackOffsetMs(trackKey, offsetMs);
+});
+
+ipcMain.handle('lyrics:getOffset', async (_event, trackKey: string) => {
+  return getSharedCustomLyricsStore().getTrackOffsetMs(trackKey);
+});
+
+const hotkeyManager = new GlobalHotkeyManager(globalShortcut, (action: GlobalHotkeyAction) => {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('hotkeys:triggered', action);
+  }
+});
+
+ipcMain.handle('hotkeys:configure', async (_event, config: Partial<GlobalHotkeyConfig>) => {
+  return hotkeyManager.applyConfig(config || {});
+});
+
+ipcMain.handle('hotkeys:getStatus', async () => {
+  return hotkeyManager.getStatus();
+});
+
+ipcMain.handle('hotkeys:resetDefaults', async () => {
+  return hotkeyManager.resetDefaults();
+});
+
+let sharedOfflineCache: OfflineCacheManager | null = null;
+function getSharedOfflineCache(): OfflineCacheManager {
+  if (!sharedOfflineCache) {
+    sharedOfflineCache = new OfflineCacheManager(app.getPath('userData'));
+  }
+  return sharedOfflineCache;
+}
+
+ipcMain.handle('offlineCache:pin', async (_event, input: OfflineCachePinInput) => {
+  return getSharedOfflineCache().pinTrack(input);
+});
+
+ipcMain.handle('offlineCache:unpin', async (_event, trackId: string) => {
+  return getSharedOfflineCache().unpinTrack(trackId);
+});
+
+ipcMain.handle('offlineCache:resolve', async (_event, trackId: string) => {
+  return getSharedOfflineCache().resolveCachedTrack(trackId);
+});
+
+ipcMain.handle('offlineCache:getStats', async () => {
+  return getSharedOfflineCache().getStats();
+});
+
+ipcMain.handle('offlineCache:setLimitGb', async (_event, gb: number) => {
+  return getSharedOfflineCache().setLimitGb(gb);
+});
+
+ipcMain.handle('offlineCache:clearUnpinned', async () => {
+  return getSharedOfflineCache().clearUnpinnedCache();
+});
+
 // App lifecycle
 
 // ---------- Local media: waveform-local:// protocol, folder picker, scanner ----------
@@ -1562,7 +1701,11 @@ if (!gotTheLock) {
             right.length > 0 ? right : null,
             payload?.sampleRate || 44100
           );
-          const entry = { ...res, updatedAt: Date.now() };
+          const downbeats = Array.isArray(res.downbeats) ? res.downbeats : [];
+          const beats = Array.isArray(res.beats) ? res.beats : [];
+          const bars =
+            downbeats.length > 0 ? downbeats : beats.filter((_: unknown, idx: number) => idx % 4 === 0);
+          const entry = { ...res, bars, updatedAt: Date.now() };
           cache[trackId] = entry;
           saveAnalysisCache(cache);
           return { ok: true, cached: false, ...entry };
@@ -1705,6 +1848,7 @@ if (!gotTheLock) {
   });
 
   app.on('will-quit', () => {
+    hotkeyManager.unregisterAll();
     tray?.destroy();
     tray = null;
     lyricVisualizerPlatform?.dispose();

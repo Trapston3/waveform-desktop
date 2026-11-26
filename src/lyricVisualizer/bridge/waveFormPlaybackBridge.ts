@@ -449,7 +449,7 @@ export class WaveFormPlaybackBridge implements IPlaybackBridge {
       track,
       positionSeconds,
       isPlaying,
-      playbackRate: 1.0,
+      playbackRate: Number.isFinite(pState.playbackRate) && pState.playbackRate > 0 ? pState.playbackRate : 1.0,
       timestampMs,
       didSeek: false,
       seekGeneration,

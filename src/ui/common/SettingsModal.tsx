@@ -36,15 +36,18 @@ import {
 import {
   MAX_BACKGROUND_OPACITY,
   MAX_FONT_SIZE_SCALE,
+  MAX_IOS_KINETIC_ZOOM,
   MAX_VIGNETTE_STRENGTH,
   MIN_BACKGROUND_OPACITY,
   MIN_FONT_SIZE_SCALE,
+  MIN_IOS_KINETIC_ZOOM,
   MIN_VIGNETTE_STRENGTH,
   type MotionIntensity,
   useLyricVisualizerStore,
 } from '../../lyricVisualizer/state/lyricVisualizerStore';
 import { FACTORY_EQ_PRESETS } from '../../audio/DspChain';
 import { LocalMediaScanner } from '../../services/LocalMediaScanner';
+import { useOfflineCacheStore } from '../../services/OfflineCacheService';
 import {
   AccountAuthService,
   type AccountAuthStatus,
@@ -93,6 +96,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     connected?: boolean;
     lastError?: string | null;
   } | null>(null);
+  const [scrobbleStatus, setScrobbleStatus] = useState<{
+    queueLength: number;
+    lastError: string | null;
+    lastSubmittedAtMs: number | null;
+  }>({ queueLength: 0, lastError: null, lastSubmittedAtMs: null });
+  const [lbTestResult, setLbTestResult] = useState<string | null>(null);
+  const [lfmTestResult, setLfmTestResult] = useState<string | null>(null);
+  const [scrobbleBusy, setScrobbleBusy] = useState<'lb' | 'lfm' | 'flush' | null>(null);
+  const [hotkeyStatus, setHotkeyStatus] = useState<{
+    enabled: boolean;
+    bindings: Record<string, string>;
+    conflicts: Record<string, string>;
+  } | null>(null);
+  const [recordingHotkeyAction, setRecordingHotkeyAction] = useState<string | null>(null);
 
   const { settings, updateSettings, resetToDefaults } = useSettingsStore();
   const updateState = useUpdateStore((s) => s.state);
@@ -102,12 +119,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const openReleasePage = useUpdateStore((s) => s.openReleasePage);
   const resetListeningData = useLibraryStore((s) => s.resetListeningData);
   const startLocalMediaScan = useLibraryStore((s) => s.startLocalMediaScan);
+  const offlineStats = useOfflineCacheStore((s) => s.stats);
+  const refreshOfflineStats = useOfflineCacheStore((s) => s.refreshStats);
+  const setOfflineLimitGb = useOfflineCacheStore((s) => s.setLimitGb);
+  const clearUnpinnedOfflineCache = useOfflineCacheStore((s) => s.clearUnpinnedCache);
 
   const vizConfig = useLyricVisualizerStore((s) => s.config);
   const setStyleId = useLyricVisualizerStore((s) => s.setStyleId);
   const setStyleVariation = useLyricVisualizerStore((s) => s.setStyleVariation);
   const setFontSizeScale = useLyricVisualizerStore((s) => s.setFontSizeScale);
   const setMotionIntensity = useLyricVisualizerStore((s) => s.setMotionIntensity);
+  const setBeatCameraThump = useLyricVisualizerStore((s) => s.setBeatCameraThump);
+  const setIosKineticZoom = useLyricVisualizerStore((s) => s.setIosKineticZoom);
   const setAudioReactive = useLyricVisualizerStore((s) => s.setAudioReactive);
   const setBackgroundOpacity = useLyricVisualizerStore((s) => s.setBackgroundOpacity);
   const setVignetteStrength = useLyricVisualizerStore((s) => s.setVignetteStrength);
@@ -131,7 +154,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     AccountAuthService.getAccountAuthStatus()
       .then((status) => setAuthStatus(status))
       .catch(() => {});
-  }, [isOpen]);
+    if (activeTab === 'storage') {
+      void refreshOfflineStats();
+    }
+  }, [isOpen, activeTab, refreshOfflineStats]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -147,6 +173,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
           }
         })
         .catch(() => {});
+      const getScrobbleStatus = (window as any)?.electronAPI?.scrobbleGetStatus;
+      if (typeof getScrobbleStatus === 'function') {
+        Promise.resolve(getScrobbleStatus())
+          .then((snap) => {
+            if (!cancelled && snap && typeof snap === 'object') {
+              setScrobbleStatus({
+                queueLength: Number(snap.queueLength) || 0,
+                lastError: snap.lastError || null,
+                lastSubmittedAtMs: snap.lastSubmittedAtMs || null,
+              });
+            }
+          })
+          .catch(() => {});
+      }
     };
 
     refresh();
@@ -166,6 +206,70 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     settings['scrobble.discordClientId'],
     settings['scrobble.discordDisplayFormat'],
   ]);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'ergonomics') return;
+    const fn = (window as any)?.electronAPI?.hotkeysGetStatus;
+    if (typeof fn !== 'function') return;
+    let cancelled = false;
+    Promise.resolve(fn())
+      .then((snap) => {
+        if (!cancelled && snap && typeof snap === 'object') {
+          setHotkeyStatus({
+            enabled: Boolean(snap.enabled),
+            bindings: snap.bindings || {},
+            conflicts: snap.conflicts || {},
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, activeTab, settings['hotkeys.enabled'], settings['hotkeys.bindings']]);
+
+  useEffect(() => {
+    if (!recordingHotkeyAction) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        setRecordingHotkeyAction(null);
+        return;
+      }
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+      const parts: string[] = [];
+      if (e.ctrlKey || e.metaKey) parts.push('CommandOrControl');
+      if (e.altKey) parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+      const keyName =
+        e.key === 'ArrowLeft'
+          ? 'Left'
+          : e.key === 'ArrowRight'
+            ? 'Right'
+            : e.key === 'ArrowUp'
+              ? 'Up'
+              : e.key === 'ArrowDown'
+                ? 'Down'
+                : e.key === ' '
+                  ? 'Space'
+                  : e.key.length === 1
+                    ? e.key.toUpperCase()
+                    : e.key;
+      parts.push(keyName);
+      const accel = parts.join('+');
+      const prevBindings =
+        settings['hotkeys.bindings'] && typeof settings['hotkeys.bindings'] === 'object'
+          ? settings['hotkeys.bindings']
+          : {};
+      void handleUpdate({
+        'hotkeys.bindings': { ...prevBindings, [recordingHotkeyAction]: accel },
+      });
+      setRecordingHotkeyAction(null);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  });
 
   if (!isOpen) return null;
 
@@ -1063,6 +1167,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       ),
     },
     {
+      id: 'visualizerBeatCameraThump',
+      tab: 'lyrics',
+      title: 'Beat Camera Thump',
+      description: 'Spring-damped compositor camera impulse synced to neural downbeats & bass kicks across all themes',
+      keywords: 'visualizer beat camera thump kick punch zoom pulse',
+      control: (
+        <input
+          type="checkbox"
+          checked={vizConfig.beatCameraThump ?? true}
+          onChange={(e) => {
+            setBeatCameraThump(e.target.checked);
+            flashSaved();
+          }}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
+      id: 'visualizerIosKineticZoom',
+      tab: 'lyrics',
+      title: 'iOS Kinetic Messages Zoom',
+      description: `Close-up camera zoom factor for Kinetic Messages (${(vizConfig.iosKineticZoom ?? 1.45).toFixed(2)}x)`,
+      keywords: 'ios kinetic messages zoom scale macro bubble',
+      control: (
+        <input
+          type="range"
+          min={MIN_IOS_KINETIC_ZOOM}
+          max={MAX_IOS_KINETIC_ZOOM}
+          step="0.05"
+          value={vizConfig.iosKineticZoom ?? 1.45}
+          onChange={(e) => {
+            setIosKineticZoom(parseFloat(e.target.value));
+            flashSaved();
+          }}
+          className="w-32 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
       id: 'visualizerBackgroundOpacity',
       tab: 'lyrics',
       title: 'Visualizer Background Opacity',
@@ -1174,19 +1317,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     {
       id: 'cacheSizeLimit',
       tab: 'storage',
-      title: 'Cache Size Limit (MB)',
-      description: `Maximum disk space for offline audio cache (${settings['storage.cacheSizeLimitMb']} MB)`,
-      keywords: 'cache size limit storage',
-      control: (
-        <input
-          type="number"
-          value={settings['storage.cacheSizeLimitMb']}
-          onChange={(e) =>
-            handleUpdate({ 'storage.cacheSizeLimitMb': parseInt(e.target.value, 10) || 1024 })
-          }
-          className="w-24 px-2 py-1 rounded bg-[var(--color-surface-variant)] border border-[var(--color-outline)] text-xs text-right"
-        />
-      ),
+      title: 'Offline Disk Cache Limit (GB)',
+      description: `LRU cap for auto-cached streams (${Math.max(1, Math.min(50, Math.round((settings['storage.cacheSizeLimitMb'] || 5120) / 1024)))} GB — pinned tracks are never evicted)`,
+      keywords: 'cache size limit storage offline pinned lru gb',
+      control: (() => {
+        const limitGb = Math.max(
+          1,
+          Math.min(50, Math.round((settings['storage.cacheSizeLimitMb'] || 5120) / 1024))
+        );
+        return (
+          <div className="flex items-center gap-2.5">
+            <input
+              type="range"
+              min={1}
+              max={50}
+              step={1}
+              value={limitGb}
+              onChange={(e) => {
+                const gb = Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 5));
+                void handleUpdate({ 'storage.cacheSizeLimitMb': gb * 1024 });
+                void setOfflineLimitGb(gb);
+              }}
+              className="w-28 accent-[var(--color-accent)] cursor-pointer"
+            />
+            <span className="w-11 text-right font-mono text-xs font-semibold">{limitGb} GB</span>
+          </div>
+        );
+      })(),
     },
     {
       id: 'resetReplayData',
@@ -1496,6 +1653,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       ),
     },
     {
+      id: 'globalHotkeys',
+      tab: 'ergonomics',
+      title: 'Global Desktop Hotkeys',
+      description: 'System-wide customizable keyboard shortcuts for playback, karaoke, visualizers & ambient window',
+      keywords: 'global hotkeys shortcuts keyboard karaoke visualizer play pause',
+      control: (
+        <input
+          type="checkbox"
+          checked={settings['hotkeys.enabled'] !== false}
+          onChange={(e) => handleUpdate({ 'hotkeys.enabled': e.target.checked })}
+          className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+        />
+      ),
+    },
+    {
       id: 'minimizeToTray',
       tab: 'ergonomics',
       title: 'Minimize to System Tray',
@@ -1712,6 +1884,307 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                     </div>
                     <div className="shrink-0">{entry.control}</div>
                   </div>
+
+                  {entry.id === 'lastFm' && (
+                    <div className="p-3.5 rounded-xl bg-[var(--color-surface-variant)]/50 border border-[var(--color-outline)] space-y-2.5 text-xs">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={settings['scrobble.lastFmApiKey'] || ''}
+                          onChange={(e) => handleUpdate({ 'scrobble.lastFmApiKey': e.target.value })}
+                          placeholder="Last.fm API Key"
+                          className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-outline)] text-[11px] font-mono"
+                        />
+                        <input
+                          type="password"
+                          value={settings['scrobble.lastFmApiSecret'] || ''}
+                          onChange={(e) => handleUpdate({ 'scrobble.lastFmApiSecret': e.target.value })}
+                          placeholder="Last.fm API Secret"
+                          className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-outline)] text-[11px] font-mono"
+                        />
+                        <input
+                          type="password"
+                          value={settings['scrobble.lastFmSessionKey'] || ''}
+                          onChange={(e) => handleUpdate({ 'scrobble.lastFmSessionKey': e.target.value })}
+                          placeholder="Session Key (sk)"
+                          className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-outline)] text-[11px] font-mono"
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[11px] text-[var(--color-on-surface-variant)]">
+                          {lfmTestResult ||
+                            (settings['scrobble.lastFmUsername']
+                              ? `Connected as ${settings['scrobble.lastFmUsername']}`
+                              : 'Requires API Key, API Secret, and authorized Session Key')}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={scrobbleBusy === 'lfm'}
+                          onClick={async () => {
+                            const fn = (window as any)?.electronAPI?.scrobbleTestLastFm;
+                            if (typeof fn !== 'function') return;
+                            setScrobbleBusy('lfm');
+                            try {
+                              const res = await fn({
+                                lastFmApiKey: settings['scrobble.lastFmApiKey'] || '',
+                                lastFmApiSecret: settings['scrobble.lastFmApiSecret'] || '',
+                                lastFmSessionKey: settings['scrobble.lastFmSessionKey'] || '',
+                              });
+                              if (res?.valid) {
+                                if (res.userName) {
+                                  await handleUpdate({ 'scrobble.lastFmUsername': res.userName });
+                                }
+                                setLfmTestResult(
+                                  res.userName ? `Verified (${res.userName})` : 'Last.fm credentials valid'
+                                );
+                              } else {
+                                setLfmTestResult(res?.error || 'Validation failed');
+                              }
+                            } finally {
+                              setScrobbleBusy(null);
+                            }
+                          }}
+                          className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-[11px] font-semibold cursor-pointer"
+                        >
+                          {scrobbleBusy === 'lfm' ? 'Testing...' : 'Test Connection'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {entry.id === 'listenBrainz' && (
+                    <div className="p-3.5 rounded-xl bg-[var(--color-surface-variant)]/50 border border-[var(--color-outline)] space-y-2.5 text-xs">
+                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                        <input
+                          type="password"
+                          value={settings['scrobble.listenBrainzToken'] || ''}
+                          onChange={(e) =>
+                            handleUpdate({ 'scrobble.listenBrainzToken': e.target.value })
+                          }
+                          placeholder="ListenBrainz User Token (from listenbrainz.org/settings)"
+                          className="flex-1 px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-outline)] text-[11px] font-mono"
+                        />
+                        <button
+                          type="button"
+                          disabled={scrobbleBusy === 'lb'}
+                          onClick={async () => {
+                            const fn = (window as any)?.electronAPI?.scrobbleValidateListenBrainz;
+                            if (typeof fn !== 'function') return;
+                            setScrobbleBusy('lb');
+                            try {
+                              const res = await fn(settings['scrobble.listenBrainzToken'] || '');
+                              setLbTestResult(
+                                res?.valid
+                                  ? `Valid token (${res.userName || 'connected'})`
+                                  : res?.error || 'Invalid token'
+                              );
+                            } finally {
+                              setScrobbleBusy(null);
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/15 text-[11px] font-semibold cursor-pointer shrink-0"
+                        >
+                          {scrobbleBusy === 'lb' ? 'Validating...' : 'Test Token'}
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
+                        <span>
+                          {lbTestResult ||
+                            `Offline Retry Queue: ${scrobbleStatus.queueLength} pending${
+                              scrobbleStatus.lastError ? ` · ${scrobbleStatus.lastError}` : ''
+                            }`}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={scrobbleBusy === 'flush' || scrobbleStatus.queueLength === 0}
+                          onClick={async () => {
+                            const fn = (window as any)?.electronAPI?.scrobbleFlushQueue;
+                            if (typeof fn !== 'function') return;
+                            setScrobbleBusy('flush');
+                            try {
+                              const res = await fn();
+                              setScrobbleStatus((prev) => ({
+                                ...prev,
+                                queueLength: Number(res?.remaining) || 0,
+                              }));
+                              setLbTestResult(
+                                `Queue flushed: ${res?.flushed || 0} sent, ${res?.remaining || 0} remaining`
+                              );
+                            } finally {
+                              setScrobbleBusy(null);
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/15 disabled:opacity-45 text-[10px] font-semibold cursor-pointer"
+                        >
+                          Flush Queue ({scrobbleStatus.queueLength})
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {entry.id === 'globalHotkeys' && (
+                    <div className="p-3.5 rounded-xl bg-[var(--color-surface-variant)]/50 border border-[var(--color-outline)] space-y-2.5 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] text-[var(--color-on-surface-variant)]">
+                          {recordingHotkeyAction
+                            ? 'Press any key combination now (Esc to cancel)...'
+                            : settings['hotkeys.enabled'] === false
+                              ? 'Global shortcuts disabled'
+                              : 'Click a shortcut button to record a new key combination'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const resetFn = (window as any)?.electronAPI?.hotkeysResetDefaults;
+                            if (typeof resetFn === 'function') {
+                              const res = await resetFn();
+                              if (res?.bindings) {
+                                await handleUpdate({
+                                  'hotkeys.enabled': true,
+                                  'hotkeys.bindings': res.bindings,
+                                });
+                                setHotkeyStatus({
+                                  enabled: true,
+                                  bindings: res.bindings,
+                                  conflicts: res.conflicts || {},
+                                });
+                                return;
+                              }
+                            }
+                            await handleUpdate({
+                              'hotkeys.enabled': true,
+                              'hotkeys.bindings': {
+                                playPause: 'CommandOrControl+Alt+P',
+                                nextTrack: 'CommandOrControl+Alt+Right',
+                                prevTrack: 'CommandOrControl+Alt+Left',
+                                toggleKaraoke: 'CommandOrControl+Alt+K',
+                                cycleVisualizerTheme: 'CommandOrControl+Alt+V',
+                                jumpBack5s: 'CommandOrControl+Alt+J',
+                                toggleFullscreenAmbient: 'CommandOrControl+Alt+F',
+                              },
+                            });
+                          }}
+                          className="px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/15 text-[11px] font-semibold cursor-pointer"
+                        >
+                          Reset Defaults
+                        </button>
+                      </div>
+                      <div className="space-y-1.5">
+                        {[
+                          { id: 'playPause', label: 'Play / Pause' },
+                          { id: 'nextTrack', label: 'Next Track' },
+                          { id: 'prevTrack', label: 'Previous Track' },
+                          { id: 'toggleKaraoke', label: 'Toggle Karaoke Mode' },
+                          { id: 'cycleVisualizerTheme', label: 'Cycle Visualizer Theme' },
+                          { id: 'jumpBack5s', label: 'Jump Back 5s' },
+                          { id: 'toggleFullscreenAmbient', label: 'Toggle Fullscreen Ambient' },
+                        ].map((act) => {
+                          const currentAccel =
+                            (settings['hotkeys.bindings'] &&
+                              settings['hotkeys.bindings'][act.id]) ||
+                            '';
+                          const conflict = hotkeyStatus?.conflicts?.[act.id];
+                          const isRecording = recordingHotkeyAction === act.id;
+                          return (
+                            <div
+                              key={act.id}
+                              className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-outline)]"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-[11px] font-semibold">{act.label}</div>
+                                {conflict && (
+                                  <div className="text-[10px] text-amber-300">{conflict}</div>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setRecordingHotkeyAction(isRecording ? null : act.id)
+                                  }
+                                  className={`px-2.5 py-1 rounded-md font-mono text-[11px] cursor-pointer ${
+                                    isRecording
+                                      ? 'bg-[#FA2D48] text-white'
+                                      : 'bg-white/10 hover:bg-white/15 text-white'
+                                  }`}
+                                >
+                                  {isRecording ? 'Recording...' : currentAccel || 'Unassigned'}
+                                </button>
+                                {currentAccel && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const prevB =
+                                        settings['hotkeys.bindings'] &&
+                                        typeof settings['hotkeys.bindings'] === 'object'
+                                          ? settings['hotkeys.bindings']
+                                          : {};
+                                      void handleUpdate({
+                                        'hotkeys.bindings': { ...prevB, [act.id]: '' },
+                                      });
+                                    }}
+                                    className="px-2 py-1 rounded-md bg-white/5 hover:bg-red-500/20 text-[10px] text-white/70 hover:text-red-300 cursor-pointer"
+                                  >
+                                    Clear
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {entry.id === 'cacheSizeLimit' && (() => {
+                    const fmtBytes = (b: number) =>
+                      b >= 1024 * 1024 * 1024
+                        ? `${(b / (1024 * 1024 * 1024)).toFixed(2)} GB`
+                        : `${(b / (1024 * 1024)).toFixed(1)} MB`;
+                    const limitBytes = Math.max(1, offlineStats.limitBytes);
+                    const pinnedPct = Math.min(100, (offlineStats.pinnedBytes / limitBytes) * 100);
+                    const unpinnedPct = Math.min(
+                      100 - pinnedPct,
+                      (offlineStats.unpinnedBytes / limitBytes) * 100
+                    );
+                    return (
+                      <div className="p-3.5 rounded-xl bg-[var(--color-surface-variant)]/50 border border-[var(--color-outline)] space-y-2.5 text-xs">
+                        <div className="h-2.5 w-full rounded-full bg-white/10 overflow-hidden flex">
+                          <div
+                            className="h-full bg-cyan-400 transition-all"
+                            style={{ width: `${pinnedPct}%` }}
+                            title="Pinned tracks"
+                          />
+                          <div
+                            className="h-full bg-[var(--color-accent)] transition-all"
+                            style={{ width: `${unpinnedPct}%` }}
+                            title="Auto-cached streams"
+                          />
+                        </div>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <span className="inline-flex items-center gap-1.5">
+                              <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                              Pinned: {fmtBytes(offlineStats.pinnedBytes)} ({offlineStats.pinnedCount})
+                            </span>
+                            <span className="inline-flex items-center gap-1.5">
+                              <span className="w-2 h-2 rounded-full bg-[var(--color-accent)]" />
+                              Auto-Cached: {fmtBytes(offlineStats.unpinnedBytes)} ({offlineStats.unpinnedCount})
+                            </span>
+                            <span>Limit: {offlineStats.limitGb} GB</span>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={offlineStats.unpinnedCount === 0}
+                            onClick={() => void clearUnpinnedOfflineCache()}
+                            className="px-2.5 py-1 rounded-full bg-white/10 hover:bg-white/15 disabled:opacity-45 text-[11px] font-semibold cursor-pointer"
+                          >
+                            Clear Unpinned Cache
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {entry.id === 'localFolders' &&
                     Array.isArray(settings['storage.localFolders']) &&

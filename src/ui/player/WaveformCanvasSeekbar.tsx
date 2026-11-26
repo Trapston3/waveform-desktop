@@ -20,6 +20,13 @@ export interface WaveformCanvasSeekbarProps {
   liveMid?: number;
   liveHigh?: number;
   transitionWindow?: [number, number];
+  abLoop?: {
+    startMs: number | null;
+    endMs: number | null;
+    active: boolean;
+  };
+  barTimestampsSec?: readonly number[];
+  onChangeAbLoop?: (startMs: number | null, endMs: number | null) => void;
   height?: number;
   className?: string;
 }
@@ -112,6 +119,9 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
   liveMid = 0,
   liveHigh = 0,
   transitionWindow,
+  abLoop,
+  barTimestampsSec,
+  onChangeAbLoop,
   height = 36,
   className = '',
 }) => {
@@ -163,6 +173,9 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
     liveMid,
     liveHigh,
     transitionWindow,
+    abLoop,
+    barTimestampsSec,
+    onChangeAbLoop,
     height,
   });
 
@@ -179,6 +192,9 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
     liveMid,
     liveHigh,
     transitionWindow,
+    abLoop,
+    barTimestampsSec,
+    onChangeAbLoop,
     height,
   };
 
@@ -391,6 +407,32 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
       const playheadX = progress * width;
       const effectivePlayheadBar = progress * totalBars;
 
+      // 4B. Subtle neural bar ticks along bottom baseline
+      if (p.barTimestampsSec && p.barTimestampsSec.length > 0 && effectiveDurationMs > 0) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.24)';
+        const durSec = effectiveDurationMs / 1000;
+        for (let bIdx = 0; bIdx < p.barTimestampsSec.length; bIdx++) {
+          const barSec = p.barTimestampsSec[bIdx];
+          if (barSec <= 0 || barSec >= durSec) continue;
+          const bx = (barSec / durSec) * width;
+          ctx.fillRect(bx - 0.5, h - 4, 1, 3.5);
+        }
+      }
+
+      // 4C. Glowing Practice A-B Loop Region
+      const loopA = p.abLoop?.startMs;
+      const loopB = p.abLoop?.endMs;
+      const hasLoopA = typeof loopA === 'number' && Number.isFinite(loopA) && effectiveDurationMs > 0;
+      const hasLoopB = typeof loopB === 'number' && Number.isFinite(loopB) && effectiveDurationMs > 0;
+      if (hasLoopA && hasLoopB && loopB > loopA) {
+        const ax = Math.max(0, Math.min(width, (loopA / effectiveDurationMs) * width));
+        const bx = Math.max(ax, Math.min(width, (loopB / effectiveDurationMs) * width));
+        ctx.fillStyle = p.abLoop?.active
+          ? 'rgba(56, 189, 248, 0.20)'
+          : 'rgba(255, 255, 255, 0.10)';
+        ctx.fillRect(ax, 2, Math.max(2, bx - ax), h - 4);
+      }
+
       // 5. Draw 68 Waveform Bars
       for (let i = 0; i < totalBars; i++) {
         const barLeft = i * (barWidth + gap);
@@ -473,6 +515,52 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
       ctx.lineWidth = 0.5;
       ctx.stroke();
 
+      // 8. Draggable Glowing A / B Loop Handles
+      if (hasLoopA) {
+        const ax = Math.max(2, Math.min(width - 2, ((loopA as number) / effectiveDurationMs) * width));
+        ctx.save();
+        ctx.strokeStyle = p.abLoop?.active ? '#38bdf8' : 'rgba(186, 230, 253, 0.78)';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = p.abLoop?.active ? 'rgba(56, 189, 248, 0.85)' : 'rgba(56, 189, 248, 0.35)';
+        ctx.shadowBlur = 7;
+        ctx.beginPath();
+        ctx.moveTo(ax, 2);
+        ctx.lineTo(ax, h - 2);
+        ctx.stroke();
+        ctx.fillStyle = p.abLoop?.active ? '#38bdf8' : '#7dd3fc';
+        ctx.beginPath();
+        ctx.roundRect(ax - 5, 1, 10, 10, 3);
+        ctx.fill();
+        ctx.fillStyle = '#04121d';
+        ctx.font = 'bold 7.5px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('A', ax, 6.2);
+        ctx.restore();
+      }
+      if (hasLoopB) {
+        const bx = Math.max(2, Math.min(width - 2, ((loopB as number) / effectiveDurationMs) * width));
+        ctx.save();
+        ctx.strokeStyle = p.abLoop?.active ? '#38bdf8' : 'rgba(186, 230, 253, 0.78)';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = p.abLoop?.active ? 'rgba(56, 189, 248, 0.85)' : 'rgba(56, 189, 248, 0.35)';
+        ctx.shadowBlur = 7;
+        ctx.beginPath();
+        ctx.moveTo(bx, 2);
+        ctx.lineTo(bx, h - 2);
+        ctx.stroke();
+        ctx.fillStyle = p.abLoop?.active ? '#38bdf8' : '#7dd3fc';
+        ctx.beginPath();
+        ctx.roundRect(bx - 5, 1, 10, 10, 3);
+        ctx.fill();
+        ctx.fillStyle = '#04121d';
+        ctx.font = 'bold 7.5px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('B', bx, 6.2);
+        ctx.restore();
+      }
+
       ctx.restore();
 
       rafId = requestAnimationFrame(render);
@@ -511,20 +599,77 @@ export const WaveformCanvasSeekbar: React.FC<WaveformCanvasSeekbarProps> = React
 
     const rect = containerRef.current.getBoundingClientRect();
     const startX = e.clientX;
-
-    interactionRef.current.isDragging = true;
-    interactionRef.current.hasMoved = false;
-    usePlayerStore.getState().setIsScrubbing(true);
+    const effectiveDuration = resolveEffectiveDurationMs(
+      propsRef.current.durationMs,
+      propsRef.current.audioEngine
+    );
+    const localStartX = startX - rect.left;
+    const loopStartMs = propsRef.current.abLoop?.startMs;
+    const loopEndMs = propsRef.current.abLoop?.endMs;
+    let draggingHandle: 'A' | 'B' | null = null;
+    if (propsRef.current.onChangeAbLoop && effectiveDuration > 0 && rect.width > 0) {
+      const ax = typeof loopStartMs === 'number' ? (loopStartMs / effectiveDuration) * rect.width : null;
+      const bx = typeof loopEndMs === 'number' ? (loopEndMs / effectiveDuration) * rect.width : null;
+      if (ax !== null && Math.abs(localStartX - ax) <= 10) {
+        draggingHandle = 'A';
+      } else if (bx !== null && Math.abs(localStartX - bx) <= 10) {
+        draggingHandle = 'B';
+      }
+    }
 
     const calcPositionMs = (clientX: number): number => {
-      const effectiveDuration = resolveEffectiveDurationMs(
+      const dur = resolveEffectiveDurationMs(
         propsRef.current.durationMs,
         propsRef.current.audioEngine
       );
       const x = clientX - rect.left;
       const fraction = rect.width > 0 ? Math.max(0, Math.min(1.0, x / rect.width)) : 0;
-      return Math.round(fraction * effectiveDuration);
+      return Math.round(fraction * dur);
     };
+
+    if (draggingHandle && propsRef.current.onChangeAbLoop) {
+      const handleBracketMove = (moveEvent: MouseEvent) => {
+        const ms = calcPositionMs(moveEvent.clientX);
+        const curA = propsRef.current.abLoop?.startMs ?? 0;
+        const curB = propsRef.current.abLoop?.endMs ?? effectiveDuration;
+        if (draggingHandle === 'A') {
+          const nextA = Math.min(ms, Math.max(0, curB - 250));
+          propsRef.current.onChangeAbLoop?.(nextA, curB);
+          setTooltipState({
+            visible: true,
+            x: Math.max(28, Math.min(rect.width - 28, moveEvent.clientX - rect.left)),
+            timeMs: nextA,
+          });
+        } else {
+          const nextB = Math.max(ms, curA + 250);
+          propsRef.current.onChangeAbLoop?.(curA, nextB);
+          setTooltipState({
+            visible: true,
+            x: Math.max(28, Math.min(rect.width - 28, moveEvent.clientX - rect.left)),
+            timeMs: nextB,
+          });
+        }
+      };
+      const cleanupBracketListeners = () => {
+        window.removeEventListener('mousemove', handleBracketMove);
+        window.removeEventListener('mouseup', handleBracketUp);
+        if (dragCleanupRef.current === cleanupBracketListeners) {
+          dragCleanupRef.current = null;
+        }
+      };
+      const handleBracketUp = () => {
+        cleanupBracketListeners();
+        setTooltipState(null);
+      };
+      dragCleanupRef.current = cleanupBracketListeners;
+      window.addEventListener('mousemove', handleBracketMove);
+      window.addEventListener('mouseup', handleBracketUp);
+      return;
+    }
+
+    interactionRef.current.isDragging = true;
+    interactionRef.current.hasMoved = false;
+    usePlayerStore.getState().setIsScrubbing(true);
 
     const initialMs = calcPositionMs(startX);
     interactionRef.current.scrubPositionMs = initialMs;

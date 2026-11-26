@@ -957,18 +957,18 @@ async function runElectronScreenshotHarness() {
   await openNowPlayingAndSeek(15.2, [{ key: 'ArrowRight', code: 'ArrowRight', shiftKey: true }]);
   await capturePng('01-now-playing-apple-mesh.png', '01-now-playing-apple-mesh');
 
-  // 2. 02-visualizer-ios-chat.png (iOS Chat with Tapback pill & magic word / embed)
+  // 2. 02-visualizer-ios-chat.png (iOS Kinetic Messages blur-spring reveal + contour halo + embed)
   await configureSceneAndReload({
     trackIndex: 1,
-    positionMs: 20000,
+    positionMs: 20150,
     nowPlayingLyricsMode: 'visualizer',
     styleId: 'IosTextingMotion',
-    variationByStyle: { IosTextingMotion: 'ios-dark' },
+    variationByStyle: { IosTextingMotion: 'kinetic-messages' },
     nowPlayingLayout: 'split',
     hideAlbumCover: false,
     textAlign: 'center',
   });
-  await openNowPlayingAndSeek(20.4, [
+  await openNowPlayingAndSeek(20.15, [
     { key: 'ArrowRight', code: 'ArrowRight', shiftKey: true },
     { key: 'ArrowRight', code: 'ArrowRight', shiftKey: false },
   ]);
@@ -1061,6 +1061,62 @@ async function runElectronScreenshotHarness() {
   `);
   await new Promise((r) => setTimeout(r, 300));
   await capturePng('06-cover-flow-library.png', '06-cover-flow-library');
+
+  // 7. 07-visualizer-lock-screen.png (iOS Lock Screen Alerts stacked frosted glass)
+  await configureSceneAndReload({
+    trackIndex: 1,
+    positionMs: 20100,
+    nowPlayingLyricsMode: 'visualizer',
+    styleId: 'IosTextingMotion',
+    variationByStyle: { IosTextingMotion: 'lock-screen-alerts' },
+    nowPlayingLayout: 'split',
+    hideAlbumCover: false,
+    textAlign: 'center',
+  });
+  await openNowPlayingAndSeek(20.1, [{ key: 'ArrowRight', code: 'ArrowRight', shiftKey: true }]);
+  await capturePng('07-visualizer-lock-screen.png', '07-visualizer-lock-screen');
+
+  // 8. 08-visualizer-city-walk-map.png (City Walk Map procedural Apple Maps route)
+  await configureSceneAndReload({
+    trackIndex: 1,
+    positionMs: 16800,
+    nowPlayingLyricsMode: 'visualizer',
+    styleId: 'IosTextingMotion',
+    variationByStyle: { IosTextingMotion: 'city-walk-map' },
+    nowPlayingLayout: 'split',
+    hideAlbumCover: false,
+    textAlign: 'center',
+  });
+  await openNowPlayingAndSeek(16.8, [{ key: 'ArrowRight', code: 'ArrowRight', shiftKey: true }]);
+  await capturePng('08-visualizer-city-walk-map.png', '08-visualizer-city-walk-map');
+
+  // 9. 09-visualizer-wallet-payments.png (Apple Wallet / Apple Card ledger)
+  await configureSceneAndReload({
+    trackIndex: 1,
+    positionMs: 23400,
+    nowPlayingLyricsMode: 'visualizer',
+    styleId: 'IosTextingMotion',
+    variationByStyle: { IosTextingMotion: 'wallet-payments' },
+    nowPlayingLayout: 'split',
+    hideAlbumCover: false,
+    textAlign: 'center',
+  });
+  await openNowPlayingAndSeek(23.4, [{ key: 'ArrowRight', code: 'ArrowRight', shiftKey: true }]);
+  await capturePng('09-visualizer-wallet-payments.png', '09-visualizer-wallet-payments');
+
+  // 10. 10-visualizer-constellation.png (Motion Geometry Constellation starfield)
+  await configureSceneAndReload({
+    trackIndex: 2,
+    positionMs: 12900,
+    nowPlayingLyricsMode: 'visualizer',
+    styleId: 'MotionGeometry',
+    variationByStyle: { MotionGeometry: 'constellation' },
+    nowPlayingLayout: 'split',
+    hideAlbumCover: false,
+    textAlign: 'center',
+  });
+  await openNowPlayingAndSeek(12.9, [{ key: 'ArrowRight', code: 'ArrowRight', shiftKey: true }]);
+  await capturePng('10-visualizer-constellation.png', '10-visualizer-constellation');
 
   win.destroy();
   app.quit();

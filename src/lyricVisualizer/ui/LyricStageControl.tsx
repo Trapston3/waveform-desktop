@@ -373,6 +373,8 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       palette: state.config.albumArtColorMatch ? state.activePalette : DEMO_FALLBACK_PALETTE,
       reduceMotion: state.config.reduceMotion,
       motionIntensity: state.config.motionIntensity,
+      beatCameraThump: state.config.beatCameraThump,
+      iosKineticZoom: state.config.iosKineticZoom,
       backgroundOpacity: state.config.backgroundOpacity,
       vignetteStrength: state.config.vignetteStrength,
       textAlign: state.config.textAlign,
@@ -492,12 +494,14 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       backgroundOpacity: config.backgroundOpacity,
       vignetteStrength: config.vignetteStrength,
       textAlign: config.textAlign,
+      iosKineticZoom: config.iosKineticZoom,
     });
     renderer.setScriptMode(config.scriptMode);
     renderer.setTrackMetadata(trackMetadata);
     renderer.setModes({
       reduceMotion: config.reduceMotion,
       motionIntensity: config.motionIntensity,
+      beatCameraThump: config.beatCameraThump,
       isAmbientMode,
       isOverlayMode,
       isEmbeddedTransparent: blendWithParent,
@@ -513,6 +517,8 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     config.albumArtColorMatch,
     config.reduceMotion,
     config.motionIntensity,
+    config.beatCameraThump,
+    config.iosKineticZoom,
     config.audioReactive,
     config.backgroundOpacity,
     config.vignetteStrength,

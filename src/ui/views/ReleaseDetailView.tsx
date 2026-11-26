@@ -13,6 +13,7 @@ import {
   Disc,
   ChevronDown,
   ChevronUp,
+  Pin,
 } from 'lucide-react';
 import { MusicService } from '../../services/MusicService';
 import type { DetailPage } from '../../models/Navigation';
@@ -21,6 +22,7 @@ import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
 import { useLibraryStore } from '../../state/libraryStore';
+import { useOfflineCacheStore } from '../../services/OfflineCacheService';
 import { extractArtworkPaletteFromUrl, useThemeStore } from '../theme/Theme';
 import { PlayerPlayIcon, LosslessWaveIcon } from '../common/WaveFormIcons';
 import { DesktopTrackTable } from '../components/DesktopTrackTable';
@@ -48,6 +50,9 @@ export const ReleaseDetailView: React.FC<ReleaseDetailViewProps> = memo(({
 
   const { setContextQueue, addToUserQueue } = useQueueStore();
   const { navigateToArtist } = useNavigationStore();
+  const pinnedIds = useOfflineCacheStore((s) => s.pinnedIds);
+  const pinTracks = useOfflineCacheStore((s) => s.pinTracks);
+  const unpinTracks = useOfflineCacheStore((s) => s.unpinTracks);
   const { toggleFavorite, isFavorite } = useLibraryStore();
 
   useEffect(() => {
@@ -236,6 +241,31 @@ export const ReleaseDetailView: React.FC<ReleaseDetailViewProps> = memo(({
             >
               <ListPlus size={16} />
             </button>
+
+            {songs.length > 0 && (() => {
+              const allPinned = songs.every((s) => s.videoId && pinnedIds.includes(s.videoId));
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (allPinned) {
+                      void unpinTracks(songs.map((s) => s.videoId).filter(Boolean));
+                    } else {
+                      void pinTracks(songs);
+                    }
+                  }}
+                  className={`spring-press flex items-center gap-1.5 px-4 py-2.5 rounded-full border text-xs font-semibold cursor-pointer transition-all ${
+                    allPinned
+                      ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-200'
+                      : 'bg-white/10 hover:bg-white/15 border-white/15 text-white'
+                  }`}
+                  title={allPinned ? 'Remove offline pins for all tracks' : 'Pin all tracks for offline playback'}
+                >
+                  <Pin size={13} className={allPinned ? 'fill-current' : ''} />
+                  <span>{allPinned ? 'Pinned Offline' : 'Pin Offline'}</span>
+                </button>
+              );
+            })()}
 
             {detail?.radioId && (
               <button

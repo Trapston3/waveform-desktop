@@ -1888,4 +1888,162 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     assert.ok(minSplitX > -3.5, `Expected Split View left excursion clamped rightward, got ${minSplitX}`);
     scene.dispose();
   });
+
+  test('v1.3.2 Pass 1: Global Beat Camera Thump, 9 restored iOS variations, Zero Future Preview, Wallet/Map/LockScreen overhauls, MotionGeometry 2.5x typography & Spaceship persistent laser salvos', async () => {
+    const { resolveStyleVariationId } = await import('../../src/lyricVisualizer/core/index.ts');
+    const iosDef = VISUAL_STYLE_DEFINITIONS.find((s) => s.id === 'IosTextingMotion');
+    assert.ok(iosDef, 'Expected IosTextingMotion style definition');
+    const expectedIosVars = [
+      'kinetic-messages',
+      'cinema-edit',
+      'ios-dark',
+      'liquid-glass',
+      'classic-sms',
+      'group-chat',
+      'wallet-payments',
+      'city-walk-map',
+      'lock-screen-alerts',
+    ];
+    for (const vid of expectedIosVars) {
+      assert.ok(iosDef.variations.some((v) => v.id === vid), `Missing restored iOS variation: ${vid}`);
+      assert.equal(resolveStyleVariationId('IosTextingMotion', { IosTextingMotion: vid }), vid);
+    }
+
+    const longLineLyrics = {
+      providerName: 'Pass1',
+      sourceKind: 'WordSynced',
+      lines: [
+        {
+          startSeconds: 1.0,
+          endSeconds: 4.0,
+          text: 'Past line stayed visible softly above',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Past', startSeconds: 1.0, endSeconds: 1.5 },
+            { text: 'line', startSeconds: 1.5, endSeconds: 2.0 },
+            { text: 'stayed', startSeconds: 2.0, endSeconds: 2.5 },
+            { text: 'visible', startSeconds: 2.5, endSeconds: 3.0 },
+            { text: 'softly', startSeconds: 3.0, endSeconds: 3.5 },
+            { text: 'above', startSeconds: 3.5, endSeconds: 4.0 },
+          ],
+        },
+        {
+          startSeconds: 4.2,
+          endSeconds: 8.5,
+          text: 'Current active words unlock gradually without spoiling future lyrics',
+          isSynthesizedWords: false,
+          words: [
+            { text: 'Current', startSeconds: 4.2, endSeconds: 4.7 },
+            { text: 'active', startSeconds: 4.7, endSeconds: 5.2 },
+            { text: 'words', startSeconds: 5.2, endSeconds: 5.7 },
+            { text: 'unlock', startSeconds: 5.7, endSeconds: 6.2 },
+            { text: 'gradually', startSeconds: 6.2, endSeconds: 6.8 },
+            { text: 'without', startSeconds: 6.8, endSeconds: 7.3 },
+            { text: 'spoiling', startSeconds: 7.3, endSeconds: 7.9 },
+            { text: 'future', startSeconds: 7.9, endSeconds: 8.2 },
+            { text: 'lyrics', startSeconds: 8.2, endSeconds: 8.5 },
+          ],
+        },
+        {
+          startSeconds: 9.0,
+          endSeconds: 12.0,
+          text: 'FORBIDDEN_FUTURE_BUBBLE_PREVIEW',
+          isSynthesizedWords: false,
+          words: [{ text: 'FORBIDDEN_FUTURE_BUBBLE_PREVIEW', startSeconds: 9.0, endSeconds: 12.0 }],
+        },
+      ],
+    };
+
+    const canvas = createMockCanvas();
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'IosTextingMotion',
+      variationId: 'kinetic-messages',
+      palette: SAMPLE_PALETTE,
+      beatCameraThump: true,
+      iosKineticZoom: 1.45,
+    });
+    renderer.resize(1024, 680, 1);
+    renderer.setLyrics(longLineLyrics);
+
+    // 1. Kinetic Messages: ZERO future bubble preview and ZERO unsung grey words inside active bubble
+    canvas.ctx2d.ops.length = 0;
+    renderer.setSyncState({ timeSeconds: 4.8, activeLineIndex: 1, activeWordIndex: 1, wordProgress: 0.3, didSeekThisFrame: true });
+    renderer.setAudioMetrics({ rmsLevel: 0.7, bassEnergy: 0.9, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: true, isDownbeat: true, beatStrength: 0.95 });
+    renderer.renderFrame(1000);
+    const kineticTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
+    assert.ok(kineticTexts.includes('Current') && kineticTexts.includes('active'), 'Active sung words must render');
+    assert.equal(kineticTexts.includes('spoiling'), false, 'Kinetic Messages must never pre-render unsung words');
+    assert.equal(kineticTexts.includes('FORBIDDEN_FUTURE_BUBBLE_PREVIEW'), false, 'Kinetic Messages must never render future bubbles');
+    assert.ok(renderer.getBeatThumpScale() > 1.005, 'Beat Camera Thump must apply compositor scale impulse on downbeat');
+
+    // 2. Beat Camera Thump OFF bypasses compositor scale transform
+    renderer.setStyle('AppleMusicFlow');
+    renderer.setModes({ beatCameraThump: false });
+    renderer.setSyncState({ timeSeconds: 4.8, activeLineIndex: 1, activeWordIndex: 1, wordProgress: 0.3 });
+    renderer.setAudioMetrics({ rmsLevel: 0.9, bassEnergy: 0.95, midEnergy: 0.6, trebleEnergy: 0.5, beatDetected: true, isDownbeat: true, beatStrength: 0.98 });
+    renderer.renderFrame(1032);
+    assert.equal(renderer.getBeatThumpScale(), 1.0, 'beatCameraThump=false must bypass compositor scale thump');
+
+    // 3. Wallet / Payments: omits "Apple Wallet · Live Ledger", zero future lines, zero "..." truncation
+    renderer.setModes({ beatCameraThump: true });
+    renderer.setStyle('IosTextingMotion');
+    renderer.setVariation('wallet-payments');
+    canvas.ctx2d.ops.length = 0;
+    renderer.setAudioMetrics({ rmsLevel: 0.5, bassEnergy: 0.6, midEnergy: 0.4, trebleEnergy: 0.3, beatDetected: false });
+    renderer.renderFrame(1064);
+    const walletTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
+    assert.equal(walletTexts.some((t) => t.includes('Live Ledger')), false, 'Wallet must remove Live Ledger header');
+    assert.equal(walletTexts.some((t) => t.includes('FORBIDDEN_FUTURE')), false, 'Wallet must not render future transactions');
+    assert.equal(walletTexts.some((t) => t.includes('…') || t.includes('...')), false, 'Wallet must wrap full text without ellipsis truncation');
+
+    // 4. Lock Screen Alerts & City Walk Map: zero future items
+    for (const v of ['lock-screen-alerts', 'city-walk-map']) {
+      renderer.setVariation(v);
+      canvas.ctx2d.ops.length = 0;
+      renderer.setAudioMetrics({ rmsLevel: 0.5, bassEnergy: 0.5, midEnergy: 0.4, trebleEnergy: 0.3, beatDetected: false });
+      renderer.renderFrame(1096);
+      const texts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
+      assert.equal(texts.some((t) => t.includes('FORBIDDEN_FUTURE')), false, `${v} must never render future items`);
+    }
+
+    // 5. Spaceship 3D: GATE_POOL >= 40, no elevLift Y-snap, consumed words never float behind tail, persistent beat-locked laser salvos over 60s
+    const shipSrc = readFileSync(path.join(rootDir, 'src/lyricVisualizer/rendering/ship3dScene.ts'), 'utf8');
+    assert.equal(/\belevLift\s*=/.test(shipSrc), false, 'Ship3DScene must remove lower-spawn elevLift Y-snap');
+    assert.ok(/GATE_POOL\s*=\s*48/.test(shipSrc), 'Ship3DScene must allocate >=40 word pool slots');
+
+    const { Ship3DScene } = await import('../../src/lyricVisualizer/rendering/ship3dScene.ts');
+    const ship = new Ship3DScene(null);
+    const mockCtx = createMockCanvas2DContext();
+    ship.syncLyricsState(longLineLyrics, 0.5, 0, 0, false, true);
+    for (let step = 0; step < 300; step++) {
+      const t = 0.5 + step * 0.2;
+      ship.syncLyricsState(longLineLyrics, t, 1, 1, false, false);
+      ship.render(
+        mockCtx,
+        1280,
+        720,
+        t,
+        0.2,
+        { rmsLevel: 0.7, bassEnergy: 0.85, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: step % 2 === 0, isDownbeat: step % 8 === 0, beatStrength: 0.88, estimatedBpm: 124 },
+        SAMPLE_PALETTE,
+        false,
+        false,
+        'deep-space',
+        0.95,
+        640,
+        false
+      );
+      for (let g = 0; g < ship.getProjectedWordGateCount(); g++) {
+        const gp = ship.getProjectedWordGate(g);
+        if (!gp.consumed) {
+          assert.ok(gp.worldZ < -0.5, `Unconsumed word must remain ahead of ship nose (-0.5), got ${gp.worldZ}`);
+        }
+      }
+    }
+    assert.ok(ship.getLaserSalvoCount() >= 8, `Expected persistent beat-locked laser salvos over 60s vocal track, got ${ship.getLaserSalvoCount()}`);
+
+    ship.dispose();
+    renderer.dispose();
+  });
 });

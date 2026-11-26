@@ -49,8 +49,9 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
   private scrollY = 0;
   private initialized = false;
   private lastKnownActiveIdx = -1;
-  // Pre-allocated AABB scratch for up to 18 non-overlapping 3D projected words (zero GC)
-  private readonly drawnWordRects = new Float32Array(72);
+  // Pre-allocated AABB & back-to-front order scratch for up to 48 projected words (zero GC)
+  private readonly drawnWordRects = new Float32Array(192);
+  private readonly sortOrder = new Int32Array(48);
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'nebula-run') return 1;
@@ -197,11 +198,29 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Draw up to 18 separated words along the 3D flight corridor (nose-center collision + rapid phrase stream)
+    // Sort active gate slots back-to-front by worldZ (closest word approaching nose drawn last on top)
+    const count = Math.min(48, gateCount);
+    for (let i = 0; i < count; i++) {
+      this.sortOrder[i] = i;
+    }
+    for (let i = 1; i < count; i++) {
+      const idx = this.sortOrder[i];
+      const zVal = activeScene.getProjectedWordGate(idx).worldZ;
+      let j = i - 1;
+      while (j >= 0 && activeScene.getProjectedWordGate(this.sortOrder[j]).worldZ > zVal) {
+        this.sortOrder[j + 1] = this.sortOrder[j];
+        j--;
+      }
+      this.sortOrder[j + 1] = idx;
+    }
+
+    // Draw EVERY active corridor word & nose splash up to 48 slots with guaranteed non-overlapping fan placement
     let drawnCount = 0;
-    for (let g = 0; g < gateCount && drawnCount < 18; g++) {
+    let unconsumedCount = 0;
+    for (let sIdx = 0; sIdx < count; sIdx++) {
+      const g = this.sortOrder[sIdx];
       const gp = activeScene.getProjectedWordGate(g);
-      if (!gp.text || gp.alpha <= 0.03) continue;
+      if (!gp.text || gp.alpha <= 0.02) continue;
 
       const rawPx = 44 * gp.scale * fontSizeScale * (1 + gp.mergeFlash * 0.22);
       const wordFontPx = Math.max(28, Math.min(62, Math.round(rawPx)));
@@ -215,42 +234,109 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
 
       const minY = Math.max(44, wordFontPx * 0.65);
       const maxY = Math.max(minY, height - Math.max(52, wordFontPx * 0.75));
-      let drawY = Math.max(minY, Math.min(maxY, gp.screenY));
+      // Stagger farther upcoming words subtly upward into a descending corridor flight path
+      const depthLift = !gp.consumed && gp.worldZ < -1.5 ? Math.min(180, Math.abs(gp.worldZ + 1.5) * 8.5) : 0;
+      let drawY = Math.max(minY, Math.min(maxY, gp.screenY - depthLift));
 
-      const pad = 8;
-      let rx0 = drawX - textW * 0.5 - pad;
-      let ry0 = drawY - wordFontPx * 0.52 - pad;
-      let rx1 = drawX + textW * 0.5 + pad;
-      let ry1 = drawY + wordFontPx * 0.52 + pad;
+      const glowColor = resolveWordGlowColor(
+        gp.semanticMask,
+        frame.timeSeconds,
+        frame.palette.accentPrimary,
+        frame.palette.accentSecondary
+      );
 
-      // Gently nudge stacked fast-tempo words vertically before falling back to skip
-      let overlaps = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        overlaps = false;
+      // Consumed words (t >= word.startSeconds) shatter at SHIP_NOSE_Z into liquid-starlight particles (never float past ship tail!)
+      if (gp.consumed) {
+        if (gp.mergeFlash > 0.01 && !frame.reduceMotion) {
+          const p = 1.0 - gp.mergeFlash;
+          ctx.save();
+          ctx.shadowColor = glowColor;
+          ctx.shadowBlur = 20;
+
+          // Brief nose-flash dissolve during first ~90ms of impact pinned strictly at nose before full droplet dispersion
+          if (gp.mergeFlash >= 0.80) {
+            const wordDissolveAlpha = Math.min(1, (gp.mergeFlash - 0.80) / 0.20);
+            ctx.globalAlpha = wordDissolveAlpha;
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowBlur = 26;
+            ctx.fillText(gp.text, drawX, drawY);
+          }
+
+          // Expanding directional plasma ripple arc sweeping off nose/wings
+          const rippleRx = (26 + p * 74) * gp.scale;
+          const rippleRy = rippleRx * 0.45;
+          ctx.strokeStyle = glowColor;
+          ctx.lineWidth = Math.max(1.3, (3.5 - p * 2.3) * gp.scale);
+          ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.82;
+          ctx.beginPath();
+          ctx.ellipse(drawX, drawY, rippleRx, rippleRy, 0, Math.PI * 0.08, Math.PI * 0.92);
+          ctx.stroke();
+
+          // Crisp brief glow flare at nose impact
+          const flareR = Math.max(10, (24 - p * 12) * gp.scale);
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = gp.alpha * gp.mergeFlash * gp.mergeFlash * 0.48;
+          ctx.beginPath();
+          ctx.arc(drawX, drawY, flareR, 0, Math.PI * 2);
+          ctx.fill();
+
+          // 24 radial liquid-starlight splash droplets
+          const dropletCount = 24;
+          for (let d = 0; d < dropletCount; d++) {
+            const ang = (d / dropletCount) * Math.PI * 2 + p * 0.6;
+            const dist = (14 + p * (64 + (d % 4) * 14)) * gp.scale;
+            const dx = drawX + Math.cos(ang) * dist;
+            const dy = drawY + Math.sin(ang) * dist * 0.72;
+            const dr = Math.max(1.4, (3.8 - p * 2.4) * gp.scale);
+            ctx.fillStyle = d % 2 === 0 ? '#ffffff' : glowColor;
+            ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.94;
+            ctx.beginPath();
+            ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+        continue;
+      }
+
+      // Limit simultaneous far-horizon corridor words to nearest 5 so sky stays clean & legible
+      if (unconsumedCount >= 5) continue;
+      unconsumedCount++;
+
+      const pad = 10;
+      const halfH = wordFontPx * 0.54 + pad;
+      const stepY = Math.max(46, wordFontPx * 0.96 + 14);
+      let bestY = drawY;
+      let bestOverlapPenalty = Infinity;
+
+      // Guaranteed zero-overlap candidate search fanning upward/downward along flight corridor
+      const baseCandidateY = drawY;
+      for (let attempt = 0; attempt < 11; attempt++) {
+        const dir = attempt === 0 ? 0 : attempt <= 6 ? -attempt : attempt - 6;
+        const candY = Math.max(minY, Math.min(maxY, baseCandidateY + dir * stepY));
+        const rx0 = drawX - textW * 0.5 - pad;
+        const ry0 = candY - halfH;
+        const rx1 = drawX + textW * 0.5 + pad;
+        const ry1 = candY + halfH;
+        let penalty = 0;
         for (let d = 0; d < drawnCount; d++) {
           const o = d * 4;
-          if (
-            rx0 < this.drawnWordRects[o + 2] &&
-            rx1 > this.drawnWordRects[o] &&
-            ry0 < this.drawnWordRects[o + 3] &&
-            ry1 > this.drawnWordRects[o + 1]
-          ) {
-            overlaps = true;
-            break;
-          }
+          const ox = Math.max(0, Math.min(rx1, this.drawnWordRects[o + 2]) - Math.max(rx0, this.drawnWordRects[o]));
+          const oy = Math.max(0, Math.min(ry1, this.drawnWordRects[o + 3]) - Math.max(ry0, this.drawnWordRects[o + 1]));
+          penalty += ox * oy;
         }
-        if (!overlaps) break;
-        const nudge = (attempt + 1) * (wordFontPx * 0.92 + 10);
-        const altY = attempt % 2 === 0 ? drawY - nudge : drawY + nudge;
-        if (altY >= minY && altY <= maxY) {
-          drawY = altY;
-          rx0 = drawX - textW * 0.5 - pad;
-          ry0 = drawY - wordFontPx * 0.52 - pad;
-          rx1 = drawX + textW * 0.5 + pad;
-          ry1 = drawY + wordFontPx * 0.52 + pad;
+        if (penalty < bestOverlapPenalty) {
+          bestOverlapPenalty = penalty;
+          bestY = candY;
         }
+        if (penalty === 0) break;
       }
-      if (overlaps) continue;
+
+      drawY = bestY;
+      const rx0 = drawX - textW * 0.5 - pad;
+      const ry0 = drawY - halfH;
+      const rx1 = drawX + textW * 0.5 + pad;
+      const ry1 = drawY + halfH;
 
       const o = drawnCount * 4;
       this.drawnWordRects[o] = rx0;
@@ -263,58 +349,9 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
         frame.recordHitRect?.(gp.lineIndex, rx0, ry0, rx1 - rx0, ry1 - ry0);
       }
 
-      const glowColor = resolveWordGlowColor(
-        gp.semanticMask,
-        frame.timeSeconds,
-        frame.palette.accentPrimary,
-        frame.palette.accentSecondary
-      );
-
-      // Rich liquid-starlight impact splash across the ship's nose/wings on collision
-      if (gp.mergeFlash > 0.01 && !frame.reduceMotion) {
-        const p = 1.0 - gp.mergeFlash;
-        ctx.save();
-        ctx.shadowColor = glowColor;
-        ctx.shadowBlur = 18;
-
-        // Expanding directional plasma ripple arc sweeping off nose/wings
-        const rippleRx = (24 + p * 68) * gp.scale;
-        const rippleRy = rippleRx * 0.44;
-        ctx.strokeStyle = glowColor;
-        ctx.lineWidth = Math.max(1.2, (3.2 - p * 2.2) * gp.scale);
-        ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.72;
-        ctx.beginPath();
-        ctx.ellipse(drawX, drawY, rippleRx, rippleRy, 0, Math.PI * 0.12, Math.PI * 0.88);
-        ctx.stroke();
-
-        // Crisp brief glow flare at nose impact
-        const flareR = Math.max(8, (22 - p * 12) * gp.scale);
-        ctx.fillStyle = '#ffffff';
-        ctx.globalAlpha = gp.alpha * gp.mergeFlash * gp.mergeFlash * 0.42;
-        ctx.beginPath();
-        ctx.arc(drawX, drawY, flareR, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Luminous liquid-starlight splash droplets
-        const dropletCount = 14;
-        for (let d = 0; d < dropletCount; d++) {
-          const ang = (d / dropletCount) * Math.PI * 2 + p * 0.55;
-          const dist = (12 + p * (60 + (d % 3) * 16)) * gp.scale;
-          const dx = drawX + Math.cos(ang) * dist;
-          const dy = drawY + Math.sin(ang) * dist * 0.72;
-          const dr = Math.max(1.4, (3.8 - p * 2.4) * gp.scale);
-          ctx.fillStyle = d % 2 === 0 ? '#ffffff' : glowColor;
-          ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.94;
-          ctx.beginPath();
-          ctx.arc(dx, dy, dr, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.restore();
-      }
-
       // Dark drop halo + accent glow + white core typography
       ctx.save();
-      ctx.globalAlpha = gp.alpha * (gp.isActive || gp.mergeFlash > 0.08 ? 1.0 : 0.86);
+      ctx.globalAlpha = gp.alpha * (gp.isActive ? 1.0 : 0.92);
       ctx.lineJoin = 'round';
       ctx.miterLimit = 2;
       ctx.strokeStyle = 'rgba(2, 6, 18, 0.9)';
@@ -324,9 +361,8 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       ctx.strokeText(gp.text, drawX, drawY);
 
       ctx.shadowColor = glowColor;
-      ctx.shadowBlur = (gp.isActive ? 24 : 12) + gp.mergeFlash * 32;
-      ctx.fillStyle =
-        gp.isActive || gp.mergeFlash > 0.08 ? '#ffffff' : frame.palette.textActive;
+      ctx.shadowBlur = gp.isActive ? 24 : 14;
+      ctx.fillStyle = gp.isActive ? '#ffffff' : frame.palette.textActive;
       ctx.fillText(gp.text, drawX, drawY);
       ctx.restore();
     }

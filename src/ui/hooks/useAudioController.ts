@@ -13,6 +13,7 @@ import {
   DiscordRpcService,
   type DiscordRpcConfig,
 } from '../../services/DiscordRpcService';
+import { useOfflineCacheStore } from '../../services/OfflineCacheService';
 import { usePartyStore } from '../../services/PartySyncClient';
 import { ListeningSessionTracker } from '../../services/StorageService';
 import { StreamResolver } from '../../services/StreamResolver';
@@ -65,6 +66,14 @@ export function useAudioController() {
     // 1. Initialize AudioEngine on mount
     const player = usePlayerStore.getState();
     player.initEngine();
+
+    // Sync offline cache limit & pinned badges on startup
+    const limitMb = Number(useSettingsStore.getState().settings['storage.cacheSizeLimitMb']) || 5120;
+    void useOfflineCacheStore
+      .getState()
+      .setLimitGb(Math.max(1, Math.min(50, Math.round(limitMb / 1024))))
+      .catch(() => {});
+    void useOfflineCacheStore.getState().refreshStats().catch(() => {});
 
     const engine = usePlayerStore.getState().audioEngine;
     if (engine && player.currentTrack) {
@@ -354,6 +363,194 @@ export function useAudioController() {
     };
   }, []);
 
+  // 3B-2. Native Last.fm & ListenBrainz Scrobbling lifecycle + Settings sync
+  useEffect(() => {
+    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    if (!api) return;
+
+    const pushScrobbleConfig = (s: AppSettings) => {
+      void api.scrobbleConfigure?.({
+        lastFmEnabled: Boolean(s['scrobble.lastFmEnabled']),
+        lastFmApiKey: String(s['scrobble.lastFmApiKey'] || ''),
+        lastFmApiSecret: String(s['scrobble.lastFmApiSecret'] || ''),
+        lastFmSessionKey: String(s['scrobble.lastFmSessionKey'] || ''),
+        listenBrainzEnabled: Boolean(s['scrobble.listenBrainzEnabled']),
+        listenBrainzToken: String(s['scrobble.listenBrainzToken'] || ''),
+      });
+    };
+
+    pushScrobbleConfig(useSettingsStore.getState().settings);
+
+    const unsubSettings = useSettingsStore.subscribe((state, prevState) => {
+      const keys: (keyof AppSettings)[] = [
+        'scrobble.lastFmEnabled',
+        'scrobble.lastFmApiKey',
+        'scrobble.lastFmApiSecret',
+        'scrobble.lastFmSessionKey',
+        'scrobble.listenBrainzEnabled',
+        'scrobble.listenBrainzToken',
+      ];
+      if (keys.some((k) => state.settings[k] !== prevState?.settings?.[k])) {
+        pushScrobbleConfig(state.settings);
+      }
+    });
+
+    let activeSession: {
+      videoId: string;
+      title: string;
+      artist: string;
+      album?: string;
+      durationSec: number;
+      startedAtSec: number;
+      playedSec: number;
+      lastTickMs: number;
+      nowPlayingSent: boolean;
+      scrobbled: boolean;
+    } | null = null;
+
+    const resetSession = (track: NonNullable<ReturnType<typeof usePlayerStore.getState>['currentTrack']>) => {
+      const durSec = resolveDurationSec(track.durationSec, usePlayerStore.getState().durationMs);
+      activeSession = {
+        videoId: track.videoId,
+        title: track.title || 'Untitled',
+        artist: track.artist || 'Unknown Artist',
+        album: track.album || track.albumName || undefined,
+        durationSec: durSec,
+        startedAtSec: Math.floor(Date.now() / 1000),
+        playedSec: 0,
+        lastTickMs: Date.now(),
+        nowPlayingSent: false,
+        scrobbled: false,
+      };
+    };
+
+    const tickScrobble = () => {
+      const state = usePlayerStore.getState();
+      const s = useSettingsStore.getState().settings;
+      if (!s['scrobble.lastFmEnabled'] && !s['scrobble.listenBrainzEnabled']) return;
+      const track = state.currentTrack;
+      if (!track || !track.videoId) {
+        activeSession = null;
+        return;
+      }
+      if (!activeSession || activeSession.videoId !== track.videoId) {
+        resetSession(track);
+      }
+      if (!activeSession) return;
+      const now = Date.now();
+      const liveDurSec = resolveDurationSec(track.durationSec, state.durationMs);
+      if (liveDurSec > activeSession.durationSec) {
+        activeSession.durationSec = liveDurSec;
+      }
+
+      if (state.playbackState === 'PLAYING' && !state.isScrubbing) {
+        const dtSec = Math.min(2, Math.max(0, (now - activeSession.lastTickMs) / 1000));
+        activeSession.playedSec += dtSec;
+        if (!activeSession.nowPlayingSent) {
+          activeSession.nowPlayingSent = true;
+          void api.scrobbleNowPlaying?.({
+            trackId: activeSession.videoId,
+            title: activeSession.title,
+            artist: activeSession.artist,
+            album: activeSession.album,
+            durationSec: activeSession.durationSec || undefined,
+            startedAtSec: activeSession.startedAtSec,
+          });
+        }
+        const dur = activeSession.durationSec;
+        const meetsRule =
+          (dur >= 30 && (activeSession.playedSec >= 240 || activeSession.playedSec >= dur * 0.5)) ||
+          (dur <= 0 && activeSession.playedSec >= 30);
+        if (!activeSession.scrobbled && meetsRule) {
+          activeSession.scrobbled = true;
+          void api.scrobbleSubmit?.({
+            trackId: activeSession.videoId,
+            title: activeSession.title,
+            artist: activeSession.artist,
+            album: activeSession.album,
+            durationSec: dur || undefined,
+            startedAtSec: activeSession.startedAtSec,
+          });
+        }
+      }
+      activeSession.lastTickMs = now;
+    };
+
+    const unsubPlayer = usePlayerStore.subscribe((state, prevState) => {
+      if (state.currentTrack?.videoId !== prevState?.currentTrack?.videoId) {
+        if (state.currentTrack?.videoId) {
+          resetSession(state.currentTrack);
+        } else {
+          activeSession = null;
+        }
+      }
+      tickScrobble();
+    });
+
+    const timer = setInterval(tickScrobble, 1000);
+    return () => {
+      clearInterval(timer);
+      unsubPlayer();
+      unsubSettings();
+    };
+  }, []);
+
+  // 3B-3. Customizable Global Hotkeys sync & action dispatcher
+  useEffect(() => {
+    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    if (!api) return;
+
+    const pushHotkeys = (s: AppSettings) => {
+      void api.hotkeysConfigure?.({
+        enabled: s['hotkeys.enabled'] !== false,
+        bindings:
+          s['hotkeys.bindings'] && typeof s['hotkeys.bindings'] === 'object'
+            ? s['hotkeys.bindings']
+            : {},
+      });
+    };
+
+    pushHotkeys(useSettingsStore.getState().settings);
+
+    const unsubSettings = useSettingsStore.subscribe((state, prevState) => {
+      if (
+        state.settings['hotkeys.enabled'] !== prevState?.settings?.['hotkeys.enabled'] ||
+        state.settings['hotkeys.bindings'] !== prevState?.settings?.['hotkeys.bindings']
+      ) {
+        pushHotkeys(state.settings);
+      }
+    });
+
+    const unsubHotkey = api.onHotkeyTriggered?.((action: string) => {
+      if (action === 'playPause') {
+        usePlayerStore.getState().togglePlay();
+      } else if (action === 'nextTrack') {
+        useQueueStore.getState().advanceQueue();
+      } else if (action === 'prevTrack') {
+        useQueueStore.getState().previousTrack();
+      } else if (action === 'jumpBack5s') {
+        usePlayerStore.getState().seekRelative(-5000);
+      } else if (action === 'toggleKaraoke') {
+        const eng = usePlayerStore.getState().audioEngine;
+        if (eng) {
+          const cur = eng.getKaraokeState();
+          eng.setKaraokeMode(!cur.enabled, cur.vocalLevel, cur.isolateVocals);
+        }
+        window.dispatchEvent(new CustomEvent('waveform:toggle-karaoke'));
+      } else if (action === 'cycleVisualizerTheme') {
+        const viz = useLyricVisualizerStore.getState();
+        viz.cycleStyle?.();
+      } else if (action === 'toggleFullscreenAmbient') {
+        window.dispatchEvent(new CustomEvent('waveform:toggle-ambient-fullscreen'));
+      }
+    });
+
+    return () => {
+      unsubSettings();
+      if (typeof unsubHotkey === 'function') unsubHotkey();
+    };
+  }, []);
+
   // 3C. Tray playback commands & minimize/close-to-tray behavior sync
   useEffect(() => {
     const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
@@ -396,6 +593,43 @@ export function useAudioController() {
   // 4. Update navigator.mediaSession when currentTrack or playbackState changes
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const playbackState = usePlayerStore((s) => s.playbackState);
+  const abLoop = usePlayerStore((s) => s.abLoop);
+
+  // 3B-4. Tight Practice A-B Loop Watcher (jumps back cleanly at B -> A)
+  useEffect(() => {
+    if (
+      playbackState !== 'PLAYING' ||
+      !abLoop.active ||
+      abLoop.startMs === null ||
+      abLoop.endMs === null ||
+      abLoop.endMs <= abLoop.startMs
+    ) {
+      return;
+    }
+    const timer = setInterval(() => {
+      const state = usePlayerStore.getState();
+      const engine = state.audioEngine;
+      const loop = state.abLoop;
+      if (
+        !engine ||
+        state.playbackState !== 'PLAYING' ||
+        state.isScrubbing ||
+        !loop.active ||
+        loop.startMs === null ||
+        loop.endMs === null ||
+        loop.endMs <= loop.startMs
+      ) {
+        return;
+      }
+      const posMs = engine.getCurrentPositionMs();
+      if (posMs >= loop.endMs - 25) {
+        engine.seek(loop.startMs);
+        state.syncPositionFromEngine(loop.startMs);
+        getSharedWaveFormPlaybackBridge().forceResync(loop.startMs / 1000);
+      }
+    }, 35);
+    return () => clearInterval(timer);
+  }, [playbackState, abLoop.active, abLoop.startMs, abLoop.endMs]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;

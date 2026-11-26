@@ -425,6 +425,20 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     store.setFontSizeScale(1.25);
     assert.strictEqual(useLyricVisualizerStore.getState().config.fontSizeScale, 1.25);
 
+    // 6b2. v1.3.2 Beat Camera Thump (default true) & iOS Kinetic Zoom clamping [0.75, 1.85]
+    assert.strictEqual(DEFAULT_LYRIC_VISUALIZER_CONFIG.beatCameraThump, true);
+    assert.strictEqual(DEFAULT_LYRIC_VISUALIZER_CONFIG.iosKineticZoom, 1.45);
+    store.setBeatCameraThump(false);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.beatCameraThump, false);
+    store.setBeatCameraThump(true);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.beatCameraThump, true);
+    store.setIosKineticZoom(0.2);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.iosKineticZoom, 0.75);
+    store.setIosKineticZoom(2.9);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.iosKineticZoom, 1.85);
+    store.setIosKineticZoom(1.45);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.iosKineticZoom, 1.45);
+
     // 6c. Per-song timing offset clamping [-2000, +2000], +/-50ms nudge, reset, and IPC persistence
     await store.setCurrentSongKey('song-alpha');
     store.setSongOffsetMs(5000);

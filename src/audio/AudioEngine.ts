@@ -701,6 +701,9 @@ export class WebAudioDeck {
       // Intentionally do NOT set crossOrigin and NEVER call createMediaElementSource on directElement
       direct.preload = 'auto';
       (direct as any).preservesPitch = true;
+      (direct as any).mozPreservesPitch = true;
+      (direct as any).webkitPreservesPitch = true;
+      direct.playbackRate = this.playbackRate;
       this.directElement = direct;
       this.wireElementEvents(this.directElement, true);
     }
@@ -778,6 +781,31 @@ export class WebAudioDeck {
   setFallbackVolume(val: number): void {
     this.fallbackVolume = Math.max(0.0, Math.min(1.0, val));
     this.syncDirectVolumes();
+  }
+
+  private playbackRate = 1.0;
+
+  setPlaybackRate(rate: number): number {
+    const safe = Number.isFinite(rate)
+      ? Math.round(Math.max(0.5, Math.min(1.5, rate)) * 100) / 100
+      : 1.0;
+    this.playbackRate = safe;
+    for (const el of [this.routedElement, this.directElement, this.audioElement]) {
+      if (!el) continue;
+      try {
+        (el as any).preservesPitch = true;
+        (el as any).mozPreservesPitch = true;
+        (el as any).webkitPreservesPitch = true;
+        el.playbackRate = safe;
+      } catch {
+        // Ignore in mock/headless audio elements
+      }
+    }
+    return safe;
+  }
+
+  getPlaybackRate(): number {
+    return this.playbackRate;
   }
 
   private clearPendingCanPlayRetry(): void {
@@ -940,6 +968,7 @@ export class WebAudioDeck {
 
     if (this.audioElement) {
       this.elementTokens.set(this.audioElement, this.loadToken);
+      this.setPlaybackRate(this.playbackRate);
       try {
         if (track.streamUrl) {
           this.audioElement.src = track.streamUrl;
@@ -1587,6 +1616,9 @@ export class AudioEngine {
         : this.deckA;
 
     if (deck === 'active') {
+      if (this.cachedVocalStem && this.cachedVocalStem.trackId !== track.videoId) {
+        this.cachedVocalStem = null;
+      }
       this.clearPendingResumePosition();
       this.crossfadeSequence++;
       const other = target === this.deckA ? this.deckB : this.deckA;
@@ -2330,6 +2362,7 @@ export class AudioEngine {
     this.onPrematureEndedSubscribers.clear();
     this.onPlaybackErrorSubscribers.clear();
     this.cachedWaveforms.clear();
+    this.cachedVocalStem = null;
     this.ctx?.close?.().catch(() => {});
     this.playbackState = 'IDLE';
   }
@@ -2561,6 +2594,22 @@ export class AudioEngine {
         activeId && this.cachedVocalStem && this.cachedVocalStem.trackId === activeId
       ),
     };
+  }
+
+  private enginePlaybackRate = 1.0;
+
+  setPlaybackRate(rate: number): number {
+    const safe = Number.isFinite(rate)
+      ? Math.round(Math.max(0.5, Math.min(1.5, rate)) * 100) / 100
+      : 1.0;
+    this.enginePlaybackRate = safe;
+    this.deckA.setPlaybackRate(safe);
+    this.deckB.setPlaybackRate(safe);
+    return safe;
+  }
+
+  getPlaybackRate(): number {
+    return this.enginePlaybackRate;
   }
 
   setNeuralVocalStem(

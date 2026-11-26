@@ -510,6 +510,8 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
       palette: state.config.albumArtColorMatch ? state.activePalette : DEMO_FALLBACK_PALETTE,
       reduceMotion: state.config.reduceMotion,
       motionIntensity: state.config.motionIntensity,
+      beatCameraThump: state.config.beatCameraThump,
+      iosKineticZoom: state.config.iosKineticZoom,
       backgroundOpacity: state.config.backgroundOpacity,
       vignetteStrength: state.config.vignetteStrength,
       textAlign: state.config.textAlign,
@@ -646,6 +648,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
       backgroundOpacity: config.backgroundOpacity,
       vignetteStrength: config.vignetteStrength,
       textAlign: config.textAlign,
+      iosKineticZoom: config.iosKineticZoom,
     });
     renderer.setTrackMetadata(trackMetadata);
     const resolvedLyrics =
@@ -655,6 +658,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
     renderer.setModes({
       reduceMotion: config.reduceMotion,
       motionIntensity: config.motionIntensity,
+      beatCameraThump: config.beatCameraThump,
       isAmbientMode: true,
       isOverlayMode: false,
       audioReactive: config.audioReactive,
@@ -668,6 +672,8 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
     config.albumArtColorMatch,
     config.reduceMotion,
     config.motionIntensity,
+    config.beatCameraThump,
+    config.iosKineticZoom,
     config.audioReactive,
     config.backgroundOpacity,
     config.vignetteStrength,

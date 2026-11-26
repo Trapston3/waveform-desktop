@@ -9,6 +9,7 @@ import {
   type BundledFontId,
   clampOffsetMs,
   clampAutoSyncOffsetMs,
+  DEFAULT_IOS_KINETIC_ZOOM,
   DEFAULT_LYRIC_VISUALIZER_CONFIG,
   DEMO_FALLBACK_PALETTE,
   type VocalSilenceInterval,
@@ -18,6 +19,8 @@ import {
   type LyricsScriptMode,
   type LyricTextAlign,
   type LyricVisualizerConfig,
+  MAX_IOS_KINETIC_ZOOM,
+  MIN_IOS_KINETIC_ZOOM,
   normalizeNowPlayingLayout,
   type NowPlayingLayoutMode,
   STARLIGHT_HARBOR_LYRICS,
@@ -38,6 +41,7 @@ export const MIN_BACKGROUND_OPACITY = 0.2;
 export const MAX_BACKGROUND_OPACITY = 1.0;
 export const MIN_VIGNETTE_STRENGTH = 0.0;
 export const MAX_VIGNETTE_STRENGTH = 1.0;
+export { MIN_IOS_KINETIC_ZOOM, MAX_IOS_KINETIC_ZOOM, DEFAULT_IOS_KINETIC_ZOOM };
 export const OFFSET_STEP_MS = 50;
 export const IDLE_AMBIENT_OPTIONS = [0, 30, 60, 120, 300] as const;
 
@@ -97,6 +101,8 @@ export interface LyricVisualizerState {
   setAudioReactive: (enabled: boolean) => void;
   setReduceMotion: (enabled: boolean) => void;
   setMotionIntensity: (intensity: MotionIntensity) => void;
+  setBeatCameraThump: (enabled: boolean) => void;
+  setIosKineticZoom: (zoom: number) => void;
   setBackgroundOpacity: (opacity: number) => void;
   setVignetteStrength: (strength: number) => void;
   setTextAlign: (align: LyricTextAlign) => void;
@@ -168,6 +174,11 @@ export function clampBackgroundOpacity(opacity: number): number {
 export function clampVignetteStrength(strength: number): number {
   if (!Number.isFinite(strength)) return DEFAULT_LYRIC_VISUALIZER_CONFIG.vignetteStrength;
   return Number(Math.max(MIN_VIGNETTE_STRENGTH, Math.min(MAX_VIGNETTE_STRENGTH, strength)).toFixed(2));
+}
+
+export function clampIosKineticZoom(zoom: number): number {
+  if (!Number.isFinite(zoom)) return DEFAULT_IOS_KINETIC_ZOOM;
+  return Number(Math.max(MIN_IOS_KINETIC_ZOOM, Math.min(MAX_IOS_KINETIC_ZOOM, zoom)).toFixed(2));
 }
 
 function isValidStyleId(id: unknown): id is VisualStyleId {
@@ -301,6 +312,14 @@ function loadPersistedState(): {
     motionIntensity: isValidMotionIntensity((c as any).motionIntensity)
       ? (c as any).motionIntensity
       : ((DEFAULT_LYRIC_VISUALIZER_CONFIG as any).motionIntensity ?? 'normal'),
+    beatCameraThump:
+      typeof (c as any).beatCameraThump === 'boolean'
+        ? (c as any).beatCameraThump
+        : DEFAULT_LYRIC_VISUALIZER_CONFIG.beatCameraThump,
+    iosKineticZoom:
+      typeof (c as any).iosKineticZoom === 'number'
+        ? clampIosKineticZoom((c as any).iosKineticZoom)
+        : DEFAULT_LYRIC_VISUALIZER_CONFIG.iosKineticZoom,
     backgroundOpacity:
       typeof (c as any).backgroundOpacity === 'number'
         ? clampBackgroundOpacity((c as any).backgroundOpacity)
@@ -605,6 +624,34 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     if (!isValidMotionIntensity(intensity)) return;
     set((s) => {
       const nextConfig = { ...s.config, motionIntensity: intensity } as LyricVisualizerConfig;
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setBeatCameraThump: (enabled: boolean) => {
+    const flag = Boolean(enabled);
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, beatCameraThump: flag };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setIosKineticZoom: (zoom: number) => {
+    const clamped = clampIosKineticZoom(zoom);
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, iosKineticZoom: clamped };
       savePersistedState({
         config: nextConfig,
         perSongOffsetsMs: s.perSongOffsetsMs,
@@ -1204,6 +1251,14 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
           ...payload.config,
           styleId: migrated.styleId,
           variationByStyle: migrated.variationByStyle,
+          beatCameraThump:
+            typeof (payload.config as any).beatCameraThump === 'boolean'
+              ? (payload.config as any).beatCameraThump
+              : s.config.beatCameraThump,
+          iosKineticZoom:
+            typeof (payload.config as any).iosKineticZoom === 'number'
+              ? clampIosKineticZoom((payload.config as any).iosKineticZoom)
+              : s.config.iosKineticZoom,
           scriptMode: isValidScriptMode((payload.config as any).scriptMode)
             ? (payload.config as any).scriptMode
             : s.config.scriptMode,

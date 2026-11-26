@@ -16,12 +16,14 @@ import {
   Disc,
   Radio,
   Trash2,
+  Pin,
 } from 'lucide-react';
 import type { Song } from '../../models/Song';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore, type QueueTierType } from '../../state/queueStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { useNavigationStore } from '../../state/navigationStore';
+import { useOfflineCacheStore } from '../../services/OfflineCacheService';
 import { resolveArtistTarget } from '../../utils/artistCredits';
 
 export interface ContextMenuProps {
@@ -48,6 +50,10 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   const { playNext, addToUserQueue, startSongRadio, removeFromQueue } = useQueueStore();
   const { playlists, addTracksToPlaylist, toggleFavorite, isFavorite } = useLibraryStore();
   const { navigateToArtist, navigateToRelease } = useNavigationStore();
+  const pinnedIds = useOfflineCacheStore((s) => s.pinnedIds);
+  const pinningIds = useOfflineCacheStore((s) => s.pinningIds);
+  const pinTrack = useOfflineCacheStore((s) => s.pinTrack);
+  const unpinTrack = useOfflineCacheStore((s) => s.unpinTrack);
 
   if (!isOpen || !rawTrack) return null;
 
@@ -66,6 +72,17 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   const flipSubmenuLeft = typeof window !== 'undefined' && x + 224 + 200 > window.innerWidth;
 
   const isLiked = isFavorite(track.videoId);
+  const isTrackPinned = pinnedIds.includes(track.videoId);
+  const isTrackPinning = pinningIds.includes(track.videoId);
+
+  const handleTogglePin = async () => {
+    if (isTrackPinned) {
+      await unpinTrack(track.videoId);
+    } else {
+      await pinTrack(track);
+    }
+    onClose();
+  };
 
   const handleGoToArtist = () => {
     const artistId = resolveArtistTarget(track);
@@ -245,6 +262,21 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       >
         <Heart size={14} className={isLiked ? 'text-[var(--color-accent)] fill-current' : ''} />
         <span>{isLiked ? 'Remove from Favorites' : 'Add to Favorites'}</span>
+      </button>
+
+      <button
+        onClick={() => void handleTogglePin()}
+        disabled={isTrackPinning}
+        className="w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-white/10 hover:text-cyan-300 disabled:opacity-50 transition-colors text-left cursor-pointer"
+      >
+        <Pin size={14} className={isTrackPinned ? 'text-cyan-300 fill-current' : ''} />
+        <span>
+          {isTrackPinning
+            ? 'Pinning...'
+            : isTrackPinned
+              ? 'Remove Offline Pin'
+              : 'Pin for Offline'}
+        </span>
       </button>
 
       <div className="h-[1px] bg-[var(--color-outline)] my-1" />

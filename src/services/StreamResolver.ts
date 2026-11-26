@@ -628,6 +628,24 @@ export class StreamResolver {
   }
 
   public async resolve(songId: string, title?: string, artist?: string, targetDurationSec?: number): Promise<ResolvedStream> {
+    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    if (typeof api?.offlineCacheResolve === 'function') {
+      try {
+        const offline = await api.offlineCacheResolve(songId);
+        if (offline?.url) {
+          return {
+            url: offline.url,
+            quality: offline.pinned ? 'Offline Pinned' : 'Offline Cached',
+            format: offline.mimeType || 'audio/mp4',
+            bitrate: 256000,
+            expiresAtMs: Date.now() + 24 * 3600 * 1000,
+          };
+        }
+      } catch {
+        // Fall through to memory/network resolution
+      }
+    }
+
     const cached = this.cache.get(songId);
     if (cached && Date.now() - cached.cachedAt < StreamResolver.TTL_MS) {
       return cached.stream;

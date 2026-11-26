@@ -70,6 +70,8 @@ export interface LyricStageRendererOptions {
   isEmbeddedTransparent?: boolean;
   contentInsetLeft?: number;
   motionIntensity?: MotionIntensity;
+  beatCameraThump?: boolean;
+  iosKineticZoom?: number;
   audioReactive?: boolean;
   backgroundOpacity?: number;
   vignetteStrength?: number;
@@ -102,6 +104,8 @@ interface MutableStyleFrameContext {
   hasWebGlBackdrop: boolean;
   contentInsetLeft: number;
   motionIntensity: MotionIntensity;
+  beatCameraThump: boolean;
+  iosKineticZoom: number;
   didSeekThisFrame: boolean;
   variationId: string;
   manualScrollY: number;
@@ -161,6 +165,13 @@ export class LyricStageRenderer {
   private hoveredLineIndex = -1;
   private pointerX = -1;
   private pointerY = -1;
+
+  // Compositor-level beat-synced camera thump spring physics (zero allocations)
+  private beatThumpScale = 0;
+  private beatThumpVel = 0;
+  private beatThumpRecoilY = 0;
+  private beatThumpCooldown = 0;
+  private lastThumpBass = 0;
 
   // Preallocated hit-rect pool (zero per-frame allocations)
   private readonly hitRectLineIndices = new Int32Array(HIT_RECT_CAP);
@@ -275,6 +286,11 @@ export class LyricStageRenderer {
       hasWebGlBackdrop: false,
       contentInsetLeft: initialInset,
       motionIntensity: options.motionIntensity ?? 'normal',
+      beatCameraThump: options.beatCameraThump ?? true,
+      iosKineticZoom:
+        typeof options.iosKineticZoom === 'number' && Number.isFinite(options.iosKineticZoom)
+          ? Math.max(0.75, Math.min(1.85, options.iosKineticZoom))
+          : 1.45,
       didSeekThisFrame: false,
       variationId: this.variationId,
       manualScrollY: 0,
@@ -365,6 +381,10 @@ export class LyricStageRenderer {
 
   get webGlEffectLayer(): WebGlEffectLayer | null {
     return this.webGlLayer;
+  }
+
+  getBeatThumpScale(): number {
+    return 1 + this.beatThumpScale;
   }
 
   isFollowing(): boolean {
@@ -462,6 +482,7 @@ export class LyricStageRenderer {
     backgroundOpacity?: number;
     vignetteStrength?: number;
     textAlign?: LyricTextAlign;
+    iosKineticZoom?: number;
   }): void {
     if (
       typeof settings.backgroundOpacity === 'number' &&
@@ -483,6 +504,15 @@ export class LyricStageRenderer {
     }
     if (settings.textAlign === 'left' || settings.textAlign === 'center') {
       this.frameContext.textAlign = settings.textAlign;
+    }
+    if (
+      typeof settings.iosKineticZoom === 'number' &&
+      Number.isFinite(settings.iosKineticZoom)
+    ) {
+      this.frameContext.iosKineticZoom = Math.max(
+        0.75,
+        Math.min(1.85, settings.iosKineticZoom)
+      );
     }
   }
 
@@ -531,6 +561,7 @@ export class LyricStageRenderer {
     isOverlayMode?: boolean;
     isEmbeddedTransparent?: boolean;
     motionIntensity?: MotionIntensity;
+    beatCameraThump?: boolean;
     audioReactive?: boolean;
   }): void {
     if (modes.reduceMotion !== undefined) this.frameContext.reduceMotion = modes.reduceMotion;
@@ -541,6 +572,9 @@ export class LyricStageRenderer {
     }
     if (modes.motionIntensity !== undefined) {
       this.frameContext.motionIntensity = modes.motionIntensity;
+    }
+    if (modes.beatCameraThump !== undefined) {
+      this.frameContext.beatCameraThump = modes.beatCameraThump;
     }
     if (modes.audioReactive !== undefined) this.audioReactive = modes.audioReactive;
   }
@@ -946,7 +980,19 @@ export class LyricStageRenderer {
     // 2. Clear Canvas2D transparently (critical for Overlay/Embedded mode & WebGL2 compositing)
     this.ctx.clearRect(0, 0, this.width, this.height);
 
+    const focalCenterX =
+      this.currentContentInsetLeft > 2
+        ? this.currentContentInsetLeft + Math.max(220, this.width - this.currentContentInsetLeft) * 0.5
+        : this.width * 0.5;
+
     // 3. Optional 3D Starfield + Ship scene (StarfieldShip3D)
+    const intensityMult =
+      this.frameContext.motionIntensity === 'subtle'
+        ? 0.55
+        : this.frameContext.motionIntensity === 'vivid'
+        ? 1.35
+        : 1.0;
+
     if (style.usesShip3D) {
       setShip3DSceneHint(
         this.frameContext.variationId,
@@ -962,10 +1008,6 @@ export class LyricStageRenderer {
         this.frameContext.didSeekThisFrame
       );
       setActiveShip3DScene(this.ship3dScene);
-      const focalCenterX =
-        this.currentContentInsetLeft > 2
-          ? this.currentContentInsetLeft + Math.max(220, this.width - this.currentContentInsetLeft) * 0.5
-          : this.width * 0.5;
       this.ship3dScene.render(
         this.ctx,
         this.width,
@@ -980,15 +1022,72 @@ export class LyricStageRenderer {
         this.frameContext.backgroundOpacity,
         focalCenterX,
         this.frameContext.hasWebGlBackdrop,
-        this.currentContentInsetLeft
+        this.currentContentInsetLeft,
+        this.frameContext.beatCameraThump,
+        intensityMult
       );
     } else {
       this.ship3dScene.clear();
     }
 
-    // 4. Reset hit-rect pool and render active visual style
+    // 4. Compositor-level spring-damped Beat Camera Thump (all themes, default ON)
+    const thumpEnabled =
+      this.frameContext.beatCameraThump &&
+      !this.frameContext.reduceMotion &&
+      this.audioReactive &&
+      !isTransparent;
+
+    if (!thumpEnabled) {
+      this.beatThumpScale = 0;
+      this.beatThumpVel = 0;
+      this.beatThumpRecoilY = 0;
+      this.beatThumpCooldown = 0;
+      this.lastThumpBass = this.audioMetrics.bassEnergy;
+    } else {
+      this.beatThumpCooldown = Math.max(0, this.beatThumpCooldown - dt);
+      const bass = this.audioMetrics.bassEnergy || 0;
+      const bassDelta = bass - this.lastThumpBass;
+      this.lastThumpBass = bass;
+      const beatStrength =
+        this.audioMetrics.beatStrength ?? (this.audioMetrics.beatDetected ? 1.0 : bass);
+      const triggerThump =
+        this.beatThumpCooldown <= 0 &&
+        (Boolean(this.audioMetrics.isDownbeat) ||
+          Boolean(this.audioMetrics.beatDetected) ||
+          (bassDelta > 0.14 && bass > 0.42) ||
+          beatStrength > 0.68);
+
+      if (triggerThump) {
+        const isCinemaEdit =
+          this.styleId === 'IosTextingMotion' && this.frameContext.variationId === 'cinema-edit';
+        const basePeak = isCinemaEdit ? 0.055 : 0.032;
+        const downbeatFactor = this.audioMetrics.isDownbeat ? 1.15 : 0.88;
+        const peak = basePeak * intensityMult * downbeatFactor;
+        this.beatThumpVel += peak * 24;
+        this.beatThumpRecoilY = Math.min(9, peak * 110);
+        this.beatThumpCooldown = 0.18;
+      }
+
+      const springAcc = -280 * this.beatThumpScale - 24 * this.beatThumpVel;
+      this.beatThumpVel += springAcc * dt;
+      this.beatThumpScale = Math.max(0, Math.min(0.085, this.beatThumpScale + this.beatThumpVel * dt));
+      this.beatThumpRecoilY *= Math.exp(-dt * 14);
+      if (this.beatThumpScale < 0.0002 && Math.abs(this.beatThumpVel) < 0.001) {
+        this.beatThumpScale = 0;
+        this.beatThumpVel = 0;
+      }
+    }
+
+    // 5. Reset hit-rect pool and render active visual style
     this.hitRectCount = 0;
     this.ctx.save();
+    if (this.beatThumpScale > 0.0004 || this.beatThumpRecoilY > 0.15) {
+      const thumpScale = 1 + this.beatThumpScale;
+      const anchorY = this.height * 0.5;
+      this.ctx.translate(focalCenterX, anchorY + this.beatThumpRecoilY);
+      this.ctx.scale(thumpScale, thumpScale);
+      this.ctx.translate(-focalCenterX, -anchorY);
+    }
     style.render(
       this.ctx,
       this.frameContext as StyleFrameContext,

@@ -25,10 +25,13 @@ import {
   Music2,
   PanelLeft,
   Mic2,
+  Repeat2,
 } from 'lucide-react';
-import { MlAudioService } from '../../services/MlAudioService';
+import { MlAudioService, type TrackBeatAnalysis } from '../../services/MlAudioService';
+import { clampPlaybackRate, snapLoopToBars } from '../../utils/practiceLoop';
 import { ArtistCredits } from '../common/ArtistCredits';
 import { VisualizerContextMenu } from '../common/VisualizerContextMenu';
+import { LrcEditorModal } from '../common/LrcEditorModal';
 import { LyricStageControl } from '../../lyricVisualizer/ui/LyricStageControl';
 import { normalizeNowPlayingLayout } from '../../lyricVisualizer/core/models';
 import { useLyricVisualizerStore } from '../../lyricVisualizer/state/lyricVisualizerStore';
@@ -99,6 +102,11 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const [karaokeIsolateVocals, setKaraokeIsolateVocals] = useState(false);
   const [hasNeuralStem, setHasNeuralStem] = useState(false);
   const [isSeparatingVocals, setIsSeparatingVocals] = useState(false);
+  const [isPracticeOpen, setIsPracticeOpen] = useState(false);
+  const [trackBeatAnalysis, setTrackBeatAnalysis] = useState<TrackBeatAnalysis | null>(null);
+  const [isLrcEditorOpen, setIsLrcEditorOpen] = useState(false);
+  const [isLrcDragOver, setIsLrcDragOver] = useState(false);
+  const [lrcDropNotice, setLrcDropNotice] = useState<string | null>(null);
 
   const {
     lyricsData,
@@ -106,6 +114,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     status: lyricsStatus,
     currentTrackId: lyricsTrackId,
     fetchLyricsForTrack,
+    reloadLyricsForTrack,
   } = useLyricsStore();
   const nowPlayingLyricsMode = useLyricVisualizerStore((s) => s.nowPlayingLyricsMode);
   const setNowPlayingLyricsMode = useLyricVisualizerStore((s) => s.setNowPlayingLyricsMode);
@@ -136,6 +145,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const livePcmEnergy = usePlayerStore((s) => s.livePcmEnergy);
   const activeStreamQuality = usePlayerStore((s) => (s as any).activeStreamQuality as string | null | undefined);
   const activeStreamIsAtmos = usePlayerStore((s) => Boolean((s as any).activeStreamIsAtmos));
+  const playbackRate = usePlayerStore((s) => s.playbackRate);
+  const abLoop = usePlayerStore((s) => s.abLoop);
 
   const togglePlay = usePlayerStore((s) => s.togglePlay);
   const seek = usePlayerStore((s) => s.seek);
@@ -144,6 +155,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const toggleMute = usePlayerStore((s) => s.toggleMute);
   const toggleShuffle = usePlayerStore((s) => s.toggleShuffle);
   const cycleRepeatMode = usePlayerStore((s) => s.cycleRepeatMode);
+  const setPlaybackRate = usePlayerStore((s) => s.setPlaybackRate);
+  const setAbLoopStart = usePlayerStore((s) => s.setAbLoopStart);
+  const setAbLoopEnd = usePlayerStore((s) => s.setAbLoopEnd);
+  const setAbLoopRange = usePlayerStore((s) => s.setAbLoopRange);
+  const toggleAbLoop = usePlayerStore((s) => s.toggleAbLoop);
+  const clearAbLoop = usePlayerStore((s) => s.clearAbLoop);
 
   const {
     advanceQueue,
@@ -232,13 +249,17 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
 
   // Synchronize live Karaoke DSP mode & lazy Open-Unmix neural stem separation
   useEffect(() => {
+    MlAudioService.cancelPendingVocalSeparation(currentSongId);
     const engine = usePlayerStore.getState().audioEngine;
     engine?.setKaraokeMode(karaokeEnabled, karaokeVocalLevel, karaokeIsolateVocals);
     const stemReady = Boolean(
       currentSongId && MlAudioService.getCachedVocalStemSync(currentSongId)
     );
     setHasNeuralStem(stemReady);
-    if (!karaokeEnabled || !currentSongId || stemReady) return;
+    if (!karaokeEnabled || !currentSongId || stemReady) {
+      setIsSeparatingVocals(false);
+      return;
+    }
 
     const url =
       currentTrack?.streamUrl ||
@@ -261,8 +282,76 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
       });
     return () => {
       cancelled = true;
+      MlAudioService.cancelPendingVocalSeparation(null);
     };
   }, [karaokeEnabled, karaokeVocalLevel, karaokeIsolateVocals, currentSongId, currentTrack?.streamUrl, currentTrack?.localFilePath]);
+
+  // Listen for global hotkey custom window actions (Karaoke & Fullscreen Ambient)
+  useEffect(() => {
+    const onToggleKaraoke = () => setKaraokeEnabled((prev) => !prev);
+    const onToggleAmbient = () => {
+      const viz = useLyricVisualizerStore.getState();
+      if (viz.isAmbientOpen) {
+        void viz.closeAmbientMode?.();
+      } else {
+        void viz.openAmbientMode?.();
+      }
+    };
+    window.addEventListener('waveform:toggle-karaoke', onToggleKaraoke);
+    window.addEventListener('waveform:toggle-ambient-fullscreen', onToggleAmbient);
+    return () => {
+      window.removeEventListener('waveform:toggle-karaoke', onToggleKaraoke);
+      window.removeEventListener('waveform:toggle-ambient-fullscreen', onToggleAmbient);
+    };
+  }, []);
+
+  // Load cached beat/bar analysis for Practice seekbar ticks and bar-snapped looping
+  useEffect(() => {
+    if (!currentSongId) {
+      setTrackBeatAnalysis(null);
+      return;
+    }
+    let cancelled = false;
+    void MlAudioService.getCachedTrackBeats(currentSongId)
+      .then((res) => {
+        if (!cancelled) setTrackBeatAnalysis(res);
+      })
+      .catch(() => {
+        if (!cancelled) setTrackBeatAnalysis(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSongId]);
+
+  const practiceBarsSec = trackBeatAnalysis?.bars ?? trackBeatAnalysis?.downbeats;
+  const formatLoopClock = (ms: number | null) => {
+    if (ms === null || !Number.isFinite(ms)) return '—:—';
+    const sec = Math.max(0, Math.floor(ms / 1000));
+    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  };
+  const handleSnapBars = async (barsCount: number) => {
+    const player = usePlayerStore.getState();
+    const posSec =
+      (player.audioEngine?.getCurrentPositionMs() ?? player.positionMs ?? 0) / 1000;
+    const durSec =
+      (player.audioEngine?.getCurrentDurationMs() || durationMs || (currentTrack?.durationSec || 0) * 1000) /
+      1000;
+    let analysis = trackBeatAnalysis;
+    if (!analysis && currentSongId) {
+      analysis = await MlAudioService.getCachedTrackBeats(currentSongId);
+      if (analysis) setTrackBeatAnalysis(analysis);
+    }
+    const { startMs, endMs } = snapLoopToBars(
+      posSec,
+      barsCount,
+      analysis?.downbeats || analysis?.bars || [],
+      analysis?.beats || [],
+      analysis?.bpm || 120,
+      durSec
+    );
+    setAbLoopRange(startMs, endMs, barsCount);
+  };
 
   // Cancelable neural Auto-Sync when synced lyrics settle (skipped for plain lyrics or manual user offsets)
   useEffect(() => {
@@ -621,17 +710,69 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
 
   // Ambient dark scrim fallback invariant: ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
 
+  const handleLrcDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (e.dataTransfer?.types?.includes('Files')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (!isLrcDragOver) setIsLrcDragOver(true);
+    }
+  };
+
+  const handleLrcDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (e.currentTarget === e.target) {
+      setIsLrcDragOver(false);
+    }
+  };
+
+  const handleLrcDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsLrcDragOver(false);
+    const files = Array.from(e.dataTransfer?.files || []);
+    const targetFile = files.find((f) => /\.(lrc|txt)$/i.test(f.name));
+    if (!targetFile || !currentTrack) return;
+    try {
+      const text = await targetFile.text();
+      const trackKey = currentTrack.videoId || currentTrack.id || '';
+      if (!trackKey) return;
+      const api = (window as any)?.electronAPI;
+      if (typeof api?.saveCustomLyrics === 'function') {
+        await api.saveCustomLyrics(trackKey, text);
+      }
+      await reloadLyricsForTrack(currentTrack);
+      setLrcDropNotice(`Custom lyrics loaded: ${targetFile.name}`);
+      setTimeout(() => setLrcDropNotice(null), 2600);
+    } catch {
+      setLrcDropNotice('Could not import lyrics file');
+      setTimeout(() => setLrcDropNotice(null), 2600);
+    }
+  };
+
   return (
     <div
       ref={rootRef}
       data-fullscreen={isFullscreen ? 'true' : 'false'}
       onMouseMove={revealChrome}
       onMouseEnter={revealChrome}
+      onDragOver={handleLrcDragOver}
+      onDragLeave={handleLrcDragLeave}
+      onDrop={(e) => void handleLrcDrop(e)}
       onContextMenu={handleOpenVizContextMenu}
       className={`fixed isolate left-0 right-0 ${
         isFullscreen ? 'inset-0 z-[70]' : 'top-10 md:top-12 inset-x-0 bottom-0 z-50'
       } flex flex-col bg-black overflow-hidden select-none animate-in fade-in duration-300`}
     >
+      {isLrcDragOver && (
+        <div className="fixed inset-0 z-[85] pointer-events-none bg-black/60 backdrop-blur-sm border-2 border-dashed border-cyan-400/80 flex items-center justify-center">
+          <div className="px-5 py-3 rounded-2xl bg-black/80 border border-white/20 text-sm font-bold text-white shadow-2xl">
+            Drop .lrc or .txt file to apply custom lyrics to "{currentTrack.title}"
+          </div>
+        </div>
+      )}
+      {lrcDropNotice && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-[86] px-4 py-1.5 rounded-full bg-black/85 border border-cyan-400/50 text-xs font-semibold text-cyan-200 shadow-lg pointer-events-none">
+          {lrcDropNotice}
+        </div>
+      )}
       {/* Unified Full-Bleed Backdrop Layer */}
       <div className="absolute inset-0 z-0">
         {!effectiveIsVisualizerMode ? (
@@ -875,6 +1016,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                 isPlaying={isPlaying}
                 onSeek={seek}
                 liveBands={livePcmEnergy}
+                abLoop={abLoop}
+                barTimestampsSec={practiceBarsSec}
+                onChangeAbLoop={(a, b) => setAbLoopRange(a, b, null)}
                 height={38}
               />
 
@@ -1102,6 +1246,146 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                           ? 'Neural Stem Ready'
                           : 'Instant DSP'}
                       </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Practice / Bar-Snapped A-B Loop & Speed Control */}
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  data-testid="now-playing-practice-toggle"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsKaraokeOpen(false);
+                    setIsPracticeOpen((prev) => !prev);
+                  }}
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all cursor-pointer active:scale-95 ${
+                    abLoop.active || Math.abs(playbackRate - 1.0) > 0.01
+                      ? 'bg-sky-500/30 text-sky-200 border border-sky-400/50'
+                      : 'bg-white/[0.06] text-white/60 hover:text-white hover:bg-white/12'
+                  }`}
+                  title="Practice Controls (A-B Loop & Pitch-Preserving Speed)"
+                  aria-label="Practice Controls"
+                >
+                  <Repeat2 size={15} />
+                </button>
+
+                {isPracticeOpen && (
+                  <div
+                    data-testid="practice-popover"
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute bottom-11 left-0 w-72 p-3.5 rounded-2xl bg-[#161822]/95 backdrop-blur-2xl border border-white/15 shadow-2xl text-white z-40 space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Repeat2 size={14} className="text-sky-400" />
+                        <span className="text-xs font-bold">Practice & A-B Loop</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={clearAbLoop}
+                        className="px-2 py-0.5 rounded-full bg-white/10 hover:bg-white/20 text-[10px] font-semibold cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] font-mono text-sky-200/90 bg-white/5 px-2.5 py-1.5 rounded-lg">
+                      <span>A: {formatLoopClock(abLoop.startMs)}</span>
+                      <span>→</span>
+                      <span>B: {formatLoopClock(abLoop.endMs)}</span>
+                      <button
+                        type="button"
+                        onClick={toggleAbLoop}
+                        disabled={abLoop.startMs === null || abLoop.endMs === null}
+                        className={`px-2 py-0.5 rounded font-sans text-[10px] font-bold cursor-pointer disabled:opacity-40 ${
+                          abLoop.active ? 'bg-sky-500 text-black' : 'bg-white/15 text-white'
+                        }`}
+                      >
+                        {abLoop.active ? 'Loop On' : 'Loop Off'}
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-5 gap-1.5 text-[10px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const pos =
+                            usePlayerStore.getState().audioEngine?.getCurrentPositionMs() ??
+                            usePlayerStore.getState().positionMs ??
+                            0;
+                          setAbLoopStart(pos);
+                        }}
+                        className="py-1.5 rounded-lg bg-white/10 hover:bg-white/20 cursor-pointer"
+                      >
+                        Set A
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const pos =
+                            usePlayerStore.getState().audioEngine?.getCurrentPositionMs() ??
+                            usePlayerStore.getState().positionMs ??
+                            0;
+                          setAbLoopEnd(pos);
+                        }}
+                        className="py-1.5 rounded-lg bg-white/10 hover:bg-white/20 cursor-pointer"
+                      >
+                        Set B
+                      </button>
+                      {[4, 8, 16].map((bars) => (
+                        <button
+                          key={bars}
+                          type="button"
+                          onClick={() => void handleSnapBars(bars)}
+                          className={`py-1.5 rounded-lg cursor-pointer ${
+                            abLoop.barCount === bars && abLoop.active
+                              ? 'bg-sky-500 text-black font-bold'
+                              : 'bg-white/10 hover:bg-white/20 text-white'
+                          }`}
+                        >
+                          {bars} Bars
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="h-[1px] bg-white/10" />
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px] text-white/80">
+                        <span>Speed (Pitch Preserved)</span>
+                        <span className="font-mono font-bold text-sky-300">
+                          {playbackRate.toFixed(2)}x
+                        </span>
+                      </div>
+                      <input
+                        aria-label="Practice Playback Speed"
+                        type="range"
+                        min={0.5}
+                        max={1.5}
+                        step={0.05}
+                        value={playbackRate}
+                        onChange={(e) => setPlaybackRate(clampPlaybackRate(parseFloat(e.target.value)))}
+                        className="w-full h-1.5 accent-sky-400 bg-white/25 rounded-lg cursor-pointer"
+                      />
+                      <div className="flex items-center justify-between gap-1 text-[10px] font-mono">
+                        {[0.5, 0.75, 0.85, 1.0, 1.25, 1.5].map((spd) => (
+                          <button
+                            key={spd}
+                            type="button"
+                            onClick={() => setPlaybackRate(spd)}
+                            className={`flex-1 py-1 rounded cursor-pointer ${
+                              Math.abs(playbackRate - spd) < 0.02
+                                ? 'bg-sky-500 text-black font-bold'
+                                : 'bg-white/10 hover:bg-white/20 text-white/85'
+                            }`}
+                          >
+                            {spd}x
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1384,6 +1668,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                     isPlaying={isPlaying}
                     onSeek={seek}
                     liveBands={livePcmEnergy}
+                    abLoop={abLoop}
+                    barTimestampsSec={practiceBarsSec}
+                    onChangeAbLoop={(a, b) => setAbLoopRange(a, b, null)}
                     height={24}
                   />
                 </div>
@@ -1501,7 +1788,16 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
         onClose={handleCloseVizContextMenu}
         isFullBleed={isFullBleedStage}
         onToggleFullBleed={handleToggleFullBleed}
+        onOpenLrcEditor={() => setIsLrcEditorOpen(true)}
         context="now-playing"
+      />
+
+      <LrcEditorModal
+        isOpen={isLrcEditorOpen}
+        onClose={() => setIsLrcEditorOpen(false)}
+        track={currentTrack}
+        currentLyrics={lyricsData}
+        currentPositionMs={usePlayerStore.getState().audioEngine?.getCurrentPositionMs() ?? usePlayerStore.getState().positionMs}
       />
     </div>
   );

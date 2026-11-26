@@ -6,8 +6,10 @@ import type { Song } from '../models/Song';
 import { normalizeSong } from '../models/Song';
 import type { DeckName, PlaybackStatus, PlaybackState as EnginePlaybackState } from '../audio/AudioEngine';
 import { AudioEngine, getTrackExpectedDurationSec } from '../audio/AudioEngine';
+import { clampPlaybackRate } from '../utils/practiceLoop';
 import { AutoEqLoader, type AutoEqProfile } from '../audio/AutoEqLoader';
 import { MusicService } from '../services/MusicService';
+import { OfflineCacheService } from '../services/OfflineCacheService';
 import { StreamResolver, type ResolvedStream } from '../services/StreamResolver';
 import { useSettingsStore } from './settingsStore';
 import { extractArtworkPaletteFromUrl, useThemeStore } from '../ui/theme/Theme';
@@ -80,6 +82,15 @@ export interface PlayerState {
   // Active AutoEQ headphone calibration profile
   activeAutoEqProfile: AutoEqProfile | null;
 
+  // Practice / A-B Loop & Pitch-Preserving Speed
+  playbackRate: number;
+  abLoop: {
+    startMs: number | null;
+    endMs: number | null;
+    active: boolean;
+    barCount: number | null;
+  };
+
   // Waveform & Visualizer Buffers
   waveformBuckets: Float32Array | null; // 200 amplitude values
   livePcmEnergy: Float32Array | null; // 32-band live energy values
@@ -120,6 +131,14 @@ export interface PlayerActions {
   setEqualizerBands: (gains: number[]) => void;
   loadAutoEqProfile: (profileName: string) => Promise<boolean>;
   setSpatialAudio: (enabled: boolean, width?: number) => void;
+
+  // Practice controls
+  setPlaybackRate: (rate: number) => void;
+  setAbLoopStart: (ms: number | null) => void;
+  setAbLoopEnd: (ms: number | null) => void;
+  setAbLoopRange: (startMs: number | null, endMs: number | null, barCount?: number | null) => void;
+  toggleAbLoop: () => void;
+  clearAbLoop: () => void;
 
   // Engine callback handlers
   _updatePlaybackState: (state: PlaybackStatus) => void;
@@ -406,6 +425,9 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
 
   activeAutoEqProfile: null,
 
+  playbackRate: 1.0,
+  abLoop: { startMs: null, endMs: null, active: false, barCount: null },
+
   waveformBuckets: null,
   livePcmEnergy: null,
   isLiveVisualizerActive: false,
@@ -423,6 +445,9 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
     }
 
     set({ audioEngine: engine });
+    if (typeof (engine as any).setPlaybackRate === 'function') {
+      (engine as any).setPlaybackRate(get().playbackRate);
+    }
 
     // Make the store the source of truth for volume: push the restored/persisted level
     // into the engine instead of letting the engine's 0.85 default overwrite it.
@@ -750,7 +775,17 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
   },
 
   loadTrack: async (track: Song, deck: DeckName = 'active', autoPlay = true) => {
-    const normalized = normalizeSong(track as any);
+    let normalized = normalizeSong(track as any);
+    if (isSyntheticOrEmptyStreamUrl(normalized.streamUrl) && !normalized.localFilePath) {
+      const offlineHit = await OfflineCacheService.resolveOfflineUrl(normalized.videoId);
+      if (offlineHit?.url) {
+        normalized = normalizeSong({
+          ...normalized,
+          streamUrl: offlineHit.url,
+          sourceQuality: offlineHit.pinned ? 'Offline Pinned' : 'Offline Cached',
+        } as any);
+      }
+    }
     const { audioEngine } = get();
     const duration = getTrackExpectedDurationSec(normalized) * 1000;
     const loadToken = deck === 'active' ? ++activeLoadToken : 0;
@@ -766,6 +801,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       ? normalized.sourceQuality || '160kbps Opus'
       : normalized.sourceQuality || (normalized.isLocal ? 'Lossless FLAC' : null);
 
+    const prevTrackId = get().currentTrack?.videoId;
     set((state) => ({
       currentTrack: normalized,
       durationMs: duration,
@@ -773,6 +809,9 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
       pendingResumePositionMs: deck === 'active' ? null : state.pendingResumePositionMs,
       activeDeck: deck,
       playbackState: deck === 'active' && autoPlay ? 'PLAYING' : state.playbackState,
+      ...(deck === 'active' && prevTrackId !== normalized.videoId
+        ? { abLoop: { startMs: null, endMs: null, active: false, barCount: null } }
+        : {}),
       ...(deck === 'active'
         ? {
             activeStreamQuality: initialQuality,
@@ -1066,6 +1105,84 @@ export const usePlayerStore = create<PlayerStore>((set, get) => ({
     if (audioEngine) {
       audioEngine.setSpatialAudio(enabled, width);
     }
+  },
+
+  setPlaybackRate: (rate: number) => {
+    const safe = clampPlaybackRate(rate);
+    const { audioEngine } = get();
+    if (audioEngine && typeof (audioEngine as any).setPlaybackRate === 'function') {
+      (audioEngine as any).setPlaybackRate(safe);
+    }
+    set({ playbackRate: safe });
+  },
+
+  setAbLoopStart: (ms: number | null) => {
+    set((state) => {
+      const startMs = typeof ms === 'number' && Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : null;
+      let endMs = state.abLoop.endMs;
+      if (startMs !== null && endMs !== null && endMs <= startMs + 250) {
+        endMs = null;
+      }
+      return {
+        abLoop: {
+          startMs,
+          endMs,
+          active: startMs !== null && endMs !== null ? state.abLoop.active : false,
+          barCount: null,
+        },
+      };
+    });
+  },
+
+  setAbLoopEnd: (ms: number | null) => {
+    set((state) => {
+      const endMs = typeof ms === 'number' && Number.isFinite(ms) ? Math.max(250, Math.round(ms)) : null;
+      const startMs = state.abLoop.startMs ?? (endMs !== null ? 0 : null);
+      if (startMs !== null && endMs !== null && endMs <= startMs + 250) {
+        return {
+          abLoop: { ...state.abLoop, endMs: startMs + 250, active: true, barCount: null },
+        };
+      }
+      return {
+        abLoop: {
+          startMs,
+          endMs,
+          active: startMs !== null && endMs !== null,
+          barCount: null,
+        },
+      };
+    });
+  },
+
+  setAbLoopRange: (startMs: number | null, endMs: number | null, barCount: number | null = null) => {
+    const safeA = typeof startMs === 'number' && Number.isFinite(startMs) ? Math.max(0, Math.round(startMs)) : null;
+    const safeB = typeof endMs === 'number' && Number.isFinite(endMs) ? Math.max(0, Math.round(endMs)) : null;
+    const valid = safeA !== null && safeB !== null && safeB > safeA + 200;
+    set({
+      abLoop: {
+        startMs: safeA,
+        endMs: safeB,
+        active: valid,
+        barCount: valid ? barCount : null,
+      },
+    });
+  },
+
+  toggleAbLoop: () => {
+    set((state) => {
+      const hasRange =
+        state.abLoop.startMs !== null &&
+        state.abLoop.endMs !== null &&
+        state.abLoop.endMs > state.abLoop.startMs;
+      if (!hasRange) return state;
+      return {
+        abLoop: { ...state.abLoop, active: !state.abLoop.active },
+      };
+    });
+  },
+
+  clearAbLoop: () => {
+    set({ abLoop: { startMs: null, endMs: null, active: false, barCount: null } });
   },
 
   _updatePlaybackState: (state: PlaybackStatus) => set({ playbackState: state }),

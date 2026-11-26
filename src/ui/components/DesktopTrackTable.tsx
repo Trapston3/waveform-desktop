@@ -10,6 +10,7 @@ import {
   MoreHorizontal,
   ChevronUp,
   ChevronDown,
+  Pin,
 } from 'lucide-react';
 import { ArtistCredits } from '../common/ArtistCredits';
 import { PlayerPlayIcon, PlayerPauseIcon } from '../common/WaveFormIcons';
@@ -18,6 +19,7 @@ import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { useNavigationStore } from '../../state/navigationStore';
+import { useOfflineCacheStore } from '../../services/OfflineCacheService';
 
 export interface DesktopTrackTableProps {
   songs: Song[];
@@ -66,6 +68,7 @@ export const DesktopTrackTable: React.FC<DesktopTrackTableProps> = memo(({
   const { setContextQueue } = useQueueStore();
   const { toggleFavorite, isFavorite } = useLibraryStore();
   const { navigateToArtist, navigateToRelease } = useNavigationStore();
+  const pinnedIds = useOfflineCacheStore((s) => s.pinnedIds);
 
   // Column layout grid calculation
   const colSpans = useMemo(() => {
@@ -417,6 +420,14 @@ export const DesktopTrackTable: React.FC<DesktopTrackTableProps> = memo(({
                     {song.isExplicit && (
                       <span className="px-1 py-0.2 rounded text-[9px] font-bold bg-white/10 text-[#8E8E93] border border-white/20 uppercase shrink-0">
                         E
+                      </span>
+                    )}
+                    {pinnedIds.includes(song.videoId) && (
+                      <span
+                        title="Pinned for Offline"
+                        className="inline-flex items-center text-cyan-300 shrink-0"
+                      >
+                        <Pin size={11} className="fill-current" />
                       </span>
                     )}
                   </div>

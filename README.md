@@ -4,7 +4,7 @@
   <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, a Rust <code>napi-rs</code> Native Performance Core, Web Audio DSP, and 14 hardware-accelerated lyric visualizers.</strong></p>
 
   <p>
-    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.1"><img src="https://img.shields.io/badge/Release-v1.3.1-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.3.1" /></a>
+    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.2"><img src="https://img.shields.io/badge/Release-v1.3.2-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.3.2" /></a>
     <img src="https://img.shields.io/badge/Rust-napi--rs_Native_Core-DEA584?style=flat-square&logo=rust&logoColor=black" alt="Rust napi-rs Native Core" />
     <img src="https://img.shields.io/badge/Electron-30.5.1-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
     <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React 19" />
@@ -15,15 +15,23 @@
 
 ---
 
-## Screenshots (`v1.3.1`)
+## Screenshots (`v1.3.2`)
 
-| Now Playing & Apple Music Fluid Mesh | iOS Messages Tapback & Magic Word Lyrics |
+| Now Playing & Apple Music Fluid Mesh | Kinetic Messages (`iosTextingMotion`) |
 | :---: | :---: |
-| ![Now Playing & Apple Music Fluid Mesh](docs/screenshots/01-now-playing-apple-mesh.png) | ![iOS Messages Tapback & Magic Word Lyrics](docs/screenshots/02-visualizer-ios-chat.png) |
+| ![Now Playing & Apple Music Fluid Mesh](docs/screenshots/01-now-playing-apple-mesh.png) | ![Kinetic Messages](docs/screenshots/02-visualizer-ios-chat.png) |
 
-| Code Editor Kinetic Visualizer | 3D Spaceship — Corridor Splashes & S-Curve Weave |
+| Lock Screen Alerts | City Walk Map (Apple Maps Route) |
 | :---: | :---: |
-| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship — Corridor Splashes & S-Curve Weave](docs/screenshots/04-visualizer-spaceship-3d.png) |
+| ![Lock Screen Alerts](docs/screenshots/07-visualizer-lock-screen.png) | ![City Walk Map](docs/screenshots/08-visualizer-city-walk-map.png) |
+
+| Wallet / Payments Ledger | Motion Geometry — Constellation |
+| :---: | :---: |
+| ![Wallet Payments](docs/screenshots/09-visualizer-wallet-payments.png) | ![Motion Geometry Constellation](docs/screenshots/10-visualizer-constellation.png) |
+
+| Code Editor Kinetic Visualizer | 3D Spaceship — Nose Splash & Asteroid Dodge |
+| :---: | :---: |
+| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship — Nose Splash & Asteroid Dodge](docs/screenshots/04-visualizer-spaceship-3d.png) |
 
 | Lyrics Focus Mode (Minimal Controls) | 3D Cover Flow & Library |
 | :---: | :---: |
@@ -54,12 +62,12 @@ irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/in
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Fresh -Force
 
 # Pin a specific release tag
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.3.1 -Portable
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/install.ps1))) -Version v1.3.2 -Portable
 ```
 
 ### Direct `.exe` Download & Fast Delta Updater
 
-Grab [`WaveForm-Setup-1.3.1.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.1/WaveForm-Setup-1.3.1.exe) (NSIS installer) or [`WaveForm-Portable-1.3.1.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.1/WaveForm-Portable-1.3.1.exe) (standalone executable) from the [v1.3.1 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.1).
+Grab [`WaveForm-Setup-1.3.2.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.2/WaveForm-Setup-1.3.2.exe) (NSIS installer) or [`WaveForm-Portable-1.3.2.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.2/WaveForm-Portable-1.3.2.exe) (standalone executable) from the [v1.3.2 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.2).
 
 ### One-Click In-App Auto-Updater (`electron/appUpdater.ts`, `UpdatePromptModal.tsx`)
 
@@ -70,7 +78,7 @@ Grab [`WaveForm-Setup-1.3.1.exe`](https://github.com/Trapston3/waveform-desktop/
 
 ## Native Rust Performance Core (`native/waveform-core`)
 
-WaveForm v1.3.1 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
+WaveForm v1.3.2 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
 
 - **SQLite AutoEQ Engine (`src/autoeq.rs`, `rusqlite` bundled)**: Indexes all 17,703 rows (8,850 parametric `PaP\x01` profiles) into a normalized accent/punctuation-stripped 36-bit bitmask + trigram index for sub-millisecond fuzzy search (`sony whch-720n` → `Sony WH-CH720N`) and Boundary-07 parametric filter decoding.
 - **Multi-Core Parallel Media Scanner (`src/scanner.rs`, `lofty` + `rayon` + `walkdir` + `sha2`)**: Scans local folders incrementally against cached `(path, mtimeMs, size)` diffs across all CPU cores, extracts tags, synced/unsynced lyrics (`USLT`/`SYLT`/`©lyr`/`LYRICS`), and writes content-addressed deduplicated cover art into `userData/artwork-cache/`.
@@ -89,9 +97,16 @@ WaveForm v1.3.1 compiles a native Windows x64 `napi-rs` addon (`waveform-core.wi
 - **68-Bar Waveform & Live PCM Visualizer (`WaveformExtractor.ts`, `LiveVisualizer.ts`, `WaveformCanvasSeekbar.tsx`)**: Hardware-accelerated High-DPI canvas seekbar with optimistic seek latching.
 
 ### LyricVisualizer Subsystem (`src/lyricVisualizer/`, `electron/lyricVisualizerPlatform.ts`)
-- **Categorized 14 Visual Styles + Shared Icon Dictionary (`wordIconDictionary.ts`)**: Organized into **Kinetic Type** (`AppleMusicFlow`, `TypewriterEditorial`, `MinimalSwiss`, `FisheyeKinetic`, `CodeEditorKinetic` w/ `Codestyle Visual`, `KaraokeStage`, `BrutalistZine`), **Motion Scenes** (`StarfieldShip3D`, `LiquidMetal`, `Spatial3DDepth`, `GenerativeParticleInk`, `MotionGeometry` — Constellation/Branches/Web, `CRTScanline`), and **Native Phone UI** (`IosTextingMotion` — `Kinetic Messages` blur-spring/halo, `Wallet / Payments`, `City Walk Map`, `Lock Screen Alerts`, `Group Chat`).
-- **Spaceship 3D Fast-Lyric & Split View Fix (`ship3dScene.ts`, `starfieldShip3d.ts`)**: Interval-sweep collision detection + 30ms micro-stagger queue guarantees zero skipped words at 180+ BPM with `>= 4.5`-unit Z-spacing and Split View left-edge contrail fade.
+- **Global Beat Camera Thump & 9 Native Phone UI Modes**: Toggleable neural downbeat/bass compositor zoom impulse (`beatCameraThump`, default ON across all 14 styles) plus all 9 restored `IosTextingMotion` variations (`Kinetic Messages` with zero future preview & `0.75x–1.85x` Zoom slider, `Cinema Edit`, `iOS Dark`, `Apple Glass`, `Classic SMS`, `Group Chat`, `Lock Screen Alerts`, `City Walk Map`, and `Wallet / Payments`).
+- **Overhauled Motion Geometry & Spaceship 3D**: High-contrast hero typography across `Constellation`, `Branches`, and `Web`, plus fixed Spaceship 3D corridor splashes (zero blinking/Y-snapping words, true nose-merge particle bursts, mid-corridor asteroid dodging, and song-wide beat-locked twin plasma laser attacks).
 - **Multi-Surface Windows Guards**: Embeds in `NowPlayingScreen`, multi-monitor click-through Desktop Overlays (`#/overlay`), and Fullscreen Ambient Mode (`#/ambient`) with `KeepAwake`, Windows fullscreen game suppression, and lock-screen `0%` GPU suspend. See [DECISIONS.md](DECISIONS.md).
+
+### Power Tools, Offline Pinning & Practice Suite (`v1.3.2`)
+- **Native Last.fm & ListenBrainz Scrobbling (`electron/scrobbler.ts`)**: Signed MD5 Last.fm (`track.updateNowPlaying` / `track.scrobble`) and ListenBrainz token validation + submission at `50%` or `240s` played, backed by a persistent `scrobble-queue.json` offline retry queue.
+- **Drag-and-Drop Custom `.lrc` / `.txt` & LRC Editor (`electron/customLyricsStore.ts`, `LrcEditorModal.tsx`)**: Drop `.lrc`/`.txt` files directly onto Now Playing, edit raw `.lrc` lines, tap-to-sync timestamps live, and persist per-track timing offsets (`-500ms/+500ms`, `-100ms/+100ms`).
+- **Customizable Global Hotkeys (`electron/globalHotkeys.ts`)**: System-wide customizable keybindings for Play/Pause, Next/Previous, Karaoke, Cycle Visualizer Theme, Jump Back 5s, and Fullscreen Ambient with conflict detection and Reset Defaults.
+- **Offline Pinning & LRU Disk Cache (`electron/offlineCache.ts`)**: Pin tracks, albums, or playlists for instant zero-network `waveform-local://` playback under a configurable `1–50 GB` LRU cache (`5 GB` default) that never evicts pinned tracks.
+- **Bar-Snapped A–B Loop & Pitch-Preserving Practice Speed (`src/utils/practiceLoop.ts`)**: Snap `4 / 8 / 16` bar loops directly to persistent `beat_this` downbeats with glowing draggable `A`/`B` brackets on the 68-bar waveform seekbar and `0.5x–1.5x` pitch-preserved speed in sync with lyrics & visualizers.
 
 ### Zero-API-Key URL Import, Smart Radio Queue & Permanent Replay
 - **Spotify & Apple Music URL Playlist Importer (`electron/playlistImporter.ts`, `ImportPlaylistModal.tsx`)**: Paste any public Spotify or Apple Music playlist URL to preview metadata and concurrently match tracks into permanent local WaveForm playlists with zero API keys.

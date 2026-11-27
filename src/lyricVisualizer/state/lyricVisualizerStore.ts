@@ -19,6 +19,8 @@ import {
   type LyricsScriptMode,
   type LyricTextAlign,
   type LyricVisualizerConfig,
+  type MapScenePreference,
+  type MapTimePreference,
   MAX_IOS_KINETIC_ZOOM,
   MIN_IOS_KINETIC_ZOOM,
   normalizeNowPlayingLayout,
@@ -217,6 +219,14 @@ function isValidScriptMode(val: unknown): val is LyricsScriptMode {
   );
 }
 
+function isValidMapScene(val: unknown): val is MapScenePreference {
+  return val === 'auto' || val === 'cityscape' || val === 'highway' || val === 'countryside';
+}
+
+function isValidMapTimeOfDay(val: unknown): val is MapTimePreference {
+  return val === 'auto' || val === 'night' || val === 'sunset' || val === 'day';
+}
+
 function sanitizeVariationMap(
   raw: unknown
 ): Partial<Record<VisualStyleId, string>> {
@@ -320,6 +330,20 @@ function loadPersistedState(): {
       typeof (c as any).iosKineticZoom === 'number'
         ? clampIosKineticZoom((c as any).iosKineticZoom)
         : DEFAULT_LYRIC_VISUALIZER_CONFIG.iosKineticZoom,
+    wordIconsEnabled:
+      typeof c.wordIconsEnabled === 'boolean'
+        ? c.wordIconsEnabled
+        : DEFAULT_LYRIC_VISUALIZER_CONFIG.wordIconsEnabled,
+    iosKineticPopup:
+      typeof c.iosKineticPopup === 'boolean'
+        ? c.iosKineticPopup
+        : DEFAULT_LYRIC_VISUALIZER_CONFIG.iosKineticPopup,
+    mapScene: isValidMapScene(c.mapScene)
+      ? c.mapScene
+      : DEFAULT_LYRIC_VISUALIZER_CONFIG.mapScene,
+    mapTimeOfDay: isValidMapTimeOfDay(c.mapTimeOfDay)
+      ? c.mapTimeOfDay
+      : DEFAULT_LYRIC_VISUALIZER_CONFIG.mapTimeOfDay,
     backgroundOpacity:
       typeof (c as any).backgroundOpacity === 'number'
         ? clampBackgroundOpacity((c as any).backgroundOpacity)
@@ -1259,6 +1283,20 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
             typeof (payload.config as any).iosKineticZoom === 'number'
               ? clampIosKineticZoom((payload.config as any).iosKineticZoom)
               : s.config.iosKineticZoom,
+          wordIconsEnabled:
+            typeof payload.config.wordIconsEnabled === 'boolean'
+              ? payload.config.wordIconsEnabled
+              : s.config.wordIconsEnabled,
+          iosKineticPopup:
+            typeof payload.config.iosKineticPopup === 'boolean'
+              ? payload.config.iosKineticPopup
+              : s.config.iosKineticPopup,
+          mapScene: isValidMapScene(payload.config.mapScene)
+            ? payload.config.mapScene
+            : s.config.mapScene,
+          mapTimeOfDay: isValidMapTimeOfDay(payload.config.mapTimeOfDay)
+            ? payload.config.mapTimeOfDay
+            : s.config.mapTimeOfDay,
           scriptMode: isValidScriptMode((payload.config as any).scriptMode)
             ? (payload.config as any).scriptMode
             : s.config.scriptMode,

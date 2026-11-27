@@ -2,6 +2,7 @@
 
 export type VisualStyleId =
   | 'AppleMusicFlow'
+  | 'Editorial'
   | 'TypewriterEditorial'
   | 'MinimalSwiss'
   | 'LiquidMetal'
@@ -14,7 +15,14 @@ export type VisualStyleId =
   | 'IosTextingMotion'
   | 'CodeEditorKinetic'
   | 'FisheyeKinetic'
-  | 'MotionGeometry';
+  | 'MotionGeometry'
+  | 'SolariSplitFlap'
+  | 'StudioDawTimeline';
+
+export type MapBiomeKind = 'cityscape' | 'highway' | 'countryside';
+export type MapTimeOfDay = 'night' | 'sunset' | 'day';
+export type MapScenePreference = 'auto' | MapBiomeKind;
+export type MapTimePreference = 'auto' | MapTimeOfDay;
 
 export type VisualStyleCategoryId = 'kinetic' | 'motion' | 'native';
 
@@ -564,6 +572,10 @@ export interface StyleFrameContext {
   readonly motionIntensity?: MotionIntensity;
   readonly beatCameraThump?: boolean;
   readonly iosKineticZoom?: number;
+  readonly wordIconsEnabled?: boolean;
+  readonly iosKineticPopup?: boolean;
+  readonly mapScene?: MapScenePreference;
+  readonly mapTimeOfDay?: MapTimePreference;
   readonly didSeekThisFrame: boolean;
   readonly variationId: string;
   readonly manualScrollY: number;
@@ -600,6 +612,10 @@ export interface LyricVisualizerConfig {
   readonly motionIntensity?: MotionIntensity;
   readonly beatCameraThump: boolean;
   readonly iosKineticZoom: number;
+  readonly wordIconsEnabled: boolean;
+  readonly iosKineticPopup: boolean;
+  readonly mapScene: MapScenePreference;
+  readonly mapTimeOfDay: MapTimePreference;
   readonly backgroundOpacity: number;
   readonly vignetteStrength: number;
   readonly textAlign: LyricTextAlign;
@@ -627,6 +643,10 @@ export const DEFAULT_LYRIC_VISUALIZER_CONFIG: LyricVisualizerConfig = {
   motionIntensity: 'normal',
   beatCameraThump: true,
   iosKineticZoom: DEFAULT_IOS_KINETIC_ZOOM,
+  wordIconsEnabled: true,
+  iosKineticPopup: true,
+  mapScene: 'auto',
+  mapTimeOfDay: 'auto',
   backgroundOpacity: 0.95,
   vignetteStrength: 0.55,
   textAlign: 'center',

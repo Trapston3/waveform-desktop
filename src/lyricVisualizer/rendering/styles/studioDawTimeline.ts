@@ -18,7 +18,13 @@ import {
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
-import { drawWordIcon, resolveWordIcon, type WordIconId } from '../wordIconDictionary';
+import { detectMagicWordEffect } from '../lyricSemantics';
+import {
+  drawSemanticWordMicroFx,
+  drawWordIcon,
+  resolveWordIcon,
+  type WordIconId,
+} from '../wordIconDictionary';
 
 const RING_SIZE = 128;
 const TRACK_LANE_COUNT = 3;
@@ -530,6 +536,30 @@ export class StudioDawTimelineStyle implements ILyricVisualStyle {
       ctx.fillStyle = isActive ? '#ffffff' : '#e2e8f0';
       ctx.fillText(clip.text, rawX + textPadLeft, clipY + clipH * 0.5);
       ctx.restore();
+
+      if (isActive && !frame.reduceMotion) {
+        const magic = detectMagicWordEffect(clip.text);
+        if (magic) {
+          const motionScale =
+            frame.motionIntensity === 'vivid'
+              ? 1.25
+              : frame.motionIntensity === 'subtle'
+              ? 0.65
+              : 1.0;
+          drawSemanticWordMicroFx(
+            ctx,
+            magic,
+            rawX,
+            clipY,
+            clipW,
+            clipH,
+            frame.timeSeconds,
+            laneAccent,
+            accentB,
+            motionScale
+          );
+        }
+      }
 
       ctx.restore();
     }

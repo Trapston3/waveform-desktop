@@ -1581,6 +1581,40 @@ if (!gotTheLock) {
     });
     lyricVisualizerPlatform.registerIpcHandlers();
 
+    ipcMain.handle(
+      'lv:saveClipFile',
+      async (
+        _e,
+        payload: { defaultName?: string; bytes?: Uint8Array | number[] }
+      ): Promise<{ canceled: boolean; filePath?: string; error?: string }> => {
+        try {
+          const defaultName =
+            typeof payload?.defaultName === 'string' && payload.defaultName.trim()
+              ? payload.defaultName.trim()
+              : 'waveform-lyric-clip.webm';
+          const rawBytes = payload?.bytes;
+          if (!rawBytes || (rawBytes as Uint8Array).length === 0) {
+            return { canceled: false, error: 'Empty clip buffer.' };
+          }
+          const result = await dialog.showSaveDialog({
+            title: 'Save Lyric Clip',
+            defaultPath: path.join(app.getPath('videos'), defaultName),
+            filters: [{ name: 'WebM Video', extensions: ['webm'] }],
+          });
+          if (result.canceled || !result.filePath) {
+            return { canceled: true };
+          }
+          await fs.promises.writeFile(result.filePath, Buffer.from(rawBytes));
+          return { canceled: false, filePath: result.filePath };
+        } catch (err) {
+          return {
+            canceled: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    );
+
     const replayFilePath = path.join(app.getPath('userData'), 'replay-history.json');
     let replayEntriesCache: ReplayDiskEntry[] | null = null;
     const ensureReplayCache = (): ReplayDiskEntry[] => {

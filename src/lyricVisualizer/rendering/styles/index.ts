@@ -1,9 +1,6 @@
 export { AppleMusicFlowStyle } from './appleMusicFlow';
-export { TypewriterEditorialStyle } from './typewriterEditorial';
-export { MinimalSwissStyle } from './minimalSwiss';
+export { EditorialStyle } from './editorial';
 export { LiquidMetalStyle } from './liquidMetal';
-export { KaraokeStageStyle } from './karaokeStage';
-export { BrutalistZineStyle } from './brutalistZine';
 export { GenerativeParticleInkStyle } from './generativeParticleInk';
 export { Spatial3DDepthStyle } from './spatial3dDepth';
 export { CRTScanlineStyle } from './crtScanline';
@@ -15,7 +12,8 @@ export {
   type LyricEmbedCardKind,
 } from './iosTextingMotion';
 export { CodeEditorKineticStyle } from './codeEditorKinetic';
-export { FisheyeKineticStyle } from './fisheyeKinetic';
 export { MotionGeometryStyle } from './motionGeometry';
+export { SolariSplitFlapStyle } from './solariSplitFlap';
+export { StudioDawTimelineStyle } from './studioDawTimeline';
 export * from './iosTextingMotion';
 export * from './codeEditorKinetic';

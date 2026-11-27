@@ -30,7 +30,9 @@ import {
 } from '../bridge/waveFormPlaybackBridge';
 import { useLyricVisualizerStore } from '../state/lyricVisualizerStore';
 import { VisualizerControlBar } from './VisualizerControlBar';
+import { ClipExportModal } from './ClipExportModal';
 import { VisualizerContextMenu } from '../../ui/common/VisualizerContextMenu';
+import { MlAudioService } from '../../services/MlAudioService';
 import { usePlayerStore } from '../../state/playerStore';
 import { useLyricsStore } from '../../state/lyricsStore';
 
@@ -136,6 +138,18 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     x: 0,
     y: 0,
   });
+  const [isClipExportOpen, setIsClipExportOpen] = useState(false);
+
+  useEffect(() => {
+    if (isOverlayMode || typeof window === 'undefined') return;
+    const handleOpenExport = () => {
+      setIsClipExportOpen(true);
+    };
+    window.addEventListener('waveform:open-clip-export', handleOpenExport);
+    return () => {
+      window.removeEventListener('waveform:open-clip-export', handleOpenExport);
+    };
+  }, [isOverlayMode]);
 
   const config = useLyricVisualizerStore((s) => s.config);
   const currentSongOffsetMs = useLyricVisualizerStore((s) => s.currentSongOffsetMs);
@@ -495,6 +509,10 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
       vignetteStrength: config.vignetteStrength,
       textAlign: config.textAlign,
       iosKineticZoom: config.iosKineticZoom,
+      wordIconsEnabled: config.wordIconsEnabled,
+      iosKineticPopup: config.iosKineticPopup,
+      mapScene: config.mapScene,
+      mapTimeOfDay: config.mapTimeOfDay,
     });
     renderer.setScriptMode(config.scriptMode);
     renderer.setTrackMetadata(trackMetadata);
@@ -519,6 +537,10 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
     config.motionIntensity,
     config.beatCameraThump,
     config.iosKineticZoom,
+    config.wordIconsEnabled,
+    config.iosKineticPopup,
+    config.mapScene,
+    config.mapTimeOfDay,
     config.audioReactive,
     config.backgroundOpacity,
     config.vignetteStrength,
@@ -771,7 +793,52 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
           onClose={() => setInternalMenu((prev) => ({ ...prev, isOpen: false }))}
           isFullBleed={isFullBleed}
           onToggleFullBleed={onToggleFullBleed}
+          onOpenClipExport={() => setIsClipExportOpen(true)}
           context="now-playing"
+        />
+      )}
+
+      {!isOverlayMode && (
+        <ClipExportModal
+          isOpen={isClipExportOpen}
+          onClose={() => setIsClipExportOpen(false)}
+          getStageCanvases={() => ({
+            webGlCanvas: webGlCanvasRef.current,
+            shipCanvas: shipCanvasRef.current,
+            canvas2d: canvas2dRef.current,
+          })}
+          registerSyncCompositeHook={(cb) => {
+            rendererRef.current?.setPostRenderHook(cb);
+          }}
+          getAudioStream={() =>
+            usePlayerStore.getState().audioEngine?.getCaptureMediaStream?.() ?? null
+          }
+          currentTimeSec={(usePlayerStore.getState().positionMs ?? 0) / 1000}
+          durationSec={
+            (usePlayerStore.getState().durationMs ?? 0) > 0
+              ? usePlayerStore.getState().durationMs / 1000
+              : config.sandboxEnabled
+              ? STARLIGHT_HARBOR_TRACK.durationSeconds
+              : 180
+          }
+          trackTitle={
+            currentTrack?.title ||
+            (config.sandboxEnabled ? STARLIGHT_HARBOR_TRACK.title : 'WaveForm Track')
+          }
+          trackArtist={
+            currentTrack?.artist ||
+            (config.sandboxEnabled ? STARLIGHT_HARBOR_TRACK.artist : 'WaveForm')
+          }
+          chorusStartSec={
+            currentTrack?.videoId
+              ? MlAudioService.getCachedTrackBeatsSync(currentTrack.videoId)?.chorusStartSec
+              : undefined
+          }
+          onSeekTo={(sec) => {
+            const bridge = getSharedWaveFormPlaybackBridge();
+            bridge.seek(sec);
+            rendererRef.current?.resumeFollowPlayback();
+          }}
         />
       )}
     </div>

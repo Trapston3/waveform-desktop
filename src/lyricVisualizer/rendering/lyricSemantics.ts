@@ -224,11 +224,13 @@ const MAGIC_WORD_MAP: Readonly<Record<string, MagicWordKind>> = {
   corrupt: 'glitch', virus: 'glitch', distort: 'glitch', distortion: 'glitch',
   boom: 'impact', crash: 'impact', shake: 'impact', shaking: 'impact',
   scream: 'impact', screaming: 'impact', crazy: 'impact', wild: 'impact',
-  loud: 'impact', run: 'impact', running: 'impact',
+  loud: 'impact', run: 'impact', running: 'impact', fast: 'impact',
+  faster: 'impact', rush: 'impact', speed: 'impact',
   // 10. float (+ legacy 'water' for 'ocean')
   float: 'float', floating: 'float', drift: 'float', drifting: 'float',
   fly: 'float', flying: 'float', cloud: 'float', clouds: 'float',
   heaven: 'float', sky: 'float', wings: 'float', soar: 'float', levitate: 'float',
+  dream: 'float', dreams: 'float', dreaming: 'float',
   ocean: 'water', wave: 'water', waves: 'water', water: 'water',
   waters: 'water', rain: 'water', raining: 'water', tears: 'water',
   tear: 'water', cry: 'water', crying: 'water', swim: 'water', swimming: 'water',
@@ -243,11 +245,12 @@ const MAGIC_WORD_MAP: Readonly<Record<string, MagicWordKind>> = {
   // 13. neon
   neon: 'neon', laser: 'neon', lasers: 'neon', club: 'neon',
   disco: 'neon', strobe: 'neon', flash: 'neon', flashing: 'neon',
-  cyber: 'neon', ultraviolet: 'neon',
+  cyber: 'neon', ultraviolet: 'neon', night: 'neon',
   // 14. whisper (+ legacy 'ghost' for 'shadow')
   whisper: 'whisper', whispers: 'whisper', whispering: 'whisper', hush: 'whisper',
   quiet: 'whisper', quietly: 'whisper', silent: 'whisper', silence: 'whisper',
   secret: 'whisper', secrets: 'whisper', softly: 'whisper', murmur: 'whisper',
+  echo: 'whisper', echoes: 'whisper', echoing: 'whisper',
   ghost: 'ghost', ghosts: 'ghost', fade: 'ghost', fading: 'ghost',
   faded: 'ghost', shadow: 'ghost', shadows: 'ghost', disappear: 'ghost', alone: 'ghost',
   // 15. time
@@ -255,6 +258,7 @@ const MAGIC_WORD_MAP: Readonly<Record<string, MagicWordKind>> = {
   tick: 'time', ticking: 'time', wait: 'time', waiting: 'time',
   second: 'time', seconds: 'time', hour: 'time', hours: 'time',
   minute: 'time', minutes: 'time', moment: 'time', eternity: 'time',
+  slow: 'time', slowly: 'time',
 };
 
 export function detectMagicWordEffect(word: string): MagicWordKind | null {

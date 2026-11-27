@@ -16,6 +16,12 @@ import {
   type StyleMeasurementSpec,
 } from '../styleInterface';
 import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
+import { detectMagicWordEffect } from '../lyricSemantics';
+import {
+  drawInlineWordIconPop,
+  drawSemanticWordMicroFx,
+  resolveWordIcon,
+} from '../wordIconDictionary';
 
 const STAR_COUNT = 120;
 const MAX_LINE_NODES = 18;
@@ -255,14 +261,23 @@ export class MotionGeometryStyle implements ILyricVisualStyle {
     glowColor: string,
     alpha: number,
     minX: number,
-    maxX: number
+    maxX: number,
+    wordProgress: number,
+    timeSeconds: number,
+    motionScale: number,
+    wordIconsEnabled: boolean,
+    accentPrimary: string,
+    accentSecondary: string
   ): void {
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = `${isActive ? 800 : 700} ${fontPx}px ${fontFamily}`;
-    const halfW = ctx.measureText(text).width * 0.5 + 14;
+    const textW = ctx.measureText(text).width;
+    const halfW = textW * 0.5 + 14;
     const clampedX = Math.max(minX + halfW, Math.min(maxX - halfW, x));
+    const wordLeft = clampedX - textW * 0.5;
+    const wordTop = y - fontPx * 0.5;
 
     ctx.globalAlpha = alpha;
     ctx.lineJoin = 'round';
@@ -275,6 +290,42 @@ export class MotionGeometryStyle implements ILyricVisualStyle {
     ctx.shadowBlur = isActive ? 24 : isLit ? 12 : 0;
     ctx.fillStyle = isActive ? '#ffffff' : isLit ? '#f1f5f9' : 'rgba(203, 213, 225, 0.36)';
     ctx.fillText(text, clampedX, y);
+
+    if (wordIconsEnabled && (isActive || isLit)) {
+      const iconId = resolveWordIcon(text);
+      if (iconId) {
+        drawInlineWordIconPop(
+          ctx,
+          iconId,
+          wordLeft,
+          wordTop,
+          textW,
+          fontPx,
+          isActive ? '#ffffff' : glowColor,
+          wordProgress,
+          isActive,
+          motionScale <= 0
+        );
+      }
+    }
+
+    if (isActive && motionScale > 0) {
+      const magic = detectMagicWordEffect(text);
+      if (magic) {
+        drawSemanticWordMicroFx(
+          ctx,
+          magic,
+          wordLeft,
+          wordTop,
+          textW,
+          fontPx,
+          timeSeconds,
+          accentPrimary,
+          accentSecondary,
+          motionScale
+        );
+      }
+    }
     ctx.restore();
   }
 
@@ -604,7 +655,13 @@ export class MotionGeometryStyle implements ILyricVisualStyle {
           isActive ? secondary : accent,
           (isActive ? 1.0 : isLit ? 0.88 : 0.56) * frame.lineFadeAlpha,
           minStageX,
-          maxStageX
+          maxStageX,
+          frame.wordProgress,
+          t,
+          motion,
+          frame.wordIconsEnabled !== false,
+          accent,
+          secondary
         );
       }
     } else if (variation === 'branches') {
@@ -714,7 +771,13 @@ export class MotionGeometryStyle implements ILyricVisualStyle {
           goldCore,
           (isActive ? 1.0 : isLit ? 0.88 : 0.58) * frame.lineFadeAlpha,
           minStageX,
-          maxStageX
+          maxStageX,
+          frame.wordProgress,
+          t,
+          motion,
+          frame.wordIconsEnabled !== false,
+          accent,
+          secondary
         );
       }
     } else {
@@ -794,7 +857,13 @@ export class MotionGeometryStyle implements ILyricVisualStyle {
           isActive ? secondary : accent,
           (isActive ? 1.0 : isLit ? 0.88 : 0.35) * frame.lineFadeAlpha,
           minStageX,
-          maxStageX
+          maxStageX,
+          frame.wordProgress,
+          t,
+          motion,
+          frame.wordIconsEnabled !== false,
+          accent,
+          secondary
         );
       }
     }

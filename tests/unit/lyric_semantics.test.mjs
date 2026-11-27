@@ -81,8 +81,10 @@ function createMockCanvas2D(includeOptional = false) {
     closePath() { ops.push('closePath'); },
     moveTo() { ops.push('moveTo'); },
     lineTo() { ops.push('lineTo'); },
+    bezierCurveTo() { ops.push('bezierCurveTo'); },
     quadraticCurveTo() { ops.push('quadraticCurveTo'); },
     arc() { ops.push('arc'); },
+    ellipse() { ops.push('ellipse'); },
     fill() { ops.push('fill'); },
     stroke() { ops.push('stroke'); },
     fillText(text, x, y) { ops.push(['fillText', text, x, y]); },
@@ -166,7 +168,12 @@ describe('WS5: Weighted Phrase-First Lyric Semantics & Apple Emoji Renderer', ()
       ['spinning', 'spin'],
       ['neon', 'neon'],
       ['whisper', 'whisper'],
+      ['echo', 'whisper'],
       ['midnight', 'time'],
+      ['slow', 'time'],
+      ['dream', 'float'],
+      ['fast', 'impact'],
+      ['night', 'neon'],
       // Compatibility aliases
       ['heart', 'love'],
       ['boom', 'impact'],
@@ -264,7 +271,8 @@ describe('WS5: Weighted Phrase-First Lyric Semantics & Apple Emoji Renderer', ()
         reduceMotion: false,
         isAmbientMode: false,
         didSeekThisFrame: false,
-        variationId: 'cinema-edit',
+        variationId: 'messages',
+        iosKineticPopup: true,
         manualScrollY: 0,
         isFollowingPlayback: true,
         hoveredLineIndex: -1,
@@ -282,11 +290,11 @@ describe('WS5: Weighted Phrase-First Lyric Semantics & Apple Emoji Renderer', ()
     assert.ok(fillTexts.includes('♪'), 'Instrumental gap must render musical voice note indicator');
     assert.ok(!fillTexts.includes('✈️'), 'Emoji must render via Apple glossy vector/image, not raw fillText');
 
-    // Cinema-Edit letterbox bars & vignette must span FULL width (x=0, w=920), never starting at focal.left=320
+    // Split-view full width: ambient backdrop vignette or dark glass washes span full canvas width
     const fullWidthFills = ctx.ops.filter(
       (op) => Array.isArray(op) && op[0] === 'fillRect' && op[1] === 0 && op[3] === 920
     );
-    assert.ok(fullWidthFills.length >= 3, 'Letterbox bars and vignette must span full canvas width');
+    assert.ok(fullWidthFills.length >= 1, 'Background fills must span full canvas width');
 
     // Hard focal.left clip must NOT exist
     const focalClips = ctx.ops.filter(

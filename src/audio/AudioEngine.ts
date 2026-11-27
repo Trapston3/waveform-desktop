@@ -1145,6 +1145,7 @@ export class AudioEngine {
   private decksBus: GainNode | null = null;
   private masterVolumeNode: GainNode | null = null;
   private analyserNode: AnalyserNode | null = null;
+  private captureDestNode: MediaStreamAudioDestinationNode | null = null;
 
   /** Native Web Audio BiquadFilterNodes for live 10-band equalizer */
   readonly eqFilterNodes: BiquadFilterNode[] = [];
@@ -2832,5 +2833,25 @@ export class AudioEngine {
     (target as any).beatStrength = this.visualizer.getBeatStrength();
 
     return target;
+  }
+
+  /**
+   * Lazily taps the post-DSP master analyser node into a MediaStreamAudioDestinationNode
+   * so Creator Studio clip export can mux live Web Audio alongside Canvas/WebGL frames.
+   */
+  public getCaptureMediaStream(): MediaStream | null {
+    if (!this.ctx || !this.analyserNode) return null;
+    try {
+      if (!this.captureDestNode) {
+        if (typeof this.ctx.createMediaStreamDestination !== 'function') {
+          return null;
+        }
+        this.captureDestNode = this.ctx.createMediaStreamDestination();
+        this.analyserNode.connect(this.captureDestNode);
+      }
+      return this.captureDestNode.stream ?? null;
+    } catch {
+      return null;
+    }
   }
 }

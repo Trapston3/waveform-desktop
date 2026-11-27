@@ -14,6 +14,7 @@ import {
   DEMO_FALLBACK_PALETTE,
   type VocalSilenceInterval,
   getStyleDefinition,
+  mapLegacyStyleIdModel,
   type LyricPalette,
   type Lyrics,
   type LyricsScriptMode,
@@ -25,12 +26,14 @@ import {
   MIN_IOS_KINETIC_ZOOM,
   normalizeNowPlayingLayout,
   type NowPlayingLayoutMode,
+  resolveStyleVariationId,
   STARLIGHT_HARBOR_LYRICS,
   STARLIGHT_HARBOR_TRACK,
   type TrackInfo,
   VISUAL_STYLE_DEFINITIONS,
   type VisualStyleId,
 } from '../core';
+import { exportStylePresetJson, parseStylePresetJson } from '../export/lyricClipExporter';
 import { getSharedWaveFormPlaybackBridge } from '../bridge/waveFormPlaybackBridge';
 
 const STORAGE_KEY = 'waveform.lyricVisualizer.v1';
@@ -105,6 +108,12 @@ export interface LyricVisualizerState {
   setMotionIntensity: (intensity: MotionIntensity) => void;
   setBeatCameraThump: (enabled: boolean) => void;
   setIosKineticZoom: (zoom: number) => void;
+  setWordIconsEnabled: (enabled: boolean) => void;
+  setIosKineticPopup: (enabled: boolean) => void;
+  setMapScene: (scene: MapScenePreference) => void;
+  setMapTimeOfDay: (timeOfDay: MapTimePreference) => void;
+  exportStylePreset: () => string;
+  importStylePreset: (rawJson: string) => boolean;
   setBackgroundOpacity: (opacity: number) => void;
   setVignetteStrength: (strength: number) => void;
   setTextAlign: (align: LyricTextAlign) => void;
@@ -232,10 +241,15 @@ function sanitizeVariationMap(
 ): Partial<Record<VisualStyleId, string>> {
   const result: Partial<Record<VisualStyleId, string>> = {};
   if (!raw || typeof raw !== 'object') return result;
+  const rawRecord = raw as Record<string, unknown>;
   for (const def of VISUAL_STYLE_DEFINITIONS) {
-    const val = (raw as Record<string, unknown>)[def.id];
-    if (typeof val === 'string' && def.variations.some((v) => v.id === val)) {
-      result[def.id] = val;
+    const val = rawRecord[def.id];
+    if (typeof val === 'string') {
+      if (def.variations.some((v) => v.id === val)) {
+        result[def.id] = val;
+      } else {
+        result[def.id] = resolveStyleVariationId(def.id, rawRecord as Record<string, string | undefined>);
+      }
     }
   }
   return result;
@@ -249,19 +263,21 @@ export function migrateLegacyStyleSelection(
   variationByStyle: Partial<Record<VisualStyleId, string>>;
 } {
   const variationByStyle: Partial<Record<VisualStyleId, string>> = { ...existingVariations };
-  if (rawStyleId === 'NeonKinetic') {
-    return { styleId: 'AppleMusicFlow', variationByStyle };
-  }
-  if (rawStyleId === 'HoloVaporwave') {
-    variationByStyle.LiquidMetal = 'holo-vaporwave';
-    return { styleId: 'LiquidMetal', variationByStyle };
-  }
-  if (rawStyleId === 'SpectrumRibbon') {
-    variationByStyle.GenerativeParticleInk = 'spectrum-ribbon';
-    return { styleId: 'GenerativeParticleInk', variationByStyle };
-  }
-  if (isValidStyleId(rawStyleId)) {
-    return { styleId: rawStyleId, variationByStyle };
+  if (typeof rawStyleId === 'string') {
+    if (isValidStyleId(rawStyleId)) {
+      return { styleId: rawStyleId, variationByStyle };
+    }
+    const mappedStyleId = mapLegacyStyleIdModel(rawStyleId);
+    if (
+      rawStyleId === 'HoloVaporwave' ||
+      rawStyleId === 'SpectrumRibbon' ||
+      rawStyleId === 'KaraokeStage' ||
+      rawStyleId === 'MinimalSwiss' ||
+      rawStyleId === 'TypewriterEditorial'
+    ) {
+      variationByStyle[mappedStyleId] = resolveStyleVariationId(rawStyleId, variationByStyle);
+    }
+    return { styleId: mappedStyleId, variationByStyle };
   }
   return { styleId: DEFAULT_LYRIC_VISUALIZER_CONFIG.styleId, variationByStyle };
 }
@@ -512,7 +528,14 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   setStyleId: (styleId: VisualStyleId) => {
     const rawId = styleId as unknown as string;
     const isLegacy =
-      rawId === 'NeonKinetic' || rawId === 'HoloVaporwave' || rawId === 'SpectrumRibbon';
+      rawId === 'NeonKinetic' ||
+      rawId === 'HoloVaporwave' ||
+      rawId === 'SpectrumRibbon' ||
+      rawId === 'FisheyeKinetic' ||
+      rawId === 'BrutalistZine' ||
+      rawId === 'KaraokeStage' ||
+      rawId === 'MinimalSwiss' ||
+      rawId === 'TypewriterEditorial';
     if (!isValidStyleId(styleId) && !isLegacy) return;
     set((s) => {
       const migrated = migrateLegacyStyleSelection(rawId, s.config.variationByStyle ?? {});
@@ -684,6 +707,98 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
       return { config: nextConfig };
     });
     get().broadcastSnapshot(undefined, true);
+  },
+
+  setWordIconsEnabled: (enabled: boolean) => {
+    const flag = Boolean(enabled);
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, wordIconsEnabled: flag };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setIosKineticPopup: (enabled: boolean) => {
+    const flag = Boolean(enabled);
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, iosKineticPopup: flag };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setMapScene: (scene: MapScenePreference) => {
+    if (!isValidMapScene(scene)) return;
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, mapScene: scene };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  setMapTimeOfDay: (timeOfDay: MapTimePreference) => {
+    if (!isValidMapTimeOfDay(timeOfDay)) return;
+    set((s) => {
+      const nextConfig: LyricVisualizerConfig = { ...s.config, mapTimeOfDay: timeOfDay };
+      savePersistedState({
+        config: nextConfig,
+        perSongOffsetsMs: s.perSongOffsetsMs,
+        nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+      });
+      return { config: nextConfig };
+    });
+    get().broadcastSnapshot(undefined, true);
+  },
+
+  exportStylePreset: () => {
+    return exportStylePresetJson(get().config);
+  },
+
+  importStylePreset: (rawJson: string) => {
+    try {
+      const parsed = parseStylePresetJson(rawJson);
+      set((s) => {
+        const mergedVars = {
+          ...(s.config.variationByStyle ?? {}),
+          ...(parsed.variationByStyle ?? {}),
+        };
+        const migrated = migrateLegacyStyleSelection(
+          parsed.styleId ?? s.config.styleId,
+          mergedVars
+        );
+        const nextConfig: LyricVisualizerConfig = {
+          ...s.config,
+          ...parsed,
+          styleId: migrated.styleId,
+          variationByStyle: migrated.variationByStyle,
+        };
+        savePersistedState({
+          config: nextConfig,
+          perSongOffsetsMs: s.perSongOffsetsMs,
+          nowPlayingLyricsMode: s.nowPlayingLyricsMode,
+        });
+        return { config: nextConfig };
+      });
+      get().broadcastSnapshot(undefined, true);
+      return true;
+    } catch {
+      return false;
+    }
   },
 
   setBackgroundOpacity: (opacity: number) => {

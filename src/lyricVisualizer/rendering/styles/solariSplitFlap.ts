@@ -20,7 +20,13 @@ import {
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
-import { drawWordIcon, resolveWordIcon, type WordIconId } from '../wordIconDictionary';
+import { detectMagicWordEffect } from '../lyricSemantics';
+import {
+  drawSemanticWordMicroFx,
+  drawWordIcon,
+  resolveWordIcon,
+  type WordIconId,
+} from '../wordIconDictionary';
 
 const GRID_ROWS = 4;
 const GRID_COLS = 26;
@@ -890,8 +896,14 @@ export class SolariSplitFlapStyle implements ILyricVisualStyle {
       }
 
       const rowBase = r * GRID_COLS;
+      let activeStartCol = -1;
+      let activeEndCol = -1;
       for (let c = 0; c < visibleCols; c++) {
         const cell = this.cells[rowBase + c];
+        if (this.rowIsActive[r] === 1 && cell.activeWord) {
+          if (activeStartCol < 0) activeStartCol = c;
+          activeEndCol = c;
+        }
         const cellX = gridStartX + c * (tileW + tileGap);
         this.drawFlapCell(
           ctx,
@@ -906,6 +918,49 @@ export class SolariSplitFlapStyle implements ILyricVisualStyle {
           glyphFontPx,
           frame.reduceMotion
         );
+      }
+
+      if (
+        this.rowIsActive[r] === 1 &&
+        !unsyncedOrLineLevel &&
+        !frame.reduceMotion &&
+        activeStartCol >= 0 &&
+        activeMapped >= 0
+      ) {
+        const activeLineObj = this.lines[activeMapped];
+        const activeWord =
+          activeLineObj &&
+          frame.activeWordIndex >= 0 &&
+          frame.activeWordIndex < activeLineObj.words.length
+            ? activeLineObj.words[frame.activeWordIndex]
+            : null;
+        if (activeWord) {
+          const magic = detectMagicWordEffect(activeWord.chars.join(''));
+          if (magic) {
+            const spanX = gridStartX + activeStartCol * (tileW + tileGap);
+            const spanW =
+              (activeEndCol - activeStartCol + 1) * tileW +
+              Math.max(0, activeEndCol - activeStartCol) * tileGap;
+            const motionScale =
+              frame.motionIntensity === 'vivid'
+                ? 1.25
+                : frame.motionIntensity === 'subtle'
+                ? 0.65
+                : 1.0;
+            drawSemanticWordMicroFx(
+              ctx,
+              magic,
+              spanX,
+              rowY,
+              spanW,
+              tileH,
+              frame.timeSeconds,
+              accentPrimary,
+              accentSecondary,
+              motionScale
+            );
+          }
+        }
       }
     }
   }

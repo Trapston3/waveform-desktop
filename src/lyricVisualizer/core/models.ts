@@ -3,19 +3,14 @@
 export type VisualStyleId =
   | 'AppleMusicFlow'
   | 'Editorial'
-  | 'TypewriterEditorial'
-  | 'MinimalSwiss'
   | 'LiquidMetal'
-  | 'KaraokeStage'
-  | 'BrutalistZine'
   | 'GenerativeParticleInk'
+  | 'MotionGeometry'
   | 'Spatial3DDepth'
   | 'CRTScanline'
   | 'StarfieldShip3D'
   | 'IosTextingMotion'
   | 'CodeEditorKinetic'
-  | 'FisheyeKinetic'
-  | 'MotionGeometry'
   | 'SolariSplitFlap'
   | 'StudioDawTimeline';
 
@@ -46,7 +41,7 @@ export const VISUAL_STYLE_CATEGORIES: readonly VisualStyleCategoryDefinition[] =
   {
     id: 'native',
     label: 'Native Phone UI',
-    description: 'Authentic dark iOS Messages, Wallet, Maps, Notifications & Group Chat',
+    description: 'Authentic dark iOS Messages, Group Chat & 2.5D Apple Maps navigation',
   },
 ] as const;
 
@@ -72,49 +67,24 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     id: 'AppleMusicFlow',
     label: 'Atmospheric Flow',
     category: 'kinetic',
-    description: 'Smooth spring-eased word illumination with atmospheric palette backdrop and depth falloff.',
+    description: 'Spring-eased word illumination, atmospheric backdrop, or high-contrast Karaoke stage.',
     usesWebGl: false,
-    defaultVariationId: 'silk-glow',
+    defaultVariationId: 'classic-flow',
     variations: [
-      { id: 'silk-glow', label: 'Silk Glow', description: 'Soft ambient bloom with liquid word sweep' },
-      { id: 'editorial-crisp', label: 'Editorial Crisp', description: 'High-contrast razor focus without bloom' },
+      { id: 'classic-flow', label: 'Classic Flow', description: 'Soft ambient bloom with liquid word sweep' },
+      { id: 'karaoke-stage', label: 'Karaoke Stage', description: 'High-contrast live stage bounce with word wipe and next-line cue' },
     ],
   },
   {
-    id: 'FisheyeKinetic',
-    label: 'Fisheye & Visual',
+    id: 'Editorial',
+    label: 'Editorial',
     category: 'kinetic',
-    description: 'Stacked 3–4 word barrel-lens kinetic typography with tilted inverse highlight bar & inline icons.',
+    description: 'Swiss modernist grid and literary typewriter manuscript typography.',
     usesWebGl: false,
-    defaultVariationId: 'fisheye-visual',
+    defaultVariationId: 'swiss-minimal',
     variations: [
-      { id: 'fisheye-visual', label: 'Fisheye Visual', description: 'Radial barrel-lens typography with matched monochrome vector icons' },
-      { id: 'fisheye', label: 'Fisheye', description: 'Pure tight typographic barrel-lens stack without icons' },
-      { id: 'visual-stack', label: 'Visual Stack', description: 'Clean flat centered word stack paired with vector icons' },
-    ],
-  },
-  {
-    id: 'TypewriterEditorial',
-    label: 'Typewriter Editorial',
-    category: 'kinetic',
-    description: 'Literary serif spotlight with animated cursor, ink reveal, and warm editorial grid.',
-    usesWebGl: false,
-    defaultVariationId: 'dark-slate',
-    variations: [
-      { id: 'dark-slate', label: 'Dark Slate', description: 'Deep obsidian literary manuscript page' },
-      { id: 'warm-ink', label: 'Warm Ink', description: 'Warm charcoal paper with amber ink rule' },
-    ],
-  },
-  {
-    id: 'MinimalSwiss',
-    label: 'Minimal Swiss',
-    category: 'kinetic',
-    description: 'Asymmetric Swiss modernist grid with tight grotesque type and crisp active bar.',
-    usesWebGl: false,
-    defaultVariationId: 'international-grid',
-    variations: [
-      { id: 'international-grid', label: 'International Grid', description: 'Josef Müller-Brockmann hairlines and timecode column' },
-      { id: 'editorial-bold', label: 'Editorial Bold', description: 'Oversized display weight with minimal grid framing' },
+      { id: 'swiss-minimal', label: 'Swiss Minimal', description: 'Asymmetric Swiss hairline grid with crisp timecode column' },
+      { id: 'typewriter', label: 'Typewriter', description: 'Literary serif spotlight with animated cursor and ink reveal' },
     ],
   },
   {
@@ -128,31 +98,6 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
       { id: 'obsidian-chrome', label: 'Obsidian Chrome', description: 'Deep obsidian base with crisp liquid silver specular ridges' },
       { id: 'holo-vaporwave', label: 'Holo Vaporwave', description: 'Midnight synthwave horizon grid with cyan/magenta holographic sheen' },
       { id: 'mercury-album-tint', label: 'Mercury Album Tint', description: 'Liquid metallic ridges infused with live album artwork hues' },
-    ],
-  },
-  {
-    id: 'KaraokeStage',
-    label: 'Karaoke Stage',
-    category: 'motion',
-    description: 'High-contrast live stage bounce with word fill-wipe progress and upcoming preview.',
-    usesWebGl: false,
-    defaultVariationId: 'concert-gold',
-    variations: [
-      { id: 'concert-gold', label: 'Concert Gold', description: 'Warm spotlight stage with crisp word wipe' },
-      { id: 'club-neon', label: 'Club Neon', description: 'Electric cyan/magenta duet stage pulse' },
-    ],
-  },
-  {
-    id: 'BrutalistZine',
-    label: 'Brutalist Zine',
-    category: 'kinetic',
-    description: 'Tilted poster cards, bold uppercase blocks, newsprint halftone dots, and knockout highlights.',
-    usesWebGl: false,
-    defaultVariationId: 'newsprint-cutout',
-    variations: [
-      { id: 'newsprint-cutout', label: 'Newsprint Cutout', description: 'High-contrast ink cards, masking tape, and halftone grain' },
-      { id: 'xerox-contrast', label: 'Xerox Contrast', description: 'Stark monochrome photocopy zine with razor borders' },
-      { id: 'accent-risograph', label: 'Accent Risograph', description: 'Dual-tone album risograph ink over dark newsprint' },
     ],
   },
   {
@@ -212,12 +157,12 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     id: 'StarfieldShip3D',
     label: 'Starfield Ship 3D',
     category: 'kinetic',
-    description: '3D starfighter weaving through procedural asteroids with BPM cruise and beat warp surges.',
+    description: '3D starfighter blasting obstacle asteroids to reveal lyrics with Arcane neon sketch FX.',
     usesWebGl: true,
     uses3D: true,
     defaultVariationId: 'deep-space',
     variations: [
-      { id: 'deep-space', label: 'Deep Space', description: 'Tactical interceptor banking through asteroid corridor' },
+      { id: 'deep-space', label: 'Deep Space', description: 'Tactical interceptor weaving through asteroid corridor' },
       { id: 'nebula-run', label: 'Nebula Run', description: 'Album-tinted cosmic nebula clouds and plasma exhaust' },
       { id: 'retro-wireframe', label: 'Retro Wireframe', description: 'Vector arcade wireframe starfighter and faceted asteroids' },
     ],
@@ -226,19 +171,14 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     id: 'IosTextingMotion',
     label: 'iOS Native Design',
     category: 'native',
-    description: 'Authentic dark-mode iOS Messages, Cinema Edit, Apple Glass, Wallet Pay, Maps & Lock Screen alerts.',
+    description: 'Flagship dark-mode iOS Messages, Group Chat with avatar PFPs & 2.5D Apple Maps driving mode.',
     usesWebGl: false,
-    defaultVariationId: 'kinetic-messages',
+    uses3D: true,
+    defaultVariationId: 'messages',
     variations: [
-      { id: 'kinetic-messages', label: 'Kinetic Messages', description: 'Zero-preview macro iMessage bubbles with blur-spring reveal, contour halo & dark Maps cards' },
-      { id: 'cinema-edit', label: 'Cinema Edit', description: 'Dramatic beat-synced camera punch, widescreen framing & bold blue/glass dialogue' },
-      { id: 'ios-dark', label: 'Classic iMessage', description: 'Authentic dark-mode iMessage thread with spring physics & tapbacks' },
-      { id: 'liquid-glass', label: 'Apple Glass', description: 'Translucent iOS liquid-glass specular bubbles over ambient album aura' },
-      { id: 'classic-sms', label: 'Classic SMS Green', description: 'Retro iOS green SMS bubbles with crisp high-contrast legibility' },
-      { id: 'group-chat', label: 'Group Chat', description: 'Multi-speaker dark iMessage thread with circular initials avatars' },
-      { id: 'wallet-payments', label: 'Wallet / Payments', description: 'Apple Card pass & beat-reactive Apple Pay transaction ledger' },
-      { id: 'city-walk-map', label: 'City Walk Map', description: 'Procedural dark Apple Maps city canvas with following GPS beacon & waypoint pins' },
-      { id: 'lock-screen-alerts', label: 'Lock Screen Alerts', description: 'iOS Lock Screen clock, depth-stacked frosted glass alerts & Dynamic Island waveform' },
+      { id: 'messages', label: 'Messages', description: 'Kinetic pop-up or classic dark iMessage thread with blur-spring reveal & tapbacks' },
+      { id: 'group-chat', label: 'Group Chat', description: 'Multi-speaker dark iMessage thread with colorful gradient user avatar PFPs' },
+      { id: 'navigation-map', label: '2.5D Navigation Map', description: 'Genre-aware Three.js 2.5D Apple Maps driving mode with CarPlay hero banner' },
     ],
   },
   {
@@ -257,17 +197,47 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
       { id: 'codestyle-visual', label: 'Codestyle Visual', description: 'Inline monochrome vector icons paired with matching live syntax tokens' },
     ],
   },
+  {
+    id: 'SolariSplitFlap',
+    label: 'Airport Split-Flap (Solari)',
+    category: 'motion',
+    description: 'Matte-black mechanical Solari departure board with hinged split-flap clack animations.',
+    usesWebGl: false,
+    defaultVariationId: 'departure-matte',
+    variations: [
+      { id: 'departure-matte', label: 'Departure Matte', description: 'Crisp matte-black mechanical departure flaps with status strip' },
+      { id: 'amber-terminal', label: 'Amber Terminal', description: 'Warm vintage amber terminal split-flap typography' },
+    ],
+  },
+  {
+    id: 'StudioDawTimeline',
+    label: 'Studio DAW Timeline',
+    category: 'motion',
+    description: 'Pro-audio DAW arrangement view with BPM-synced grid, MIDI lyric clips & live FFT automation.',
+    usesWebGl: false,
+    defaultVariationId: 'ableton-dark',
+    variations: [
+      { id: 'ableton-dark', label: 'Ableton Dark', description: 'Precision dark arrangement grid with glowing MIDI lyric blocks' },
+      { id: 'logic-glass', label: 'Logic Glass', description: 'Sleek translucent studio glass timeline with multi-band meters' },
+    ],
+  },
 ] as const;
 
+export function mapLegacyStyleIdModel(id: VisualStyleId | string): VisualStyleId {
+  if (id === 'NeonKinetic' || id === 'FisheyeKinetic' || id === 'BrutalistZine' || id === 'KaraokeStage') {
+    return 'AppleMusicFlow';
+  }
+  if (id === 'MinimalSwiss' || id === 'TypewriterEditorial') {
+    return 'Editorial';
+  }
+  if (id === 'HoloVaporwave') return 'LiquidMetal';
+  if (id === 'SpectrumRibbon') return 'GenerativeParticleInk';
+  const found = VISUAL_STYLE_DEFINITIONS.find((s) => s.id === id);
+  return found ? found.id : 'AppleMusicFlow';
+}
+
 export function getStyleDefinition(id: VisualStyleId | string): VisualStyleDefinition {
-  const mappedId =
-    id === 'HoloVaporwave'
-      ? 'LiquidMetal'
-      : id === 'SpectrumRibbon'
-      ? 'GenerativeParticleInk'
-      : id === 'NeonKinetic'
-      ? 'AppleMusicFlow'
-      : id;
+  const mappedId = mapLegacyStyleIdModel(id);
   const found = VISUAL_STYLE_DEFINITIONS.find((s) => s.id === mappedId);
   return found ?? VISUAL_STYLE_DEFINITIONS[0];
 }
@@ -282,15 +252,36 @@ export function resolveStyleVariationId(
       ? (variationByStyle as Record<string, string | undefined>)[def.id] ??
         (variationByStyle as Record<string, string | undefined>)[styleId]
       : undefined;
+
   if (rawCandidate && def.variations.some((v) => v.id === rawCandidate)) {
     return rawCandidate;
   }
+
+  // Legacy style/variation migrations
+  if (styleId === 'KaraokeStage') return 'karaoke-stage';
+  if (styleId === 'MinimalSwiss') return 'swiss-minimal';
+  if (styleId === 'TypewriterEditorial') return 'typewriter';
   if (styleId === 'HoloVaporwave' && def.variations.some((v) => v.id === 'holo-vaporwave')) {
     return 'holo-vaporwave';
   }
   if (styleId === 'SpectrumRibbon' && def.variations.some((v) => v.id === 'spectrum-ribbon')) {
     return 'spectrum-ribbon';
   }
+
+  if (def.id === 'AppleMusicFlow' && rawCandidate) {
+    if (rawCandidate === 'concert-gold' || rawCandidate === 'club-neon') return 'karaoke-stage';
+    if (rawCandidate === 'silk-glow' || rawCandidate === 'editorial-crisp') return 'classic-flow';
+  }
+  if (def.id === 'Editorial' && rawCandidate) {
+    if (rawCandidate === 'dark-slate' || rawCandidate === 'warm-ink') return 'typewriter';
+    if (rawCandidate === 'international-grid' || rawCandidate === 'editorial-bold') return 'swiss-minimal';
+  }
+  if (def.id === 'IosTextingMotion' && rawCandidate) {
+    if (rawCandidate === 'city-walk-map') return 'navigation-map';
+    if (rawCandidate === 'group-chat') return 'group-chat';
+    return 'messages';
+  }
+
   return def.defaultVariationId;
 }
 

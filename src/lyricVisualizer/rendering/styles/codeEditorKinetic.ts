@@ -31,7 +31,13 @@ import {
   transliterateToLatin,
 } from '../../../utils/transliterate';
 import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
-import { drawWordIcon, resolveWordIcon, type WordIconId } from '../wordIconDictionary';
+import { detectMagicWordEffect } from '../lyricSemantics';
+import {
+  drawSemanticWordMicroFx,
+  drawWordIcon,
+  resolveWordIcon,
+  type WordIconId,
+} from '../wordIconDictionary';
 
 export const CODE_FONT_STACK =
   "'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace";
@@ -1078,7 +1084,8 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
     motionScale: number,
     timeSeconds: number,
     repeatCount: number,
-    variationIdx: number
+    variationIdx: number,
+    wordIconsEnabled: boolean
   ): void {
     const eff = tok.effect;
     const effectActive = isActiveLine && (isWordActive || isWordPassed);
@@ -1257,8 +1264,12 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
       ctx.restore();
     }
 
-    // Inline vector icon for Codestyle Visual variation (variationIdx === 4)
-    if (variationIdx === 4 && tok.iconId && (isWordActive || isWordPassed || !isActiveLine)) {
+    // Inline vector icon across all variations when Word Visual Icons is enabled
+    if (
+      (wordIconsEnabled || variationIdx === 4) &&
+      tok.iconId &&
+      (isWordActive || isWordPassed || !isActiveLine)
+    ) {
       const iconSize = Math.max(11, Math.round(tok.height * 0.72));
       const pop = isWordActive && motionScale > 0 ? 0.85 + 0.3 * easeOutBack(clamp01(p * 1.8)) : 1.0;
       drawWordIcon(
@@ -1270,6 +1281,24 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
         isWordActive ? CODE_COLOR_HOOK : tok.color,
         pop
       );
+    }
+
+    if (isActiveLine && isWordActive && motionScale > 0) {
+      const magic = detectMagicWordEffect(tok.text);
+      if (magic) {
+        drawSemanticWordMicroFx(
+          ctx,
+          magic,
+          tx,
+          ty,
+          tok.width,
+          tok.height,
+          timeSeconds,
+          CODE_COLOR_METHOD,
+          CODE_COLOR_HOOK,
+          motionScale
+        );
+      }
     }
 
     ctx.restore();
@@ -1809,7 +1838,8 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
             motionScale,
             frame.timeSeconds,
             cl.repeatCount,
-            variationIdx
+            variationIdx,
+            frame.wordIconsEnabled !== false
           );
         } else {
           const isWordTok = vt.wordIndex >= 0;
@@ -1842,7 +1872,8 @@ export class CodeEditorKineticStyle implements ILyricVisualStyle {
             motionScale,
             frame.timeSeconds,
             cl.repeatCount,
-            variationIdx
+            variationIdx,
+            frame.wordIconsEnabled !== false
           );
         }
       }

@@ -2,6 +2,8 @@ export * from './styleInterface';
 export * from './wordIconDictionary';
 export * from './webGlEffectLayer';
 export * from './ship3dScene';
+export * from './maps3dScene';
+export * from './arcaneSketchOverlay';
 export * from './lyricsMeasurer';
 export * from './styleRegistry';
 export * from './lyricStageRenderer';

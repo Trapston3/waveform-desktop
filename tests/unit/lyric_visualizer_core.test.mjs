@@ -77,30 +77,37 @@ function makeSolidRgba(r, g, b, a = 255, width = 8, height = 8) {
 // 1. Models & Contracts
 // ---------------------------------------------------------------------------
 
-test('models expose 14 consolidated visual styles, variations, legacy mappings, 8 bundled fonts, and Starlight Harbor demo', () => {
+test('models expose 12 consolidated visual styles, variations, legacy mappings, 8 bundled fonts, and Starlight Harbor demo', () => {
   const expectedIds = [
     'AppleMusicFlow',
-    'TypewriterEditorial',
-    'MinimalSwiss',
+    'Editorial',
     'LiquidMetal',
-    'KaraokeStage',
-    'BrutalistZine',
     'GenerativeParticleInk',
+    'MotionGeometry',
     'Spatial3DDepth',
     'CRTScanline',
     'StarfieldShip3D',
     'IosTextingMotion',
     'CodeEditorKinetic',
-    'FisheyeKinetic',
-    'MotionGeometry',
+    'SolariSplitFlap',
+    'StudioDawTimeline',
   ];
-  assert.equal(VISUAL_STYLE_DEFINITIONS.length, 14);
+  assert.equal(VISUAL_STYLE_DEFINITIONS.length, 12);
   const styleIds = new Set(VISUAL_STYLE_DEFINITIONS.map((s) => s.id));
-  assert.equal(styleIds.size, 14);
+  assert.equal(styleIds.size, 12);
   for (const id of expectedIds) {
     assert.ok(styleIds.has(id), `Missing consolidated style ${id}`);
   }
-  for (const legacyId of ['NeonKinetic', 'HoloVaporwave', 'SpectrumRibbon']) {
+  for (const legacyId of [
+    'NeonKinetic',
+    'HoloVaporwave',
+    'SpectrumRibbon',
+    'FisheyeKinetic',
+    'BrutalistZine',
+    'KaraokeStage',
+    'MinimalSwiss',
+    'TypewriterEditorial',
+  ]) {
     assert.equal(styleIds.has(legacyId), false, `${legacyId} must not be a top-level style`);
   }
   for (const style of VISUAL_STYLE_DEFINITIONS) {
@@ -115,6 +122,16 @@ test('models expose 14 consolidated visual styles, variations, legacy mappings, 
   assert.equal(getStyleDefinition('SpectrumRibbon').id, 'GenerativeParticleInk');
   assert.equal(resolveStyleVariationId('SpectrumRibbon'), 'spectrum-ribbon');
   assert.equal(getStyleDefinition('NeonKinetic').id, 'AppleMusicFlow');
+  assert.equal(getStyleDefinition('FisheyeKinetic').id, 'AppleMusicFlow');
+  assert.equal(getStyleDefinition('BrutalistZine').id, 'AppleMusicFlow');
+  assert.equal(getStyleDefinition('KaraokeStage').id, 'AppleMusicFlow');
+  assert.equal(resolveStyleVariationId('KaraokeStage'), 'karaoke-stage');
+  assert.equal(getStyleDefinition('MinimalSwiss').id, 'Editorial');
+  assert.equal(resolveStyleVariationId('MinimalSwiss'), 'swiss-minimal');
+  assert.equal(getStyleDefinition('TypewriterEditorial').id, 'Editorial');
+  assert.equal(resolveStyleVariationId('TypewriterEditorial'), 'typewriter');
+  assert.equal(resolveStyleVariationId('IosTextingMotion', { IosTextingMotion: 'wallet-payments' }), 'messages');
+  assert.equal(resolveStyleVariationId('IosTextingMotion', { IosTextingMotion: 'city-walk-map' }), 'navigation-map');
   assert.equal(resolveStyleVariationId('NeonKinetic'), getStyleDefinition('AppleMusicFlow').defaultVariationId);
 
   assert.equal(BUNDLED_FONTS.length, 8);

@@ -158,32 +158,6 @@ export function getSyncButtonTheme(
       });
     }
 
-    case 'BrutalistZine': {
-      const isXerox = resolvedVar === 'xerox-contrast';
-      const fillBg = isXerox ? '#f8fafc' : accent;
-      return buildTheme({
-        styleId: 'BrutalistZine',
-        variationId: resolvedVar,
-        label: 'SYNC LIVE ↗',
-        background: fillBg,
-        border: '2px solid #090a0d',
-        borderColor: '#090a0d',
-        textColor: '#07080b',
-        accentColor: '#07080b',
-        dotColor: '#07080b',
-        boxShadow: '4px 4px 0px #07080b',
-        backdropFilter: 'none',
-        borderRadius: '0px',
-        fontFamily: '"Space Grotesk", Inter, sans-serif',
-        fontSize: '11px',
-        fontWeight: 800,
-        letterSpacing: '0.09em',
-        textTransform: 'uppercase',
-        padding: '7px 14px',
-        showDot: false,
-      });
-    }
-
     case 'StarfieldShip3D':
       return buildTheme({
         styleId: 'StarfieldShip3D',
@@ -205,29 +179,6 @@ export function getSyncButtonTheme(
         textTransform: 'uppercase',
         padding: '7px 15px',
         showDot: true,
-      });
-
-    case 'FisheyeKinetic':
-      return buildTheme({
-        styleId: 'FisheyeKinetic',
-        variationId: resolvedVar,
-        label: 'Resync Stack',
-        background: accent,
-        border: '1px solid rgba(255, 255, 255, 0.28)',
-        borderColor: 'rgba(255, 255, 255, 0.28)',
-        textColor: '#ffffff',
-        accentColor: '#ffffff',
-        dotColor: '#ffffff',
-        boxShadow: '0 10px 26px rgba(0, 0, 0, 0.62)',
-        backdropFilter: 'blur(12px)',
-        borderRadius: '10px',
-        fontFamily: SF_PRO_DISPLAY_STACK,
-        fontSize: '12px',
-        fontWeight: 800,
-        letterSpacing: '0.02em',
-        textTransform: 'none',
-        padding: '7px 16px',
-        showDot: false,
       });
 
     case 'MotionGeometry':
@@ -254,21 +205,13 @@ export function getSyncButtonTheme(
       });
 
     case 'IosTextingMotion': {
-      const isGreen = resolvedVar === 'classic-sms';
-      const isGlass = resolvedVar === 'liquid-glass';
-      const bubbleBg = isGlass
-        ? 'rgba(26, 30, 42, 0.78)'
-        : isGreen
-        ? '#30D158'
-        : '#0A84FF';
+      const bubbleBg = resolvedVar === 'navigation-map' ? 'rgba(15, 23, 42, 0.86)' : '#0A84FF';
       return buildTheme({
         styleId: 'IosTextingMotion',
         variationId: resolvedVar,
-        label: '↓ Jump to Latest Message',
+        label: resolvedVar === 'navigation-map' ? 'Re-center Route' : '↓ Jump to Latest Message',
         background: bubbleBg,
-        border: isGlass
-          ? '1px solid rgba(255, 255, 255, 0.28)'
-          : '1px solid rgba(255, 255, 255, 0.18)',
+        border: '1px solid rgba(255, 255, 255, 0.22)',
         borderColor: 'rgba(255, 255, 255, 0.24)',
         textColor: '#ffffff',
         accentColor: '#ffffff',
@@ -286,50 +229,92 @@ export function getSyncButtonTheme(
       });
     }
 
-    case 'TypewriterEditorial':
+    case 'Editorial':
+      return resolvedVar === 'typewriter'
+        ? buildTheme({
+            styleId: 'Editorial',
+            variationId: resolvedVar,
+            label: '§ Resume Manuscript',
+            background: 'rgba(15, 18, 25, 0.92)',
+            border: `1px solid ${accent}`,
+            borderColor: accent,
+            textColor: '#f8fafc',
+            accentColor: accent,
+            dotColor: accent,
+            boxShadow: '0 10px 28px rgba(0, 0, 0, 0.55)',
+            backdropFilter: 'blur(12px)',
+            borderRadius: '4px',
+            fontFamily: '"Instrument Serif", Fraunces, Georgia, serif',
+            fontSize: '14px',
+            fontWeight: 500,
+            letterSpacing: '0.03em',
+            textTransform: 'none',
+            padding: '6px 16px',
+            showDot: false,
+          })
+        : buildTheme({
+            styleId: 'Editorial',
+            variationId: resolvedVar,
+            label: '00 // SYNC PLAYBACK',
+            background: 'rgba(9, 11, 15, 0.94)',
+            border: '1px solid rgba(255, 255, 255, 0.4)',
+            borderColor: 'rgba(255, 255, 255, 0.4)',
+            textColor: '#ffffff',
+            accentColor: accent,
+            dotColor: accent,
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.6)',
+            backdropFilter: 'blur(10px)',
+            borderRadius: '0px',
+            fontFamily: '"Space Grotesk", Inter, sans-serif',
+            fontSize: '11px',
+            fontWeight: 700,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            padding: '7px 14px',
+            showDot: true,
+          });
+
+    case 'SolariSplitFlap':
       return buildTheme({
-        styleId: 'TypewriterEditorial',
+        styleId: 'SolariSplitFlap',
         variationId: resolvedVar,
-        label: '§ Resume Manuscript',
-        background:
-          resolvedVar === 'warm-ink'
-            ? 'rgba(28, 23, 18, 0.92)'
-            : 'rgba(15, 18, 25, 0.92)',
+        label: 'FLIGHT // RESYNC',
+        background: 'rgba(12, 13, 16, 0.94)',
+        border: '1px solid rgba(251, 191, 36, 0.45)',
+        borderColor: 'rgba(251, 191, 36, 0.45)',
+        textColor: resolvedVar === 'amber-terminal' ? '#fbbf24' : '#f8fafc',
+        accentColor: '#fbbf24',
+        dotColor: '#34d399',
+        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.72)',
+        backdropFilter: 'blur(10px)',
+        borderRadius: '4px',
+        fontFamily: '"JetBrains Mono", Consolas, monospace',
+        fontSize: '11px',
+        fontWeight: 700,
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        padding: '7px 14px',
+        showDot: true,
+      });
+
+    case 'StudioDawTimeline':
+      return buildTheme({
+        styleId: 'StudioDawTimeline',
+        variationId: resolvedVar,
+        label: '▶ FOLLOW PLAYHEAD',
+        background: 'rgba(15, 18, 28, 0.92)',
         border: `1px solid ${accent}`,
         borderColor: accent,
         textColor: '#f8fafc',
         accentColor: accent,
-        dotColor: accent,
-        boxShadow: '0 10px 28px rgba(0, 0, 0, 0.55)',
-        backdropFilter: 'blur(12px)',
-        borderRadius: '4px',
-        fontFamily: '"Instrument Serif", Fraunces, Georgia, serif',
-        fontSize: '14px',
-        fontWeight: 500,
-        letterSpacing: '0.03em',
-        textTransform: 'none',
-        padding: '6px 16px',
-        showDot: false,
-      });
-
-    case 'MinimalSwiss':
-      return buildTheme({
-        styleId: 'MinimalSwiss',
-        variationId: resolvedVar,
-        label: '00 // SYNC PLAYBACK',
-        background: 'rgba(9, 11, 15, 0.94)',
-        border: '1px solid rgba(255, 255, 255, 0.4)',
-        borderColor: 'rgba(255, 255, 255, 0.4)',
-        textColor: '#ffffff',
-        accentColor: accent,
-        dotColor: accent,
-        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.6)',
-        backdropFilter: 'blur(10px)',
-        borderRadius: '0px',
-        fontFamily: '"Space Grotesk", Inter, sans-serif',
+        dotColor: '#34d399',
+        boxShadow: '0 8px 26px rgba(0, 0, 0, 0.68)',
+        backdropFilter: 'blur(14px)',
+        borderRadius: '8px',
+        fontFamily: '"JetBrains Mono", Inter, sans-serif',
         fontSize: '11px',
         fontWeight: 700,
-        letterSpacing: '0.14em',
+        letterSpacing: '0.08em',
         textTransform: 'uppercase',
         padding: '7px 14px',
         showDot: true,
@@ -363,29 +348,6 @@ export function getSyncButtonTheme(
         showDot: false,
       });
     }
-
-    case 'KaraokeStage':
-      return buildTheme({
-        styleId: 'KaraokeStage',
-        variationId: resolvedVar,
-        label: '★ Sync Stage Cue',
-        background: 'rgba(14, 16, 26, 0.9)',
-        border: `1.5px solid ${accent}`,
-        borderColor: accent,
-        textColor: '#ffffff',
-        accentColor: accent,
-        dotColor: accentSecondary,
-        boxShadow: '0 10px 28px rgba(0, 0, 0, 0.6)',
-        backdropFilter: 'blur(16px)',
-        borderRadius: '9999px',
-        fontFamily: 'Outfit, "Plus Jakarta Sans", sans-serif',
-        fontSize: '12px',
-        fontWeight: 700,
-        letterSpacing: '0.03em',
-        textTransform: 'none',
-        padding: '8px 16px',
-        showDot: false,
-      });
 
     case 'GenerativeParticleInk':
       return buildTheme({

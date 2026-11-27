@@ -535,7 +535,7 @@ export class WebGlEffectLayer {
         depth: false,
         stencil: false,
         powerPreference: 'low-power',
-        preserveDrawingBuffer: false,
+        preserveDrawingBuffer: true,
       }) as WebGL2RenderingContext | null;
 
       if (gl && typeof gl.createShader === 'function') {

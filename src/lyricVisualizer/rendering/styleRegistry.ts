@@ -1,32 +1,26 @@
 // Registry for all 12 consolidated LyricVisualizer visual styles.
 
-import type { VisualStyleId } from '../core/models';
+import { mapLegacyStyleIdModel, type VisualStyleId } from '../core/models';
 import type { ILyricVisualStyle } from './styleInterface';
 import {
   AppleMusicFlowStyle,
-  BrutalistZineStyle,
+  EditorialStyle,
   CRTScanlineStyle,
   GenerativeParticleInkStyle,
   IosTextingMotionStyle,
-  KaraokeStageStyle,
   LiquidMetalStyle,
-  MinimalSwissStyle,
   Spatial3DDepthStyle,
   StarfieldShip3DStyle,
-  TypewriterEditorialStyle,
-  FisheyeKineticStyle,
   MotionGeometryStyle,
+  SolariSplitFlapStyle,
+  StudioDawTimelineStyle,
 } from './styles';
 import { CodeEditorKineticStyle } from './styles/codeEditorKinetic';
 
 export const ALL_VISUAL_STYLE_IDS: readonly VisualStyleId[] = [
   'AppleMusicFlow',
-  'FisheyeKinetic',
-  'TypewriterEditorial',
-  'MinimalSwiss',
+  'Editorial',
   'LiquidMetal',
-  'KaraokeStage',
-  'BrutalistZine',
   'GenerativeParticleInk',
   'MotionGeometry',
   'Spatial3DDepth',
@@ -34,13 +28,12 @@ export const ALL_VISUAL_STYLE_IDS: readonly VisualStyleId[] = [
   'StarfieldShip3D',
   'IosTextingMotion',
   'CodeEditorKinetic',
+  'SolariSplitFlap',
+  'StudioDawTimeline',
 ] as const;
 
 export function mapLegacyStyleId(id: VisualStyleId | string): VisualStyleId {
-  if (id === 'NeonKinetic') return 'AppleMusicFlow';
-  if (id === 'HoloVaporwave') return 'LiquidMetal';
-  if (id === 'SpectrumRibbon') return 'GenerativeParticleInk';
-  return id as VisualStyleId;
+  return mapLegacyStyleIdModel(id);
 }
 
 export class StyleRegistry {
@@ -50,19 +43,17 @@ export class StyleRegistry {
   constructor() {
     const instances: ILyricVisualStyle[] = [
       new AppleMusicFlowStyle(),
-      new TypewriterEditorialStyle(),
-      new MinimalSwissStyle(),
+      new EditorialStyle(),
       new LiquidMetalStyle(),
-      new KaraokeStageStyle(),
-      new BrutalistZineStyle(),
       new GenerativeParticleInkStyle(),
+      new MotionGeometryStyle(),
       new Spatial3DDepthStyle(),
       new CRTScanlineStyle(),
       new StarfieldShip3DStyle(),
       new IosTextingMotionStyle(),
       new CodeEditorKineticStyle(),
-      new FisheyeKineticStyle(),
-      new MotionGeometryStyle(),
+      new SolariSplitFlapStyle(),
+      new StudioDawTimelineStyle(),
     ];
 
     this.styles = new Map<VisualStyleId, ILyricVisualStyle>();

@@ -6,8 +6,10 @@ import {
   BUNDLED_FONTS,
   DEFAULT_IOS_KINETIC_ZOOM,
   DEFAULT_LYRIC_VISUALIZER_CONFIG,
+  mapLegacyStyleIdModel,
   MAX_IOS_KINETIC_ZOOM,
   MIN_IOS_KINETIC_ZOOM,
+  resolveStyleVariationId,
   VISUAL_STYLE_DEFINITIONS,
   type BundledFontId,
   type LyricVisualizerConfig,
@@ -77,28 +79,14 @@ export interface StylePresetPayload {
 }
 
 const VALID_STYLE_VARIATIONS: Readonly<Record<VisualStyleId, readonly string[]>> = {
-  AppleMusicFlow: ['silk-glow', 'editorial-crisp'],
-  Editorial: ['silk-glow', 'editorial-crisp'],
-  TypewriterEditorial: ['dark-slate', 'warm-ink'],
-  MinimalSwiss: ['international-grid', 'editorial-bold'],
+  AppleMusicFlow: ['classic-flow', 'karaoke-stage'],
+  Editorial: ['swiss-minimal', 'typewriter'],
   LiquidMetal: ['obsidian-chrome', 'holo-vaporwave', 'mercury-album-tint'],
-  KaraokeStage: ['concert-gold', 'club-neon'],
-  BrutalistZine: ['newsprint-cutout', 'xerox-contrast', 'accent-risograph'],
   GenerativeParticleInk: ['pure-ink', 'spectrum-ribbon', 'ink-ribbon-hybrid'],
   Spatial3DDepth: ['depth-rings', 'glass-planes', 'horizon-grid'],
   CRTScanline: ['p31-green', 'p3-amber', 'trinitron-rgb'],
   StarfieldShip3D: ['deep-space', 'nebula-run', 'retro-wireframe'],
-  IosTextingMotion: [
-    'kinetic-messages',
-    'cinema-edit',
-    'ios-dark',
-    'liquid-glass',
-    'classic-sms',
-    'group-chat',
-    'wallet-payments',
-    'city-walk-map',
-    'lock-screen-alerts',
-  ],
+  IosTextingMotion: ['messages', 'group-chat', 'navigation-map'],
   CodeEditorKinetic: [
     'ide-macro',
     'led-stage-matrix',
@@ -106,7 +94,6 @@ const VALID_STYLE_VARIATIONS: Readonly<Record<VisualStyleId, readonly string[]>>
     'clean-dark-ide',
     'codestyle-visual',
   ],
-  FisheyeKinetic: ['fisheye-visual', 'fisheye', 'visual-stack'],
   MotionGeometry: ['constellation', 'branches', 'web'],
   SolariSplitFlap: ['departure-matte', 'amber-terminal'],
   StudioDawTimeline: ['ableton-dark', 'logic-glass'],
@@ -155,6 +142,8 @@ function sanitizeVariationByStyle(raw: unknown): Partial<Record<VisualStyleId, s
     const allowedVariations = def ? def.variations.map((v) => v.id) : VALID_STYLE_VARIATIONS[styleId];
     if (allowedVariations.includes(candidate)) {
       clean[styleId] = candidate;
+    } else {
+      clean[styleId] = resolveStyleVariationId(styleId, raw as Record<string, string | undefined>);
     }
   }
   return clean;
@@ -280,9 +269,35 @@ export function parseStylePresetJson(rawJson: string): Partial<LyricVisualizerCo
 
   if (isValidVisualStyleId(source.styleId)) {
     out.styleId = source.styleId;
+  } else if (
+    source.styleId === 'FisheyeKinetic' ||
+    source.styleId === 'BrutalistZine' ||
+    source.styleId === 'KaraokeStage' ||
+    source.styleId === 'MinimalSwiss' ||
+    source.styleId === 'TypewriterEditorial' ||
+    source.styleId === 'NeonKinetic' ||
+    source.styleId === 'HoloVaporwave' ||
+    source.styleId === 'SpectrumRibbon'
+  ) {
+    out.styleId = mapLegacyStyleIdModel(source.styleId);
   }
   if ('variationByStyle' in source && isPlainObject(source.variationByStyle)) {
     out.variationByStyle = sanitizeVariationByStyle(source.variationByStyle);
+  }
+  if (
+    typeof source.styleId === 'string' &&
+    !isValidVisualStyleId(source.styleId) &&
+    out.styleId
+  ) {
+    out.variationByStyle = {
+      ...(out.variationByStyle ?? {}),
+      [out.styleId]: resolveStyleVariationId(
+        source.styleId,
+        isPlainObject(source.variationByStyle)
+          ? (source.variationByStyle as Record<string, string | undefined>)
+          : undefined
+      ),
+    };
   }
   if (isValidFontId(source.fontId)) {
     out.fontId = source.fontId;

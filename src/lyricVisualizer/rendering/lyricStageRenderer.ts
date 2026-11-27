@@ -3,6 +3,7 @@
 // spring-damped manual scroll, and preallocated hit-rect pool for hover/click-to-seek.
 
 import {
+  DEFAULT_LYRIC_VISUALIZER_CONFIG,
   getStyleDefinition,
   resolveStyleVariationId,
   SF_PRO_DISPLAY_STACK,
@@ -12,6 +13,8 @@ import {
   type LyricsLayout,
   type LyricsScriptMode,
   type LyricTextAlign,
+  type MapScenePreference,
+  type MapTimePreference,
   type MotionIntensity,
   type StyleFrameContext,
   type StyleTrackMetadata,
@@ -106,6 +109,10 @@ interface MutableStyleFrameContext {
   motionIntensity: MotionIntensity;
   beatCameraThump: boolean;
   iosKineticZoom: number;
+  wordIconsEnabled: boolean;
+  iosKineticPopup: boolean;
+  mapScene: MapScenePreference;
+  mapTimeOfDay: MapTimePreference;
   didSeekThisFrame: boolean;
   variationId: string;
   manualScrollY: number;
@@ -156,6 +163,7 @@ export class LyricStageRenderer {
   private rafId: number | null = null;
   private lastFrameMs = 0;
   private boundFontsLoadingDone: (() => void) | null = null;
+  private postRenderHook: (() => void) | null = null;
 
   // Interactive manual scroll & hover hit-testing state (zero per-frame heap allocations)
   private manualScrollY = 0;
@@ -291,6 +299,10 @@ export class LyricStageRenderer {
         typeof options.iosKineticZoom === 'number' && Number.isFinite(options.iosKineticZoom)
           ? Math.max(0.75, Math.min(1.85, options.iosKineticZoom))
           : 1.45,
+      wordIconsEnabled: DEFAULT_LYRIC_VISUALIZER_CONFIG.wordIconsEnabled,
+      iosKineticPopup: DEFAULT_LYRIC_VISUALIZER_CONFIG.iosKineticPopup,
+      mapScene: DEFAULT_LYRIC_VISUALIZER_CONFIG.mapScene,
+      mapTimeOfDay: DEFAULT_LYRIC_VISUALIZER_CONFIG.mapTimeOfDay,
       didSeekThisFrame: false,
       variationId: this.variationId,
       manualScrollY: 0,
@@ -449,13 +461,22 @@ export class LyricStageRenderer {
     this.setPointerPosition(-1, -1);
   }
 
-  setStyle(styleId: VisualStyleId | string): void {
+  setStyle(styleId: VisualStyleId | string, variationId?: string): void {
     const mapped = mapLegacyStyleId(styleId);
     const nextId = this.registry.has(mapped) ? mapped : 'AppleMusicFlow';
-    const legacyChanged = styleId === 'HoloVaporwave' || styleId === 'SpectrumRibbon';
-    if (this.styleId === nextId && !legacyChanged) return;
+    const legacyChanged =
+      styleId === 'HoloVaporwave' ||
+      styleId === 'SpectrumRibbon' ||
+      styleId === 'KaraokeStage' ||
+      styleId === 'MinimalSwiss' ||
+      styleId === 'TypewriterEditorial';
+    if (this.styleId === nextId && !legacyChanged && variationId === undefined) return;
     this.styleId = nextId;
     const def = getStyleDefinition(nextId);
+    if (variationId !== undefined) {
+      this.setVariation(variationId);
+      return;
+    }
     const isCurrentVariationValidForNext = def.variations.some((v) => v.id === this.variationId);
     if (!this.hasExplicitVariation || legacyChanged || !isCurrentVariationValidForNext) {
       this.variationId = resolveStyleVariationId(legacyChanged ? styleId : nextId, undefined);
@@ -478,11 +499,19 @@ export class LyricStageRenderer {
     this.frameContext.variationId = resolved;
   }
 
+  setPostRenderHook(cb: (() => void) | null): void {
+    this.postRenderHook = cb;
+  }
+
   setVisualSettings(settings: {
     backgroundOpacity?: number;
     vignetteStrength?: number;
     textAlign?: LyricTextAlign;
     iosKineticZoom?: number;
+    wordIconsEnabled?: boolean;
+    iosKineticPopup?: boolean;
+    mapScene?: MapScenePreference;
+    mapTimeOfDay?: MapTimePreference;
   }): void {
     if (
       typeof settings.backgroundOpacity === 'number' &&
@@ -513,6 +542,28 @@ export class LyricStageRenderer {
         0.75,
         Math.min(1.85, settings.iosKineticZoom)
       );
+    }
+    if (typeof settings.wordIconsEnabled === 'boolean') {
+      this.frameContext.wordIconsEnabled = settings.wordIconsEnabled;
+    }
+    if (typeof settings.iosKineticPopup === 'boolean') {
+      this.frameContext.iosKineticPopup = settings.iosKineticPopup;
+    }
+    if (
+      settings.mapScene === 'auto' ||
+      settings.mapScene === 'cityscape' ||
+      settings.mapScene === 'highway' ||
+      settings.mapScene === 'countryside'
+    ) {
+      this.frameContext.mapScene = settings.mapScene;
+    }
+    if (
+      settings.mapTimeOfDay === 'auto' ||
+      settings.mapTimeOfDay === 'night' ||
+      settings.mapTimeOfDay === 'sunset' ||
+      settings.mapTimeOfDay === 'day'
+    ) {
+      this.frameContext.mapTimeOfDay = settings.mapTimeOfDay;
     }
   }
 
@@ -1095,6 +1146,7 @@ export class LyricStageRenderer {
       this.height
     );
     this.ctx.restore();
+    this.postRenderHook?.();
 
     // Refresh hover hit-test if pointer is active over canvas
     if (this.pointerX >= 0 && this.pointerY >= 0) {

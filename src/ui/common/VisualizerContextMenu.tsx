@@ -9,17 +9,22 @@ import {
   AlignLeft,
   Check,
   ChevronRight,
+  Clipboard,
   Clock,
   Disc,
+  Download,
   Eye,
+  Film,
   Languages,
   Layout,
+  Map as MapIcon,
   Maximize2,
   Monitor,
   Palette,
   RotateCcw,
   Sliders,
   Sparkles,
+  Sun,
   Type,
   Wand2,
 } from 'lucide-react';
@@ -29,6 +34,8 @@ import {
   getBundledFontCssFamily,
   type LyricsScriptMode,
   type LyricTextAlign,
+  type MapScenePreference,
+  type MapTimePreference,
   normalizeNowPlayingLayout,
   type NowPlayingLayoutMode,
   resolveStyleVariationId,
@@ -59,6 +66,7 @@ export interface VisualizerContextMenuProps {
   isFullBleed?: boolean;
   onToggleFullBleed?: () => void;
   onOpenLrcEditor?: () => void;
+  onOpenClipExport?: () => void;
   context?: 'now-playing' | 'ambient' | 'overlay';
 }
 
@@ -116,6 +124,20 @@ const MOTION_INTENSITY_OPTIONS: readonly { id: MotionIntensity; label: string }[
   { id: 'vivid', label: 'Vivid' },
 ];
 
+const MAP_SCENE_OPTIONS: readonly { id: MapScenePreference; label: string }[] = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'cityscape', label: 'Cityscape' },
+  { id: 'highway', label: 'Highway' },
+  { id: 'countryside', label: 'Country' },
+];
+
+const MAP_TIME_OPTIONS: readonly { id: MapTimePreference; label: string }[] = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'night', label: 'Night' },
+  { id: 'sunset', label: 'Sunset' },
+  { id: 'day', label: 'Day' },
+];
+
 export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   isOpen,
   x,
@@ -124,11 +146,15 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   isFullBleed = false,
   onToggleFullBleed,
   onOpenLrcEditor,
+  onOpenClipExport,
   context = 'now-playing',
 }) => {
   const [activeSubmenu, setActiveSubmenu] = useState<SubmenuId>('none');
   const [isAutoSyncing, setIsAutoSyncing] = useState(false);
   const [autoSyncMessage, setAutoSyncMessage] = useState<string | null>(null);
+  const [presetFeedback, setPresetFeedback] = useState<string | null>(null);
+  const [showPresetImport, setShowPresetImport] = useState(false);
+  const [presetDraft, setPresetDraft] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
 
   const config = useLyricVisualizerStore((s) => s.config);
@@ -150,6 +176,12 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   const setMotionIntensity = useLyricVisualizerStore((s) => s.setMotionIntensity);
   const setBeatCameraThump = useLyricVisualizerStore((s) => s.setBeatCameraThump);
   const setIosKineticZoom = useLyricVisualizerStore((s) => s.setIosKineticZoom);
+  const setWordIconsEnabled = useLyricVisualizerStore((s) => s.setWordIconsEnabled);
+  const setIosKineticPopup = useLyricVisualizerStore((s) => s.setIosKineticPopup);
+  const setMapScene = useLyricVisualizerStore((s) => s.setMapScene);
+  const setMapTimeOfDay = useLyricVisualizerStore((s) => s.setMapTimeOfDay);
+  const exportStylePreset = useLyricVisualizerStore((s) => s.exportStylePreset);
+  const importStylePreset = useLyricVisualizerStore((s) => s.importStylePreset);
   const setBackgroundOpacity = useLyricVisualizerStore((s) => s.setBackgroundOpacity);
   const setVignetteStrength = useLyricVisualizerStore((s) => s.setVignetteStrength);
   const setTextAlign = useLyricVisualizerStore((s) => s.setTextAlign);
@@ -169,6 +201,8 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
   useEffect(() => {
     if (!isOpen) {
       setActiveSubmenu('none');
+      setShowPresetImport(false);
+      setPresetFeedback(null);
     }
   }, [isOpen]);
 
@@ -596,49 +630,122 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
               </>
             )}
 
-            {/* Kinetic Messages Zoom Slider */}
-            {config.styleId === 'IosTextingMotion' && activeVariationId === 'kinetic-messages' && (
+            {/* iOS Messages Kinetic Pop-up Mode & Zoom Slider */}
+            {config.styleId === 'IosTextingMotion' && activeVariationId === 'messages' && (
               <>
                 <div className="space-y-1.5 px-1">
-                  <div className="flex items-center justify-between text-[11px] text-white/75">
-                    <span>Kinetic Zoom</span>
-                    <span className="font-mono text-white font-semibold">
-                      {(config.iosKineticZoom ?? 1.45).toFixed(2)}x
+                  <button
+                    type="button"
+                    data-testid="ios-kinetic-popup-toggle"
+                    onClick={() => setIosKineticPopup(!(config.iosKineticPopup ?? false))}
+                    className="w-full flex items-center justify-between px-1.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                  >
+                    <span className="flex items-center gap-2 text-white/85">
+                      <Sparkles size={12} className="text-sky-400" />
+                      <span>Kinetic Pop-up Mode</span>
                     </span>
+                    {config.iosKineticPopup && <Check size={13} className="text-sky-400" />}
+                  </button>
+
+                  {config.iosKineticPopup && (
+                    <>
+                      <div className="flex items-center justify-between text-[11px] text-white/75 pt-0.5">
+                        <span>Kinetic Zoom</span>
+                        <span className="font-mono text-white font-semibold">
+                          {(config.iosKineticZoom ?? 1.45).toFixed(2)}x
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1">
+                        {[
+                          { label: '0.85x', value: 0.85 },
+                          { label: '1.45x', value: 1.45 },
+                          { label: '1.80x', value: 1.8 },
+                        ].map((preset) => {
+                          const active = Math.abs((config.iosKineticZoom ?? 1.45) - preset.value) < 0.04;
+                          return (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() => setIosKineticZoom(preset.value)}
+                              className={`py-1 rounded-md text-[10px] font-mono transition-colors cursor-pointer ${
+                                active
+                                  ? 'bg-white/25 text-white font-bold'
+                                  : 'bg-white/5 hover:bg-white/15 text-white/70'
+                              }`}
+                            >
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <input
+                        aria-label="iOS Kinetic Zoom"
+                        type="range"
+                        min={MIN_IOS_KINETIC_ZOOM}
+                        max={MAX_IOS_KINETIC_ZOOM}
+                        step="0.05"
+                        value={config.iosKineticZoom ?? 1.45}
+                        onChange={(e) => setIosKineticZoom(parseFloat(e.target.value))}
+                        className="w-full h-1.5 accent-[var(--color-accent)] bg-white/20 rounded-lg cursor-pointer"
+                      />
+                    </>
+                  )}
+                </div>
+                <div className="h-[1px] bg-white/10" />
+              </>
+            )}
+
+            {/* 2.5D Navigation Map Scene & Time of Day */}
+            {config.styleId === 'IosTextingMotion' && activeVariationId === 'navigation-map' && (
+              <>
+                <div className="space-y-1.5 px-1">
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-white/45">
+                    <MapIcon size={10} />
+                    <span>Map Scene</span>
                   </div>
-                  <div className="grid grid-cols-3 gap-1">
-                    {[
-                      { label: '0.85x', value: 0.85 },
-                      { label: '1.45x', value: 1.45 },
-                      { label: '1.80x', value: 1.8 },
-                    ].map((preset) => {
-                      const active = Math.abs((config.iosKineticZoom ?? 1.45) - preset.value) < 0.04;
+                  <div className="grid grid-cols-4 gap-1">
+                    {MAP_SCENE_OPTIONS.map((opt) => {
+                      const active = (config.mapScene ?? 'auto') === opt.id;
                       return (
                         <button
-                          key={preset.label}
+                          key={opt.id}
                           type="button"
-                          onClick={() => setIosKineticZoom(preset.value)}
-                          className={`py-1 rounded-md text-[10px] font-mono transition-colors cursor-pointer ${
+                          onClick={() => setMapScene(opt.id)}
+                          className={`py-1 px-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer truncate ${
                             active
-                              ? 'bg-white/25 text-white font-bold'
+                              ? 'bg-white/25 text-white font-semibold'
                               : 'bg-white/5 hover:bg-white/15 text-white/70'
                           }`}
                         >
-                          {preset.label}
+                          {opt.label}
                         </button>
                       );
                     })}
                   </div>
-                  <input
-                    aria-label="iOS Kinetic Zoom"
-                    type="range"
-                    min={MIN_IOS_KINETIC_ZOOM}
-                    max={MAX_IOS_KINETIC_ZOOM}
-                    step="0.05"
-                    value={config.iosKineticZoom ?? 1.45}
-                    onChange={(e) => setIosKineticZoom(parseFloat(e.target.value))}
-                    className="w-full h-1.5 accent-[var(--color-accent)] bg-white/20 rounded-lg cursor-pointer"
-                  />
+
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-white/45 pt-1">
+                    <Sun size={10} />
+                    <span>Time of Day</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {MAP_TIME_OPTIONS.map((opt) => {
+                      const active = (config.mapTimeOfDay ?? 'auto') === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setMapTimeOfDay(opt.id)}
+                          className={`py-1 px-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer truncate ${
+                            active
+                              ? 'bg-white/25 text-white font-semibold'
+                              : 'bg-white/5 hover:bg-white/15 text-white/70'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
                 <div className="h-[1px] bg-white/10" />
               </>
@@ -850,6 +957,18 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
 
               <button
                 type="button"
+                onClick={() => setWordIconsEnabled(!(config.wordIconsEnabled ?? true))}
+                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <Sparkles size={13} className="text-white/75" />
+                  <span>Word Visual Icons</span>
+                </span>
+                {(config.wordIconsEnabled ?? true) && <Check size={13} className="text-violet-400" />}
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setBeatCameraThump(!(config.beatCameraThump ?? true))}
                 className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
               >
@@ -883,6 +1002,65 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                 </span>
                 {config.sandboxEnabled && <Check size={13} className="text-amber-400" />}
               </button>
+            </div>
+
+            <div className="h-[1px] bg-white/10" />
+
+            {/* Preset JSON Copy / Import */}
+            <div className="space-y-1 px-1">
+              <div className="grid grid-cols-2 gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const json = exportStylePreset();
+                    void navigator.clipboard?.writeText?.(json)?.catch?.(() => {});
+                    setPresetFeedback('Preset JSON copied');
+                  }}
+                  className="py-1 px-2 rounded-md text-[10px] font-medium bg-white/5 hover:bg-white/15 text-white/80 flex items-center justify-center gap-1 cursor-pointer"
+                >
+                  <Clipboard size={10} />
+                  <span>Copy Preset</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPresetImport((prev) => !prev);
+                    setPresetFeedback(null);
+                  }}
+                  className="py-1 px-2 rounded-md text-[10px] font-medium bg-white/5 hover:bg-white/15 text-white/80 flex items-center justify-center gap-1 cursor-pointer"
+                >
+                  <Download size={10} />
+                  <span>Import JSON</span>
+                </button>
+              </div>
+              {showPresetImport && (
+                <div className="space-y-1 pt-1">
+                  <textarea
+                    value={presetDraft}
+                    onChange={(e) => setPresetDraft(e.target.value)}
+                    placeholder="Paste preset JSON..."
+                    rows={3}
+                    className="w-full rounded-md bg-black/40 border border-white/15 p-1.5 text-[10px] font-mono text-white placeholder:text-white/35 focus:outline-none focus:border-white/35"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ok = importStylePreset(presetDraft);
+                      setPresetFeedback(ok ? 'Preset applied' : 'Invalid preset JSON');
+                      if (ok) {
+                        setShowPresetImport(false);
+                        setPresetDraft('');
+                      }
+                    }}
+                    className="w-full py-1 rounded-md bg-white/20 hover:bg-white/30 text-[10px] font-semibold text-white cursor-pointer"
+                  >
+                    Apply Preset
+                  </button>
+                </div>
+              )}
+              {presetFeedback && (
+                <div className="text-[10px] text-cyan-300 px-1">{presetFeedback}</div>
+              )}
             </div>
           </div>
         )}
@@ -1079,6 +1257,27 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
           </div>
         )}
       </div>
+
+      {/* Export 15s Lyric Clip */}
+      <button
+        type="button"
+        data-testid="visualizer-export-clip-btn"
+        onMouseEnter={() => setActiveSubmenu('none')}
+        onClick={() => {
+          onClose();
+          if (onOpenClipExport) {
+            onOpenClipExport();
+          } else if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('waveform:open-clip-export'));
+          }
+        }}
+        className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"
+      >
+        <span className="flex items-center gap-2.5">
+          <Film size={14} className="text-pink-300" />
+          <span>Export Lyric Clip...</span>
+        </span>
+      </button>
 
       {/* Desktop Overlay toggle (nested under Lyric Engine) */}
       <button

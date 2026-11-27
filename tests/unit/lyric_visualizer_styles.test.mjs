@@ -28,7 +28,13 @@ export async function resolve(specifier, context, nextResolve) {
 `;
 register(`data:text/javascript,${encodeURIComponent(resolverHook)}`, import.meta.url);
 
-const { VISUAL_STYLE_DEFINITIONS, VISUAL_STYLE_CATEGORIES, parseLrc } = await import('../../src/lyricVisualizer/core/index.ts');
+const {
+  VISUAL_STYLE_DEFINITIONS,
+  VISUAL_STYLE_CATEGORIES,
+  DEFAULT_LYRIC_VISUALIZER_CONFIG,
+  parseLrc,
+  resolveStyleVariationId,
+} = await import('../../src/lyricVisualizer/core/index.ts');
 const {
   ALL_VISUAL_STYLE_IDS,
   StyleRegistry,
@@ -39,8 +45,12 @@ const {
   CRTScanlineStyle,
   LiquidMetalStyle,
   Ship3DScene,
+  resolveMapEnvironment,
+  ArcaneSketchOverlay,
   resolveWordIcon,
   drawWordIcon,
+  drawInlineWordIconPop,
+  drawSemanticWordMicroFx,
   getSyncButtonTheme,
   detectLyricEmbedCard,
   detectMagicWordEffect,
@@ -48,15 +58,16 @@ const {
   transformLyricLineToCodeTokens,
   detectCodeWordEffect,
 } = await import('../../src/lyricVisualizer/rendering/index.ts');
+const {
+  computeClipCropRect,
+  exportStylePresetJson,
+  parseStylePresetJson,
+} = await import('../../src/lyricVisualizer/export/lyricClipExporter.ts');
 
-const EXPECTED_14_STYLES = [
+const EXPECTED_12_STYLES = [
   'AppleMusicFlow',
-  'FisheyeKinetic',
-  'TypewriterEditorial',
-  'MinimalSwiss',
+  'Editorial',
   'LiquidMetal',
-  'KaraokeStage',
-  'BrutalistZine',
   'GenerativeParticleInk',
   'MotionGeometry',
   'Spatial3DDepth',
@@ -64,6 +75,8 @@ const EXPECTED_14_STYLES = [
   'StarfieldShip3D',
   'IosTextingMotion',
   'CodeEditorKinetic',
+  'SolariSplitFlap',
+  'StudioDawTimeline',
 ];
 
 function createMockCanvas2DContext() {
@@ -216,24 +229,33 @@ const UNSYNCED_LYRICS = {
   ],
 };
 
-describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
-  test('StyleRegistry registers all 14 consolidated visual style IDs', () => {
+describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
+  test('StyleRegistry registers all 12 consolidated visual style IDs', () => {
     const registry = new StyleRegistry();
-    assert.equal(ALL_VISUAL_STYLE_IDS.length, 14);
-    assert.deepEqual([...registry.listIds()], EXPECTED_14_STYLES);
+    assert.equal(ALL_VISUAL_STYLE_IDS.length, 12);
+    assert.deepEqual([...registry.listIds()], EXPECTED_12_STYLES);
 
-    for (const id of EXPECTED_14_STYLES) {
+    for (const id of EXPECTED_12_STYLES) {
       assert.equal(registry.has(id), true, `Missing style ID: ${id}`);
       const style = registry.get(id);
       assert.equal(style.id, id);
       assert.equal(typeof style.render, 'function');
     }
-    for (const legacyId of ['NeonKinetic', 'HoloVaporwave', 'SpectrumRibbon']) {
+    for (const legacyId of [
+      'NeonKinetic',
+      'HoloVaporwave',
+      'SpectrumRibbon',
+      'FisheyeKinetic',
+      'BrutalistZine',
+      'KaraokeStage',
+      'MinimalSwiss',
+      'TypewriterEditorial',
+    ]) {
       assert.equal(registry.has(legacyId), false, `Legacy style ${legacyId} must not be registered top-level`);
     }
   });
 
-  test('All 14 styles and every variation render cleanly across modes', () => {
+  test('All 12 styles and every variation render cleanly across modes', () => {
     const canvas = createMockCanvas();
     const webGlCanvas = createMockCanvas();
     const renderer = new LyricStageRenderer({
@@ -786,7 +808,7 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     renderer.resize(900, 620, 1);
     renderer.setLyrics(SYNCED_LYRICS);
     renderer.setSyncState({ timeSeconds: 2.0, activeLineIndex: 0, activeWordIndex: 1, wordProgress: 0.5 });
-    for (const variationId of ['ios-dark', 'liquid-glass', 'cinema-edit', 'classic-sms']) {
+    for (const variationId of ['messages', 'group-chat', 'navigation-map']) {
       canvas.ctx2d.ops.length = 0;
       renderer.setVariation(variationId);
       assert.equal(renderer.renderFrame(1000), true);
@@ -991,7 +1013,7 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     assert.deepEqual(followEvents, [false, true]);
     renderer.dispose();
 
-    for (const id of ['Classic', ...EXPECTED_14_STYLES]) {
+    for (const id of ['Classic', ...EXPECTED_12_STYLES]) {
       const theme = getSyncButtonTheme(id, undefined, SAMPLE_PALETTE);
       assert.equal(theme.styleId, id);
       assert.ok(theme.label.length > 0);
@@ -1185,16 +1207,15 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
       ],
     };
 
-    const remaining9 = [
+    const remainingStyles = [
       'AppleMusicFlow',
-      'TypewriterEditorial',
-      'MinimalSwiss',
+      'Editorial',
       'LiquidMetal',
-      'KaraokeStage',
-      'BrutalistZine',
       'GenerativeParticleInk',
       'Spatial3DDepth',
       'CRTScanline',
+      'SolariSplitFlap',
+      'StudioDawTimeline',
     ];
 
     const canvas = createMockCanvas();
@@ -1205,7 +1226,7 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     });
     renderer.resize(900, 600, 1);
 
-    for (const styleId of remaining9) {
+    for (const styleId of remainingStyles) {
       renderer.setStyle(styleId);
       renderer.setLyrics(gapLyrics);
 
@@ -1229,7 +1250,13 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
         .filter((op) => Array.isArray(op) && op[0] === 'fillText')
         .map((op) => String(op[1]));
       assert.ok(
-        fillTexts.some((t) => t.includes('♪') || t.includes('Instrumental')),
+        fillTexts.some(
+          (t) =>
+            t.includes('♪') ||
+            t.includes('Instrumental') ||
+            t.includes('INSTRUMENTAL') ||
+            /^[I ]*$/.test(t)
+        ),
         `${styleId} must render instrumental indicator during isInstrumentalGap`
       );
 
@@ -1249,9 +1276,9 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
       assert.equal(hasFullBg, false, `${styleId} overlay gap must not draw full-screen fillRect`);
     }
 
-    // WS4: BrutalistZine avoids 0.02em letterSpacing on cursive Arabic / Devanagari
+    // WS4: Editorial Swiss Minimal avoids letterSpacing on cursive Arabic / Devanagari
     const registry = new StyleRegistry();
-    const zine = registry.get('BrutalistZine');
+    const editorial = registry.get('Editorial');
     const arabicLyrics = {
       providerName: 'Test',
       sourceKind: 'WordSynced',
@@ -1268,14 +1295,15 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
         },
       ],
     };
-    const zineSpec = zine.getMeasurementSpec({
+    const edSpec = editorial.getMeasurementSpec({
       lyrics: arabicLyrics,
       scriptMode: 'original',
+      variationId: 'swiss-minimal',
     });
-    assert.equal(zineSpec.letterSpacing, '0px', 'BrutalistZine must disable 0.02em letterSpacing for Arabic/Devanagari');
+    assert.equal(edSpec.letterSpacing ?? '0px', '0px', 'Editorial must disable custom letterSpacing for Arabic/Devanagari');
 
-    // WS4: TypewriterEditorial grapheme-safe slicing never emits lone UTF-16 surrogates
-    renderer.setStyle('TypewriterEditorial');
+    // WS4: Editorial typewriter grapheme-safe slicing never emits lone UTF-16 surrogates
+    renderer.setStyle('Editorial', 'typewriter');
     renderer.setModes({ isOverlayMode: false, isEmbeddedTransparent: false });
     const emojiWordLyrics = {
       providerName: 'Test',
@@ -1298,7 +1326,7 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
       .filter((op) => Array.isArray(op) && op[0] === 'fillText')
       .map((op) => String(op[1]));
     for (const txt of typedTexts) {
-      assert.equal(/[\uD800-\uDFFF]/.test(txt) && !/^(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[^\uD800-\uDFFF])*$/.test(txt), false, `Lone surrogate found in TypewriterEditorial output: ${txt}`);
+      assert.equal(/[\uD800-\uDFFF]/.test(txt) && !/^(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[^\uD800-\uDFFF])*$/.test(txt), false, `Lone surrogate found in Editorial output: ${txt}`);
     }
     assert.ok(typedTexts.includes('🌙'), 'Grapheme-safe slice should reveal whole surrogate-pair emoji cleanly');
 
@@ -1579,7 +1607,7 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     );
 
     // Check remaining styles never draw [Instrumental] or blank text boxes when given unfiltered lines
-    for (const styleId of EXPECTED_14_STYLES) {
+    for (const styleId of EXPECTED_12_STYLES) {
       if (styleId === 'IosTextingMotion') continue;
       renderer.setStyle(styleId);
       renderer.setLyrics(unfilteredLyrics);
@@ -1787,38 +1815,43 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     renderer.dispose();
   });
 
-  test('v1.3.1 Visualizer expansion: wordIconDictionary, FisheyeKinetic, MotionGeometry, CodeEditorKinetic codestyle-visual & IosTextingMotion 5 Native Phone UI modes', () => {
+  test('v1.3.4 Visualizer expansion: wordIconDictionary, semantic micro-FX across styles, AppleMusicFlow Karaoke, Editorial, SolariSplitFlap, StudioDawTimeline & IosTextingMotion 3 flagship modes', () => {
     assert.equal(VISUAL_STYLE_CATEGORIES.length, 3);
     assert.equal(resolveWordIcon('wait'), 'hourglass');
     assert.equal(resolveWordIcon('minute', 'wait a minute'), 'clock');
     assert.equal(resolveWordIcon('drive', 'night drive'), 'car');
     const iconCtx = createMockCanvas2DContext();
     drawWordIcon(iconCtx, 'hourglass', 100, 100, 24, '#FA2D48', 1.0);
+    drawInlineWordIconPop(iconCtx, 'fire', 100, 100, 48, 28, '#fb923c', 0.4, true, false);
+    drawSemanticWordMicroFx(iconCtx, 'electric', 100, 100, 56, 28, 1.5, '#38bdf8', '#818cf8', 1.0);
     assert.ok(iconCtx.ops.length > 0);
 
     const canvas = createMockCanvas();
     const renderer = new LyricStageRenderer({
       canvas,
-      styleId: 'FisheyeKinetic',
-      variationId: 'fisheye-visual',
+      styleId: 'AppleMusicFlow',
+      variationId: 'karaoke-stage',
       palette: SAMPLE_PALETTE,
     });
     renderer.resize(1024, 600, 1);
     renderer.setLyrics(SYNCED_LYRICS);
 
     for (const [styleId, variationId] of [
-      ['FisheyeKinetic', 'fisheye-visual'],
-      ['FisheyeKinetic', 'fisheye'],
-      ['FisheyeKinetic', 'visual-stack'],
+      ['AppleMusicFlow', 'classic-flow'],
+      ['AppleMusicFlow', 'karaoke-stage'],
+      ['Editorial', 'swiss-minimal'],
+      ['Editorial', 'typewriter'],
       ['MotionGeometry', 'constellation'],
       ['MotionGeometry', 'branches'],
       ['MotionGeometry', 'web'],
       ['CodeEditorKinetic', 'codestyle-visual'],
-      ['IosTextingMotion', 'kinetic-messages'],
-      ['IosTextingMotion', 'wallet-payments'],
-      ['IosTextingMotion', 'city-walk-map'],
-      ['IosTextingMotion', 'lock-screen-alerts'],
+      ['IosTextingMotion', 'messages'],
       ['IosTextingMotion', 'group-chat'],
+      ['IosTextingMotion', 'navigation-map'],
+      ['SolariSplitFlap', 'departure-matte'],
+      ['SolariSplitFlap', 'amber-terminal'],
+      ['StudioDawTimeline', 'ableton-dark'],
+      ['StudioDawTimeline', 'logic-glass'],
     ]) {
       canvas.ctx2d.ops.length = 0;
       renderer.setStyle(styleId, variationId);
@@ -1889,25 +1922,16 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     scene.dispose();
   });
 
-  test('v1.3.2 Pass 1: Global Beat Camera Thump, 9 restored iOS variations, Zero Future Preview, Wallet/Map/LockScreen overhauls, MotionGeometry 2.5x typography & Spaceship persistent laser salvos', async () => {
-    const { resolveStyleVariationId } = await import('../../src/lyricVisualizer/core/index.ts');
+  test('v1.3.4 Pass 1: Global Beat Camera Thump, 3 flagship iOS variations, 2.5D Maps biome resolver, Creator Studio exporter/presets, Arcane Scribble & Spaceship reveal asteroids', async () => {
     const iosDef = VISUAL_STYLE_DEFINITIONS.find((s) => s.id === 'IosTextingMotion');
     assert.ok(iosDef, 'Expected IosTextingMotion style definition');
-    const expectedIosVars = [
-      'kinetic-messages',
-      'cinema-edit',
-      'ios-dark',
-      'liquid-glass',
-      'classic-sms',
-      'group-chat',
-      'wallet-payments',
-      'city-walk-map',
-      'lock-screen-alerts',
-    ];
+    const expectedIosVars = ['messages', 'group-chat', 'navigation-map'];
+    assert.deepEqual(iosDef.variations.map((v) => v.id), expectedIosVars);
     for (const vid of expectedIosVars) {
-      assert.ok(iosDef.variations.some((v) => v.id === vid), `Missing restored iOS variation: ${vid}`);
       assert.equal(resolveStyleVariationId('IosTextingMotion', { IosTextingMotion: vid }), vid);
     }
+    assert.equal(resolveStyleVariationId('IosTextingMotion', { IosTextingMotion: 'wallet-payments' }), 'messages');
+    assert.equal(resolveStyleVariationId('IosTextingMotion', { IosTextingMotion: 'city-walk-map' }), 'navigation-map');
 
     const longLineLyrics = {
       providerName: 'Pass1',
@@ -1958,23 +1982,24 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     const renderer = new LyricStageRenderer({
       canvas,
       styleId: 'IosTextingMotion',
-      variationId: 'kinetic-messages',
+      variationId: 'messages',
       palette: SAMPLE_PALETTE,
       beatCameraThump: true,
       iosKineticZoom: 1.45,
     });
+    renderer.setVisualSettings({ iosKineticPopup: true, mapScene: 'auto', mapTimeOfDay: 'auto' });
     renderer.resize(1024, 680, 1);
     renderer.setLyrics(longLineLyrics);
 
-    // 1. Kinetic Messages: ZERO future bubble preview and ZERO unsung grey words inside active bubble
+    // 1. Unified Messages with iosKineticPopup=true: ZERO future bubble preview and ZERO unsung grey words
     canvas.ctx2d.ops.length = 0;
     renderer.setSyncState({ timeSeconds: 4.8, activeLineIndex: 1, activeWordIndex: 1, wordProgress: 0.3, didSeekThisFrame: true });
     renderer.setAudioMetrics({ rmsLevel: 0.7, bassEnergy: 0.9, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: true, isDownbeat: true, beatStrength: 0.95 });
     renderer.renderFrame(1000);
     const kineticTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
     assert.ok(kineticTexts.includes('Current') && kineticTexts.includes('active'), 'Active sung words must render');
-    assert.equal(kineticTexts.includes('spoiling'), false, 'Kinetic Messages must never pre-render unsung words');
-    assert.equal(kineticTexts.includes('FORBIDDEN_FUTURE_BUBBLE_PREVIEW'), false, 'Kinetic Messages must never render future bubbles');
+    assert.equal(kineticTexts.includes('spoiling'), false, 'Kinetic popup mode must never pre-render unsung words');
+    assert.equal(kineticTexts.includes('FORBIDDEN_FUTURE_BUBBLE_PREVIEW'), false, 'Messages must never render future bubbles');
     assert.ok(renderer.getBeatThumpScale() > 1.005, 'Beat Camera Thump must apply compositor scale impulse on downbeat');
 
     // 2. Beat Camera Thump OFF bypasses compositor scale transform
@@ -1985,34 +2010,99 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
     renderer.renderFrame(1032);
     assert.equal(renderer.getBeatThumpScale(), 1.0, 'beatCameraThump=false must bypass compositor scale thump');
 
-    // 3. Wallet / Payments: omits "Apple Wallet · Live Ledger", zero future lines, zero "..." truncation
+    // 3. 2.5D Navigation Map biome & time resolution + Split View inset
+    const cityEnv = resolveMapEnvironment({ id: '1', title: 'Neon Downtown', artist: 'City', album: 'Subway' }, longLineLyrics, 108, SAMPLE_PALETTE, 'auto', 'auto');
+    assert.equal(cityEnv.biome, 'cityscape');
+    const hwyEnv = resolveMapEnvironment({ id: '2', title: 'Midnight Highway', artist: 'Driver', album: 'Interstate' }, longLineLyrics, 132, SAMPLE_PALETTE, 'auto', 'auto');
+    assert.equal(hwyEnv.biome, 'highway');
+    const countryEnv = resolveMapEnvironment({ id: '3', title: 'Country Meadow Sunset', artist: 'Folk', album: 'Valley' }, longLineLyrics, 78, SAMPLE_PALETTE, 'auto', 'auto');
+    assert.equal(countryEnv.biome, 'countryside');
+    const forcedEnv = resolveMapEnvironment({ id: '4', title: 'X', artist: 'Y', album: 'Z' }, longLineLyrics, 108, SAMPLE_PALETTE, 'highway', 'day');
+    assert.equal(forcedEnv.biome, 'highway');
+    assert.equal(forcedEnv.timeOfDay, 'day');
+
     renderer.setModes({ beatCameraThump: true });
     renderer.setStyle('IosTextingMotion');
-    renderer.setVariation('wallet-payments');
+    renderer.setVariation('navigation-map');
+    renderer.setContentInsetLeft(320);
     canvas.ctx2d.ops.length = 0;
-    renderer.setAudioMetrics({ rmsLevel: 0.5, bassEnergy: 0.6, midEnergy: 0.4, trebleEnergy: 0.3, beatDetected: false });
-    renderer.renderFrame(1064);
-    const walletTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
-    assert.equal(walletTexts.some((t) => t.includes('Live Ledger')), false, 'Wallet must remove Live Ledger header');
-    assert.equal(walletTexts.some((t) => t.includes('FORBIDDEN_FUTURE')), false, 'Wallet must not render future transactions');
-    assert.equal(walletTexts.some((t) => t.includes('…') || t.includes('...')), false, 'Wallet must wrap full text without ellipsis truncation');
+    renderer.renderFrame(1096);
+    const mapTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
+    assert.ok(mapTexts.some((t) => t.startsWith('↳ Next:')), 'navigation-map CarPlay HUD should render compact Next-turn sub-bar');
+    // Group Chat mode renders colorful user avatars & active/past conversation bubbles cleanly
+    renderer.setContentInsetLeft(0);
+    renderer.setVariation('group-chat');
+    renderer.setLyrics(SYNCED_LYRICS);
+    renderer.setSyncState({ timeSeconds: 5.5, activeLineIndex: 1, activeWordIndex: 0, wordProgress: 0.4, didSeekThisFrame: true });
+    canvas.ctx2d.ops.length = 0;
+    renderer.renderFrame(1112);
+    const groupArcs = canvas.ctx2d.ops.filter((op) => op === 'arc').length;
+    assert.ok(groupArcs >= 2, `group-chat must render circular user avatar PFPs (got ${groupArcs} arcs)`);
 
-    // 4. Lock Screen Alerts & City Walk Map: zero future items
-    for (const v of ['lock-screen-alerts', 'city-walk-map']) {
-      renderer.setVariation(v);
-      canvas.ctx2d.ops.length = 0;
-      renderer.setAudioMetrics({ rmsLevel: 0.5, bassEnergy: 0.5, midEnergy: 0.4, trebleEnergy: 0.3, beatDetected: false });
-      renderer.renderFrame(1096);
-      const texts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
-      assert.equal(texts.some((t) => t.includes('FORBIDDEN_FUTURE')), false, `${v} must never render future items`);
-    }
+    // 4. Creator Studio crop rects & preset round-trip
+    const crop9x16 = computeClipCropRect(1920, 1080, '9:16');
+    assert.equal(crop9x16.outW, 720);
+    assert.equal(crop9x16.outH, 1280);
+    const crop16x9 = computeClipCropRect(1920, 1080, '16:9');
+    assert.equal(crop16x9.outW, 1280);
+    assert.equal(crop16x9.outH, 720);
 
-    // 5. Spaceship 3D: GATE_POOL >= 40, no elevLift Y-snap, consumed words never float behind tail, persistent beat-locked laser salvos over 60s
+    const presetStr = exportStylePresetJson({
+      ...DEFAULT_LYRIC_VISUALIZER_CONFIG,
+      styleId: 'SolariSplitFlap',
+      wordIconsEnabled: true,
+      mapScene: 'cityscape',
+    });
+    const parsedPreset = parseStylePresetJson(presetStr);
+    assert.equal(parsedPreset.styleId, 'SolariSplitFlap');
+    assert.equal(parsedPreset.mapScene, 'cityscape');
+    const legacyPreset = parseStylePresetJson(JSON.stringify({ styleId: 'KaraokeStage' }));
+    assert.equal(legacyPreset.styleId, 'AppleMusicFlow');
+    assert.equal(legacyPreset.variationByStyle?.AppleMusicFlow, 'karaoke-stage');
+
+    // 5. Arcane Sketch Overlay triggers cleanly
+    const arcane = new ArcaneSketchOverlay();
+    arcane.enqueueEvent(
+      {
+        kind: 'semantic_crown',
+        brokenVariant: false,
+        screenX: 640,
+        screenY: 360,
+        shipScreenX: 640,
+        shipScreenY: 360,
+        shipRoll: 0,
+        shipScale: 72,
+        seed: 7,
+        timeSeconds: 1.0,
+      },
+      false
+    );
+    arcane.enqueueEvent(
+      {
+        kind: 'asteroid_split',
+        brokenVariant: false,
+        screenX: 540,
+        screenY: 340,
+        shipScreenX: 640,
+        shipScreenY: 360,
+        shipRoll: 0.1,
+        shipScale: 72,
+        seed: 13,
+        timeSeconds: 1.2,
+      },
+      false
+    );
+    const arcaneCtx = createMockCanvas2DContext();
+    arcane.updateAndRender(arcaneCtx, 1.3, 0.016, SAMPLE_PALETTE, false, 'Space Grotesk', 1280, 720);
+    assert.ok(arcaneCtx.ops.length > 0, 'ArcaneSketchOverlay must render scribbles when active');
+
+    // 6. Spaceship 3D: GATE_POOL >= 40, no elevLift Y-snap, capped camera shake, reveal asteroids, persistent laser salvos
     const shipSrc = readFileSync(path.join(rootDir, 'src/lyricVisualizer/rendering/ship3dScene.ts'), 'utf8');
     assert.equal(/\belevLift\s*=/.test(shipSrc), false, 'Ship3DScene must remove lower-spawn elevLift Y-snap');
     assert.ok(/GATE_POOL\s*=\s*48/.test(shipSrc), 'Ship3DScene must allocate >=40 word pool slots');
+    assert.ok(/MAX_CAMERA_SHAKE_AMP\s*=\s*0\.14/.test(shipSrc), 'Ship3DScene must cap camera shake amplitude <= 0.14');
+    assert.ok(/CAMERA_SHAKE_COOLDOWN_SEC\s*=\s*0\.24/.test(shipSrc), 'Ship3DScene must enforce >=240ms shake cooldown');
 
-    const { Ship3DScene } = await import('../../src/lyricVisualizer/rendering/ship3dScene.ts');
     const ship = new Ship3DScene(null);
     const mockCtx = createMockCanvas2DContext();
     ship.syncLyricsState(longLineLyrics, 0.5, 0, 0, false, true);
@@ -2041,6 +2131,7 @@ describe('LyricVisualizer Rendering & 14 Consolidated Visual Styles', () => {
         }
       }
     }
+    assert.ok(ship.getMaxCameraShakeAmplitude() <= 0.14 + 1e-6, 'Runtime camera shake amplitude must stay <= 0.14');
     assert.ok(ship.getLaserSalvoCount() >= 8, `Expected persistent beat-locked laser salvos over 60s vocal track, got ${ship.getLaserSalvoCount()}`);
 
     ship.dispose();

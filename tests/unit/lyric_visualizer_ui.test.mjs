@@ -356,15 +356,23 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
 
     const store = useLyricVisualizerStore.getState();
 
-    // 6a. 14 Consolidated Visual Styles (including FisheyeKinetic & MotionGeometry), legacy migrations, & 8 Bundled Fonts
-    assert.strictEqual(VISUAL_STYLE_DEFINITIONS.length, 14);
+    // 6a. 12 Consolidated Visual Styles (including Editorial, SolariSplitFlap, StudioDawTimeline & MotionGeometry), legacy migrations, & 8 Bundled Fonts
+    assert.strictEqual(VISUAL_STYLE_DEFINITIONS.length, 12);
     assert.ok(
       VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'IosTextingMotion'),
       'VISUAL_STYLE_DEFINITIONS must include IosTextingMotion'
     );
     assert.ok(
-      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'FisheyeKinetic'),
-      'VISUAL_STYLE_DEFINITIONS must include FisheyeKinetic'
+      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'Editorial'),
+      'VISUAL_STYLE_DEFINITIONS must include Editorial'
+    );
+    assert.ok(
+      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'SolariSplitFlap'),
+      'VISUAL_STYLE_DEFINITIONS must include SolariSplitFlap'
+    );
+    assert.ok(
+      VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'StudioDawTimeline'),
+      'VISUAL_STYLE_DEFINITIONS must include StudioDawTimeline'
     );
     assert.ok(
       VISUAL_STYLE_DEFINITIONS.some((s) => s.id === 'MotionGeometry'),
@@ -384,6 +392,29 @@ describe('Wave 2 Ticket 4: LyricVisualizer Audio, Bridge, Store, OFL Fonts, Rout
     store.setStyleId('SpectrumRibbon');
     assert.strictEqual(useLyricVisualizerStore.getState().config.styleId, 'GenerativeParticleInk');
     assert.strictEqual(useLyricVisualizerStore.getState().config.variationByStyle?.GenerativeParticleInk, 'spectrum-ribbon');
+    store.setStyleId('FisheyeKinetic');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.styleId, 'AppleMusicFlow');
+    store.setStyleId('KaraokeStage');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.styleId, 'AppleMusicFlow');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.variationByStyle?.AppleMusicFlow, 'karaoke-stage');
+    store.setStyleId('TypewriterEditorial');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.styleId, 'Editorial');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.variationByStyle?.Editorial, 'typewriter');
+
+    store.setWordIconsEnabled(false);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.wordIconsEnabled, false);
+    store.setWordIconsEnabled(true);
+    store.setIosKineticPopup(true);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.iosKineticPopup, true);
+    store.setMapScene('highway');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.mapScene, 'highway');
+    store.setMapTimeOfDay('sunset');
+    assert.strictEqual(useLyricVisualizerStore.getState().config.mapTimeOfDay, 'sunset');
+    const exportedJson = store.exportStylePreset();
+    store.setMapScene('countryside');
+    assert.strictEqual(store.importStylePreset(exportedJson), true);
+    assert.strictEqual(useLyricVisualizerStore.getState().config.mapScene, 'highway');
+    assert.strictEqual(store.importStylePreset('{invalid-json'), false);
 
     store.setNowPlayingLayout('centered');
     assert.strictEqual(useLyricVisualizerStore.getState().config.nowPlayingLayout, 'lyrics-focus');

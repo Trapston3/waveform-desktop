@@ -8,6 +8,12 @@
 
 import type { StyleFrameContext } from '../../core/models';
 import { isBlankOrInstrumentalLineText } from '../../core/lrcParser';
+import { detectMagicWordEffect } from '../lyricSemantics';
+import {
+  drawInlineWordIconPop,
+  drawSemanticWordMicroFx,
+  resolveWordIcon,
+} from '../wordIconDictionary';
 import {
   clamp01,
   drawEmptyState,
@@ -484,6 +490,53 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
           ctx.shadowColor = isCurrent ? frame.palette.accentPrimary : 'rgba(15, 23, 42, 0.65)';
           ctx.shadowBlur = isCurrent ? 20 + frame.audio.bassEnergy * 10 : 6;
           ctx.fillText(word.text, wx, wy);
+
+          const wordW =
+            typeof (word as { width?: number }).width === 'number' && (word as { width: number }).width > 0
+              ? (word as { width: number }).width
+              : Math.max(20, word.text.length * fontSize * 0.52);
+
+          if (frame.wordIconsEnabled !== false && (isCurrent || isPastWord)) {
+            const iconId = resolveWordIcon(word.text);
+            if (iconId) {
+              drawInlineWordIconPop(
+                ctx,
+                iconId,
+                wx,
+                wy,
+                wordW,
+                fontSize,
+                isCurrent ? frame.palette.accentPrimary : '#f1f5f9',
+                frame.wordProgress,
+                isCurrent,
+                Boolean(frame.reduceMotion)
+              );
+            }
+          }
+
+          if (isCurrent && !frame.reduceMotion) {
+            const magic = detectMagicWordEffect(word.text);
+            if (magic) {
+              const motionScale =
+                frame.motionIntensity === 'vivid'
+                  ? 1.25
+                  : frame.motionIntensity === 'subtle'
+                  ? 0.65
+                  : 1.0;
+              drawSemanticWordMicroFx(
+                ctx,
+                magic,
+                wx,
+                wy,
+                wordW,
+                fontSize,
+                frame.timeSeconds,
+                frame.palette.accentPrimary,
+                frame.palette.accentSecondary,
+                motionScale
+              );
+            }
+          }
         }
         if (secondaryText) {
           const secFont = Math.max(12, Math.round(fontSize * 0.4));

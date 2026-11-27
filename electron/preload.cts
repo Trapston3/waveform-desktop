@@ -90,6 +90,10 @@ export interface ElectronAPI {
   lvSetSongOffset: (trackKey: string, offsetMs: number) => Promise<number>;
   lvRequestSnapshot: () => Promise<any>;
   lvSetKeepAwake: (enabled: boolean) => Promise<boolean>;
+  lvSaveClipFile: (payload: {
+    defaultName: string;
+    bytes: Uint8Array;
+  }) => Promise<{ canceled: boolean; filePath?: string; error?: string }>;
   lvBroadcastState: (payload: any) => void;
   onLvStateBroadcast: (callback: (payload: any) => void) => () => void;
   onLvPlatformEvent: (callback: (evt: { type: string; data?: any }) => void) => () => void;
@@ -254,6 +258,7 @@ const electronAPI: ElectronAPI = {
   lvSetSongOffset: (trackKey, offsetMs) => ipcRenderer.invoke('lv-set-song-offset', trackKey, offsetMs),
   lvRequestSnapshot: () => ipcRenderer.invoke('lv-request-snapshot'),
   lvSetKeepAwake: (enabled) => ipcRenderer.invoke('lv-set-keep-awake', Boolean(enabled)),
+  lvSaveClipFile: (payload) => ipcRenderer.invoke('lv:saveClipFile', payload),
   lvBroadcastState: (payload) => {
     ipcRenderer.send('lv-broadcast-state', payload);
   },

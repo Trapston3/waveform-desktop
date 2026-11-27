@@ -1,15 +1,16 @@
 // Style: IosTextingMotion
-// Verci-style dark iOS Messages bubbles, authentic iOS Tapback speech-bubble pills
-// with two trailing anchor circles & full-color glossy Canvas2D vector art,
-// precomputed kinetic "Magic Word" effects, deterministic contextual emojis,
-// typing indicator, rich embed cards, and 4 variations.
+// Authentic dark-mode iOS Native Design featuring 3 flagship variations:
+// 1. messages (unified kinetic popup + classic scrollable dark iMessage thread)
+// 2. group-chat (multi-speaker iMessage with circular iOS-gradient user avatar PFPs)
+// 3. navigation-map (2.5D Three.js Apple Maps driving engine + CarPlay Turn-by-Turn HUD)
 // Strict 60fps with ZERO per-frame heap allocations inside render().
 
 import type {
-  LyricLine,
   Lyrics,
   LyricsLayout,
   LyricsScriptMode,
+  MapBiomeKind,
+  MapTimeOfDay,
   MeasuredLineLayout,
   StyleFrameContext,
 } from '../../core/models';
@@ -28,6 +29,7 @@ import {
 } from '../styleInterface';
 import { drawAppleEmoji, preloadAppleEmojis } from '../iosEmojiRenderer';
 import { drawWordIcon, resolveWordIcon, type WordIconId } from '../wordIconDictionary';
+import { Maps3DScene } from '../maps3dScene';
 import {
   chooseSmartTapback,
   detectLyricEmbedCard,
@@ -57,21 +59,31 @@ const IOS_FONT_STACK = "'SF Pro Display', -apple-system, BlinkMacSystemFont, san
 type BubbleSide = 'left' | 'right';
 type PresentationMode = 'embed' | 'tapback' | 'inlineEmoji';
 
-const GROUP_CONTACTS = ['Maya', 'Jordan', 'Sam', 'Alex'] as const;
-const WALLET_BADGE_COLORS = ['#0A84FF', '#30D158', '#FF9F0A', '#BF5AF2', '#FA2D48'] as const;
-const WALLET_SUBTITLES = [
-  'Apple Pay · Approved',
-  'Express Transit · Tapped',
-  'Instant Transfer · Verified',
-  'Contactless · Approved',
+interface GroupParticipant {
+  readonly name: string;
+  readonly monogram: string;
+  readonly gradStart: string;
+  readonly gradEnd: string;
+  readonly labelColor: string;
+}
+
+const GROUP_PARTICIPANTS: readonly GroupParticipant[] = [
+  { name: 'Maya', monogram: 'M', gradStart: '#6366F1', gradEnd: '#818CF8', labelColor: '#818CF8' },
+  { name: 'Jordan', monogram: 'J', gradStart: '#FB7185', gradEnd: '#F43F5E', labelColor: '#FB7185' },
+  { name: 'Sam', monogram: 'S', gradStart: '#34D399', gradEnd: '#10B981', labelColor: '#34D399' },
+  { name: 'Alex', monogram: 'A', gradStart: '#FBBF24', gradEnd: '#F59E0B', labelColor: '#FBBF24' },
 ] as const;
-const MAP_DISTRICTS = ['SOHO', 'SHIBUYA', 'EMBARCADERO', 'SHOREDITCH', 'MIDTOWN', 'MARINA'] as const;
+
+const GROUP_AVATAR_GUTTER_PX = 38;
+const MAX_HERO_WORDS = 48;
 
 interface PrecomputedBubble {
   readonly lineIndex: number;
   readonly side: BubbleSide;
   readonly showTail: boolean;
+  readonly senderIdx: number;
   readonly senderName: string;
+  readonly isGroupClusterStart: boolean;
   readonly timestampLabel: string | null;
   readonly tapback: TapbackKind | null;
   readonly embedCard: LyricEmbedCard | null;
@@ -80,6 +92,7 @@ interface PrecomputedBubble {
   readonly presentationMode: PresentationMode;
   readonly wordEffects: readonly (MagicWordKind | null)[];
   readonly wordEmojis: readonly (string | null)[];
+  readonly wordIcons: readonly (WordIconId | null)[];
   readonly lineIconId: WordIconId;
   readonly secondaryText: string | null;
   readonly bubbleW: number;
@@ -90,7 +103,6 @@ interface PrecomputedBubble {
 }
 
 const IMSG_BLUE = '#0A84FF';
-const IMSG_GREEN = '#30D158';
 const IMSG_CHARCOAL = '#262629';
 const CARD_BG = '#1c1c1f';
 const CARD_BORDER = 'rgba(255, 255, 255, 0.14)';
@@ -152,6 +164,31 @@ function getCardHeight(card: LyricEmbedCard | null): number {
   if (card.kind === 'missedCall') return 42;
   if (card.kind === 'linkPreview') return 66;
   return 48;
+}
+
+function formatBiomeLabel(biome: MapBiomeKind): string {
+  if (biome === 'cityscape') return 'Cityscape';
+  if (biome === 'countryside') return 'Countryside';
+  return 'Highway';
+}
+
+function formatTimeOfDayLabel(tod: MapTimeOfDay): string {
+  if (tod === 'day') return 'Day';
+  if (tod === 'sunset') return 'Sunset';
+  return 'Night';
+}
+
+function getBiomeSpeedLimit(biome: MapBiomeKind): string {
+  if (biome === 'cityscape') return '35';
+  if (biome === 'countryside') return '45';
+  return '65';
+}
+
+function formatRemainingEta(seconds: number): string {
+  const safe = Math.max(0, Math.ceil(Number.isFinite(seconds) ? seconds : 0));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
 }
 
 function drawBubbleWithTail(
@@ -224,33 +261,36 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
   private lineToBubbleIdx: Int32Array = new Int32Array(0);
   private totalThreadHeight = 0;
 
+  // Lazy-initialized 2.5D Three.js Apple Maps engine (disposed cleanly in dispose())
+  private mapsScene: Maps3DScene | null = null;
+
   // Preallocated zero-GC scratch buffers
   private readonly sparkleAngles = new Float32Array([0, 1.0472, 2.0944, 3.1416, 4.1888, 5.236]);
   private readonly electricPtsX = new Float32Array(7);
   private readonly electricPtsY = new Float32Array(7);
-  private readonly wrapLinesScratch: string[] = [];
+  private readonly heroWordX = new Float32Array(MAX_HERO_WORDS);
+  private readonly heroWordY = new Float32Array(MAX_HERO_WORDS);
+  private readonly heroWordW = new Float32Array(MAX_HERO_WORDS);
+  private readonly heroWordHasIcon = new Uint8Array(MAX_HERO_WORDS);
 
   private scrollY = 0;
   private scrollVel = 0;
-  private mapCamX = 0;
-  private mapCamY = 0;
-  private mapCamInit = false;
   private lastKnownActiveIdx = -1;
   private gapShiftPx = 0;
   private gapSplitBubbleIdx = -1;
   private lastRenderTimeSec = 0;
   private initialized = false;
 
+  /**
+   * Maps strictly 3 flagship variations, safely migrating all legacy variation IDs:
+   * - 0: 'messages' (default — unifies kinetic-messages, cinema-edit, ios-dark, liquid-glass, classic-sms)
+   * - 1: 'group-chat'
+   * - 2: 'navigation-map' (also accepts legacy 'city-walk-map')
+   */
   getVariationIndex(variationId: string): number {
-    if (variationId === 'liquid-glass') return 1;
-    if (variationId === 'cinema-edit') return 2;
-    if (variationId === 'classic-sms') return 3;
-    if (variationId === 'ios-dark') return 4;
-    if (variationId === 'wallet-payments') return 10;
-    if (variationId === 'city-walk-map') return 11;
-    if (variationId === 'lock-screen-alerts') return 12;
-    if (variationId === 'group-chat') return 13;
-    return 0; // 'kinetic-messages' (default)
+    if (variationId === 'group-chat') return 1;
+    if (variationId === 'navigation-map' || variationId === 'city-walk-map') return 2;
+    return 0; // 'messages' (and legacy migrations)
   }
 
   getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
@@ -275,41 +315,20 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     this.totalThreadHeight = 0;
     this.scrollY = 0;
     this.scrollVel = 0;
-    this.mapCamX = 0;
-    this.mapCamY = 0;
-    this.mapCamInit = false;
     this.lastKnownActiveIdx = -1;
     this.gapShiftPx = 0;
     this.gapSplitBubbleIdx = -1;
     this.lastRenderTimeSec = 0;
     this.initialized = false;
+    this.mapsScene?.reset();
   }
 
-  private wrapTextIntoScratch(
-    ctx: CanvasRenderingContext2D,
-    text: string,
-    maxWidth: number
-  ): string[] {
-    this.wrapLinesScratch.length = 0;
-    const clean = text.trim();
-    if (!clean) {
-      this.wrapLinesScratch.push('');
-      return this.wrapLinesScratch;
+  dispose(): void {
+    if (this.mapsScene) {
+      this.mapsScene.dispose();
+      this.mapsScene = null;
     }
-    const words = clean.split(/\s+/);
-    let current = '';
-    for (let i = 0; i < words.length; i++) {
-      const w = words[i];
-      const next = current ? `${current} ${w}` : w;
-      if (ctx.measureText(next).width <= maxWidth || !current) {
-        current = next;
-      } else {
-        this.wrapLinesScratch.push(current);
-        current = w;
-      }
-    }
-    if (current) this.wrapLinesScratch.push(current);
-    return this.wrapLinesScratch;
+    this.reset();
   }
 
   private ensurePrecomputed(
@@ -367,7 +386,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     let consecutiveSameSide = 1;
     let cursorY = 0;
 
-    // Pass 1: reliable 2-person alternation (#262629 left / #0A84FF right), embed cards, timestamps
+    // Pass 1: reliable alternation (#262629 left / #0A84FF right), embed cards, timestamps
     const sides: BubbleSide[] = new Array(nbCount);
     const cards: (LyricEmbedCard | null)[] = new Array(nbCount);
     const timestamps: (string | null)[] = new Array(nbCount);
@@ -382,7 +401,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       } else {
         const prev = lyrics.lines[nonBlankIndices[bIdx - 1]];
         const prevVocalEnd =
-          prev.words.length > 0 ? Math.min(prev.endSeconds, prev.words[prev.words.length - 1].endSeconds) : prev.endSeconds;
+          prev.words.length > 0
+            ? Math.min(prev.endSeconds, prev.words[prev.words.length - 1].endSeconds)
+            : prev.endSeconds;
         const gap = line.startSeconds - prevVocalEnd;
         const prevTrim = prev.text.trim();
         const prevEndedPrompt = prevTrim.endsWith('?') || prevTrim.endsWith('!');
@@ -417,7 +438,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
     }
 
-    // Pass 2: compute bubble geometry, 15 Magic Word effects, weighted semantic emojis, and vertical layout
+    // Pass 2: compute bubble geometry, Magic Word effects, semantic emojis, word icons, and Group Chat participants
+    let currentLeftSenderIdx = trackSeed % GROUP_PARTICIPANTS.length;
+
     for (let bIdx = 0; bIdx < nbCount; bIdx++) {
       const lineIdx = nonBlankIndices[bIdx];
       const line = lyrics.lines[lineIdx];
@@ -425,6 +448,20 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       const resolved = resolveDisplayLine(line, scriptMode, this.id);
       const secondaryText = measured.secondaryText ?? resolved.secondaryText;
       const side = sides[bIdx];
+
+      const prevLineEnd = bIdx > 0 ? lyrics.lines[nonBlankIndices[bIdx - 1]].endSeconds : -99;
+      const prevSameSpeaker =
+        bIdx > 0 &&
+        sides[bIdx - 1] === side &&
+        line.startSeconds - prevLineEnd <= 0.55 &&
+        !timestamps[bIdx];
+      const isGroupClusterStart = side === 'left' && !prevSameSpeaker;
+      if (isGroupClusterStart && bIdx > 0) {
+        currentLeftSenderIdx = (currentLeftSenderIdx + 1) % GROUP_PARTICIPANTS.length;
+      }
+      const senderIdx = currentLeftSenderIdx;
+      const senderName = GROUP_PARTICIPANTS[senderIdx].name;
+
       const nextLineStart =
         bIdx + 1 < nbCount ? lyrics.lines[nonBlankIndices[bIdx + 1]].startSeconds : Number.POSITIVE_INFINITY;
       const nextSameSpeaker =
@@ -440,10 +477,22 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       const wordCount = measured.words.length;
       const wordEffects: (MagicWordKind | null)[] = new Array(wordCount);
       const wordEmojis: (string | null)[] = new Array(wordCount);
+      const wordIcons: (WordIconId | null)[] = new Array(wordCount);
+      let lineIconId: WordIconId = 'music';
+      let iconCountInLine = 0;
+
       for (let w = 0; w < wordCount; w++) {
         const wText = measured.words[w].text;
         wordEffects[w] = detectMagicWordEffect(wText);
         wordEmojis[w] = resolveContextualEmoji(wText, trackSeed + bIdx * 31 + w * 17);
+        const iconHit = resolveWordIcon(wText, line.text);
+        if (iconHit && iconCountInLine < 2) {
+          wordIcons[w] = iconHit;
+          if (lineIconId === 'music') lineIconId = iconHit;
+          iconCountInLine++;
+        } else {
+          wordIcons[w] = null;
+        }
       }
 
       const semanticText = resolved.primaryText || line.text;
@@ -468,7 +517,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       let tapback = chooseSmartTapback(line, bIdx, side, trackSeed);
       const card = cards[bIdx];
 
-      // Deterministically alternate presentation across lines: Embed Card, Tapback Reaction, Inline Suffix
       const modeSlot = (bIdx + (trackSeed % 3)) % 3;
       let presentationMode: PresentationMode = 'tapback';
       let inlineEmoji: string | null = null;
@@ -508,23 +556,13 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       const cardGap = cardH > 0 ? 6 : 0;
       const rowTotalH = bubbleH + cardGap + cardH;
 
-      let lineIconId: WordIconId = 'music';
-      const wordsSplit = line.text.split(/\s+/);
-      for (let wi = 0; wi < wordsSplit.length; wi++) {
-        const hit = resolveWordIcon(wordsSplit[wi], line.text);
-        if (hit) {
-          lineIconId = hit;
-          break;
-        }
-      }
-      const senderName =
-        GROUP_CONTACTS[(bIdx + (trackSeed % GROUP_CONTACTS.length)) % GROUP_CONTACTS.length];
-
       result[bIdx] = {
         lineIndex: lineIdx,
         side,
         showTail,
+        senderIdx,
         senderName,
+        isGroupClusterStart,
         timestampLabel: timestamps[bIdx],
         tapback,
         embedCard: card,
@@ -533,6 +571,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         presentationMode,
         wordEffects,
         wordEmojis,
+        wordIcons,
         lineIconId,
         secondaryText,
         bubbleW,
@@ -542,7 +581,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         centerY: cursorY + rowTotalH * 0.5,
       };
 
-      const nextSpacing = showTail ? 16 : 6;
+      const nextSpacing = showTail ? 18 : 6;
       cursorY += rowTotalH + nextSpacing;
     }
 
@@ -558,6 +597,65 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     return 1.0;
   }
 
+  /**
+   * Draws a circular iOS-gradient user avatar PFP beside left-side bubbles in Group Chat.
+   */
+  private drawGroupAvatarPfp(
+    ctx: CanvasRenderingContext2D,
+    participant: GroupParticipant,
+    cx: number,
+    cy: number,
+    radius: number,
+    alpha: number,
+    isActive: boolean
+  ): void {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Circular iOS gradient fill
+    const grad = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
+    grad.addColorStop(0, participant.gradStart);
+    grad.addColorStop(1, participant.gradEnd);
+
+    if (isActive) {
+      ctx.shadowColor = participant.gradStart;
+      ctx.shadowBlur = 10;
+    }
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Crisp iOS glossy specular rim
+    ctx.strokeStyle = isActive ? 'rgba(255, 255, 255, 0.52)' : 'rgba(255, 255, 255, 0.24)';
+    ctx.lineWidth = isActive ? 1.5 : 1;
+    ctx.stroke();
+
+    // Subtle minimalist user silhouette backdrop clipped inside avatar circle
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius - 0.6, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
+    ctx.beginPath();
+    ctx.arc(cx, cy - radius * 0.2, radius * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy + radius * 0.85, radius * 0.68, Math.PI, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Crisp white SF Pro Display monogram glyph
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${Math.round(radius * 0.98)}px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(participant.monogram, cx, cy + 0.5);
+
+    ctx.restore();
+  }
+
   private drawTapbackBadge(
     ctx: CanvasRenderingContext2D,
     tapback: TapbackKind,
@@ -567,10 +665,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     bubbleW: number,
     rowAlpha: number,
     popProgress: number,
-    variationIdx: number,
     motionScale: number
   ): void {
-    // Authentic iOS Tapback Speech-Bubble Pill overlapping top corner of message bubble
     const pillW = 32;
     const pillH = 28;
     const tapX = side === 'right' ? bx - 10 : bx + bubbleW - 22;
@@ -587,16 +683,10 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     const isBang = tapback === '‼️' || tapback === '!!';
     const isQuestion = tapback === '❓' || tapback === '?';
 
-    const pillFill = isHeart
-      ? '#2C2C2E'
-      : side === 'right'
-      ? '#2C2C2E'
-      : variationIdx === 3
-      ? IMSG_GREEN
-      : IMSG_BLUE;
-    const glassBorder = side === 'right' || isHeart ? 'rgba(255, 255, 255, 0.24)' : 'rgba(147, 197, 253, 0.45)';
+    const pillFill = isHeart || side === 'right' ? '#2C2C2E' : IMSG_BLUE;
+    const glassBorder =
+      side === 'right' || isHeart ? 'rgba(255, 255, 255, 0.24)' : 'rgba(147, 197, 253, 0.45)';
 
-    // Staggered trailing anchor dots (dot2 nearest bubble corner pops first, then dot1)
     const dot1X = side === 'right' ? tapX + pillW - 5 : tapX + 5;
     const dot1Y = tapY + pillH - 1;
     const dot2X = side === 'right' ? dot1X + 4.5 : dot1X - 4.5;
@@ -631,7 +721,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.translate(-cx, -cy);
     }
 
-    // Subtle drop shadow + main Tapback speech-bubble pill
     ctx.shadowColor = 'rgba(0, 0, 0, 0.48)';
     ctx.shadowBlur = 10;
     drawRoundedRectPath(ctx, tapX, tapY, pillW, pillH, 14);
@@ -639,7 +728,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Dark cutout rim + frosted glass inner rim
     ctx.strokeStyle = '#09090d';
     ctx.lineWidth = 2;
     ctx.stroke();
@@ -649,7 +737,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // Crisp Apple glossy emoji or typography inside pill ('!!' & '?' stay crisp text)
     if (isBang) {
       const bangGrad = ctx.createLinearGradient(cx, tapY + 4, cx, tapY + pillH - 4);
       bangGrad.addColorStop(0, '#ffffff');
@@ -672,7 +759,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       drawAppleEmoji(ctx, tapback, cx, cy + 0.5, 17);
     }
 
-    // Radial sparkle burst during active spring entrance (0 allocations)
     if (motionScale > 0 && animP > 0.16 && animP < 0.88) {
       const burstP = (animP - 0.16) / 0.72;
       const burstAlpha = rowAlpha * (1 - burstP) * 0.9;
@@ -745,7 +831,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
     } else if (kind === 'shiny') {
       const sweep =
-        motionScale === 0 ? 0.5 : (t * 0.95 + wordIdx * 0.23) - Math.floor(t * 0.95 + wordIdx * 0.23);
+        motionScale === 0 ? 0.5 : t * 0.95 + wordIdx * 0.23 - Math.floor(t * 0.95 + wordIdx * 0.23);
       const bandCenter = Math.max(0.08, Math.min(0.92, sweep));
       const grad = ctx.createLinearGradient(wx, wy, wx + safeW, wy + safeH * 0.35);
       grad.addColorStop(0, '#fcd34d');
@@ -812,7 +898,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.fillText(text, wx, wy);
       ctx.shadowBlur = 0;
 
-      // Preallocated jagged lightning arc underneath word (0 allocations)
       const jitter = motionScale === 0 ? 0 : Math.sin(t * 28 + wordIdx * 2.1);
       for (let p = 0; p < 7; p++) {
         this.electricPtsX[p] = wx + (safeW * p) / 6;
@@ -874,8 +959,10 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.lineTo(wx + safeW * 0.46, wy + safeH * 0.95);
       ctx.stroke();
     } else if (kind === 'glitch' || kind === 'impact') {
-      const jitter = motionScale === 0 ? 1.4 : Math.sin(t * 36 + wordIdx * 3.1) * 2.2 * Math.min(1.3, motionScale);
-      const jitterY = motionScale === 0 ? 0 : Math.cos(t * 29 + wordIdx * 2.3) * 1.1 * Math.min(1.3, motionScale);
+      const jitter =
+        motionScale === 0 ? 1.4 : Math.sin(t * 36 + wordIdx * 3.1) * 2.2 * Math.min(1.3, motionScale);
+      const jitterY =
+        motionScale === 0 ? 0 : Math.cos(t * 29 + wordIdx * 2.3) * 1.1 * Math.min(1.3, motionScale);
       ctx.globalAlpha = baseAlpha * 0.65;
       ctx.fillStyle = '#00f0ff';
       ctx.fillText(text, wx - Math.abs(jitter), wy + jitterY);
@@ -907,7 +994,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.fillStyle = '#e2e8f0';
       ctx.fillText(text, wx, wy + dropY);
     } else if (kind === 'spin') {
-      const ang = motionScale === 0 ? 0.08 : Math.sin(t * 5.5 + wordIdx) * 0.14 * Math.min(1.2, motionScale);
+      const ang =
+        motionScale === 0 ? 0.08 : Math.sin(t * 5.5 + wordIdx) * 0.14 * Math.min(1.2, motionScale);
       const cx = wx + safeW * 0.5;
       const cy = wy + safeH * 0.5;
       ctx.translate(cx, cy);
@@ -945,7 +1033,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.globalAlpha = baseAlpha * 0.9;
       ctx.fillText(text, wx, wy);
     } else {
-      // whisper / ghost: translucent ethereal alpha/glow shimmer
       const ghostAlpha =
         motionScale === 0 ? 0.72 : 0.52 + 0.36 * (0.5 + 0.5 * Math.sin(t * 3.4 + wordIdx * 1.5));
       const floatX = motionScale === 0 ? 0 : Math.sin(t * 2.2 + wordIdx) * 1.8;
@@ -1171,7 +1258,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // Animated bobbing musical note badge on left
     const noteBob = motionScale === 0 ? 0 : Math.sin(t * 4.5) * 2.5 * Math.min(1.2, motionScale);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1179,7 +1265,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.fillStyle = IMSG_BLUE;
     ctx.fillText('♪', x + 20, y + h * 0.5 + noteBob);
 
-    // 14-bar iOS Voice Note FFT waveform lighting left-to-right dynamically
     const barsX = x + 36;
     const barCount = 14;
     const step = 8.4;
@@ -1204,7 +1289,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.fill();
     }
 
-    // Trailing note indicator
     const note2Bob = motionScale === 0 ? 0 : Math.cos(t * 4.5 + 1.2) * 2.2 * Math.min(1.2, motionScale);
     ctx.fillStyle = '#94a3b8';
     ctx.font = `600 11px ${IOS_FONT_STACK}`;
@@ -1266,7 +1350,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     y: number,
     frame: StyleFrameContext,
     motionScale: number,
-    variationIdx: number,
     alpha = 1.0
   ): void {
     const w = 68;
@@ -1283,8 +1366,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.translate(-cx, -cy);
 
     drawBubbleWithTail(ctx, x, y, w, h, 18, side, true);
-    ctx.fillStyle =
-      side === 'right' ? (variationIdx === 3 ? IMSG_GREEN : IMSG_BLUE) : IMSG_CHARCOAL;
+    ctx.fillStyle = side === 'right' ? IMSG_BLUE : IMSG_CHARCOAL;
     ctx.fill();
 
     for (let d = 0; d < 3; d++) {
@@ -1300,6 +1382,399 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.restore();
   }
 
+  // -------------------------------------------------------------------------
+  // Variation 3: 2.5D Apple Maps Driving Mode + CarPlay Turn-by-Turn HUD
+  // -------------------------------------------------------------------------
+
+  private renderNavigationMap(
+    ctx: CanvasRenderingContext2D,
+    frame: StyleFrameContext,
+    lyrics: Lyrics | null,
+    layout: LyricsLayout | null,
+    width: number,
+    height: number,
+    focalLeft: number,
+    focalWidth: number,
+    activeIdx: number,
+    motionScale: number
+  ): void {
+    if (!this.mapsScene) {
+      this.mapsScene = new Maps3DScene();
+    }
+
+    const scenePref = frame.mapScene ?? 'auto';
+    const timePref = frame.mapTimeOfDay ?? 'auto';
+    const env = this.mapsScene.render(
+      ctx,
+      width,
+      height,
+      focalLeft,
+      focalWidth,
+      frame.timeSeconds,
+      frame.deltaSeconds,
+      frame.audio,
+      frame.palette,
+      frame.trackMetadata,
+      lyrics,
+      scenePref,
+      timePref,
+      frame.reduceMotion,
+      frame.didSeekThisFrame
+    );
+
+    const isDay = env.timeOfDay === 'day';
+    const bpmVal =
+      typeof frame.audio.estimatedBpm === 'number' &&
+      Number.isFinite(frame.audio.estimatedBpm) &&
+      frame.audio.estimatedBpm > 40
+        ? Math.round(frame.audio.estimatedBpm)
+        : typeof frame.trackMetadata?.bpm === 'number' &&
+          Number.isFinite(frame.trackMetadata.bpm) &&
+          frame.trackMetadata.bpm > 40
+        ? Math.round(frame.trackMetadata.bpm)
+        : 118;
+
+    const beatLift =
+      motionScale > 0 && frame.audio.isDownbeat
+        ? 1.0
+        : motionScale > 0 && frame.audio.beatDetected
+        ? 0.65
+        : 0.0;
+
+    // 1. Top-Right Speed Limit Sign — strictly clear of top-right window controls (top >= 72px)
+    const signW = 58;
+    const signH = 74;
+    const signX = focalLeft + focalWidth - signW - 20;
+    const signY = 74;
+
+    ctx.save();
+    drawRoundedRectPath(ctx, signX, signY, signW, signH, 9);
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.36)';
+    ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+
+    drawRoundedRectPath(ctx, signX + 3, signY + 3, signW - 6, signH - 6, 6);
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#0f172a';
+    ctx.font = `800 9.5px ${IOS_FONT_STACK}`;
+    ctx.fillText('SPEED', signX + signW * 0.5, signY + 15);
+    ctx.fillText('LIMIT', signX + signW * 0.5, signY + 26);
+    ctx.font = `800 28px ${IOS_FONT_STACK}`;
+    ctx.fillText(getBiomeSpeedLimit(env.biome), signX + signW * 0.5, signY + 52);
+    ctx.restore();
+
+    // 2. Single-Source Apple Maps / CarPlay Turn-by-Turn Hero Card (upper-left / upper-center of focal rect)
+    const maxCardW = Math.max(240, focalWidth - signW - 56);
+    const cardW = Math.min(548, maxCardW);
+    const cardX =
+      focalLeft +
+      Math.max(20, Math.min(36, Math.round((focalWidth - signW - 24 - cardW) * 0.34)));
+    const cardY = 22;
+
+    const stripH = 34;
+    const subBarH = 28;
+    const bodyPadX = 20;
+    const bodyPadY = 14;
+    const bodyInnerW = Math.max(180, cardW - bodyPadX * 2);
+
+    const hasBubbles = this.bubbles.length > 0 && lyrics !== null && layout !== null;
+    const clampedIdx = hasBubbles ? Math.max(0, Math.min(this.bubbles.length - 1, activeIdx)) : -1;
+    const activeBubble = clampedIdx >= 0 ? this.bubbles[clampedIdx] : null;
+    const activeMeasured =
+      activeBubble && layout ? layout.lines[activeBubble.lineIndex] : null;
+    const activeLineObj =
+      activeBubble && lyrics ? lyrics.lines[activeBubble.lineIndex] : null;
+    const nextBubble =
+      clampedIdx >= 0 && clampedIdx + 1 < this.bubbles.length ? this.bubbles[clampedIdx + 1] : null;
+    const nextLineText =
+      nextBubble && layout ? layout.lines[nextBubble.lineIndex].text : null;
+
+    const wordIconsEnabled = frame.wordIconsEnabled !== false;
+    const heroFontPx = Math.max(
+      18,
+      Math.min(26, Math.round((layout?.fontSizePx ?? 24) * 1.12))
+    );
+    const heroLineStep = Math.round(heroFontPx * 1.32);
+    const spaceW = Math.round(heroFontPx * 0.32);
+    const iconSlotW = Math.round(heroFontPx * 1.05);
+
+    // Pre-layout hero words into pre-allocated scratch buffers (ZERO per-frame heap allocations)
+    ctx.font = `700 ${heroFontPx}px ${IOS_FONT_STACK}`;
+    let wordCount = 0;
+    let totalHeroLines = 1;
+
+    if (activeBubble && activeMeasured && activeMeasured.words.length > 0) {
+      wordCount = Math.min(MAX_HERO_WORDS, activeMeasured.words.length);
+      let curX = 0;
+      let curLine = 0;
+      for (let w = 0; w < wordCount; w++) {
+        const wText = activeMeasured.words[w].text;
+        const measuredW = ctx.measureText(wText).width;
+        const safeW = Number.isFinite(measuredW) ? measuredW : wText.length * heroFontPx * 0.55;
+        const hasIcon =
+          wordIconsEnabled && w < activeBubble.wordIcons.length && activeBubble.wordIcons[w] !== null
+            ? 1
+            : 0;
+        const totalItemW = safeW + (hasIcon ? iconSlotW : 0);
+
+        if (curX > 0 && curX + totalItemW > bodyInnerW) {
+          curLine++;
+          curX = 0;
+        }
+        this.heroWordX[w] = curX;
+        this.heroWordY[w] = curLine * heroLineStep;
+        this.heroWordW[w] = safeW;
+        this.heroWordHasIcon[w] = hasIcon;
+        curX += totalItemW + spaceW;
+      }
+      totalHeroLines = Math.max(1, curLine + 1);
+    }
+
+    const bodyH = Math.max(58, totalHeroLines * heroLineStep + bodyPadY * 2 - 4);
+    const totalCardH = stripH + bodyH + subBarH;
+
+    if (activeBubble) {
+      frame.recordHitRect?.(activeBubble.lineIndex, cardX, cardY, cardW, totalCardH);
+    }
+
+    ctx.save();
+    // Outer card shadow + glass container
+    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 20);
+    ctx.fillStyle = isDay ? 'rgba(18, 26, 38, 0.90)' : 'rgba(14, 19, 30, 0.90)';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.48)';
+    ctx.shadowBlur = 24;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Clip interior sections neatly to rounded card
+    ctx.save();
+    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 20);
+    ctx.clip();
+
+    // 2a. Top Lane-Guidance Strip (Authentic Apple Maps Emerald Green Header)
+    const stripGrad = ctx.createLinearGradient(cardX, cardY, cardX + cardW, cardY + stripH);
+    if (isDay) {
+      stripGrad.addColorStop(0, '#15803d');
+      stripGrad.addColorStop(1, '#166534');
+    } else {
+      stripGrad.addColorStop(0, '#0f5132');
+      stripGrad.addColorStop(1, '#114232');
+    }
+    ctx.fillStyle = stripGrad;
+    ctx.fillRect(cardX, cardY, cardW, stripH);
+
+    // Beat-pulsing lane arrows: ↑  ↑  ↑  ↱
+    const laneCy = cardY + stripH * 0.5;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const baseLaneAlpha = 0.46 + beatLift * 0.16;
+    ctx.font = `700 15px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = `rgba(255, 255, 255, ${baseLaneAlpha.toFixed(2)})`;
+    ctx.fillText('↑', cardX + 26, laneCy);
+    ctx.fillText('↑', cardX + 46, laneCy);
+    ctx.fillText('↑', cardX + 66, laneCy);
+
+    // Active turn arrow pulsing on downbeat / beat
+    const turnScale = 1.0 + beatLift * 0.16;
+    ctx.save();
+    ctx.translate(cardX + 90, laneCy);
+    ctx.scale(turnScale, turnScale);
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = 'rgba(255, 255, 255, 0.72)';
+    ctx.shadowBlur = 6 + beatLift * 8;
+    ctx.font = `800 17px ${IOS_FONT_STACK}`;
+    ctx.fillText('↱', 0, 0);
+    ctx.restore();
+
+    // Right route / BPM badge inside top lane strip
+    const exitNumber = 41 + Math.max(0, clampedIdx) * 2;
+    const badgeLabel = `EXIT ${exitNumber} · ${bpmVal} BPM`;
+    ctx.font = `700 11px ${IOS_FONT_STACK}`;
+    const badgeW = Math.min(168, Math.max(114, ctx.measureText(badgeLabel).width + 20));
+    const badgeX = cardX + cardW - badgeW - 12;
+    const badgeY = cardY + 6;
+    drawRoundedRectPath(ctx, badgeX, badgeY, badgeW, stripH - 12, 11);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.28)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ecfdf5';
+    ctx.fillText(badgeLabel, badgeX + badgeW * 0.5, laneCy + 0.5, badgeW - 10);
+
+    // 2b. Hero Body: Word-by-word bold SF Pro Display active lyric reveal (+ optional wordIconDictionary pop)
+    const bodyTopY = cardY + stripH;
+    const unsynced = isUnsyncedLyrics(frame) || frame.activeWordIndex < 0;
+    const inGap =
+      !activeBubble ||
+      !activeMeasured ||
+      !activeLineObj ||
+      frame.activeLineIndex < 0 ||
+      Boolean(frame.isInstrumentalGap);
+
+    if (inGap || wordCount === 0) {
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = `700 19px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = 'rgba(241, 245, 249, 0.85)';
+      const cruiseTitle = frame.trackMetadata?.title
+        ? `Cruising · ${frame.trackMetadata.title}`
+        : 'Cruising · Following Route';
+      ctx.fillText(cruiseTitle, cardX + bodyPadX, bodyTopY + bodyH * 0.5, bodyInnerW);
+    } else if (activeBubble && activeMeasured) {
+      const textStartX = cardX + bodyPadX;
+      const textStartY = bodyTopY + bodyPadY;
+      ctx.font = `700 ${heroFontPx}px ${IOS_FONT_STACK}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+
+      for (let w = 0; w < wordCount; w++) {
+        const wObj = activeMeasured.words[w];
+        const wx = textStartX + this.heroWordX[w];
+        const wy = textStartY + this.heroWordY[w];
+        const isCurrent = !unsynced && w === frame.activeWordIndex;
+        const isPassed = unsynced || w < frame.activeWordIndex;
+
+        if (isCurrent) {
+          const p = clamp01(frame.wordProgress);
+          const liftY = motionScale > 0 ? -2.4 * Math.sin(p * Math.PI) * Math.min(1.2, motionScale) : 0;
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = 'rgba(56, 189, 248, 0.68)';
+          ctx.shadowBlur = 10;
+          ctx.fillText(wObj.text, wx, wy + liftY);
+          ctx.shadowBlur = 0;
+        } else if (isPassed) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(wObj.text, wx, wy);
+        } else {
+          ctx.fillStyle = 'rgba(226, 232, 240, 0.34)';
+          ctx.fillText(wObj.text, wx, wy);
+        }
+
+        // Subtle wordIconDictionary icon pop beside semantic words when enabled
+        if (this.heroWordHasIcon[w] === 1 && (isCurrent || isPassed)) {
+          const iconId = activeBubble.wordIcons[w];
+          if (iconId) {
+            const icx = wx + this.heroWordW[w] + iconSlotW * 0.48;
+            const icy = wy + heroFontPx * 0.54;
+            const popS =
+              isCurrent && motionScale > 0
+                ? Math.max(0.5, easeOutBack(clamp01(frame.wordProgress * 2.4)))
+                : 1.0;
+            ctx.save();
+            ctx.translate(icx, icy);
+            ctx.scale(popS, popS);
+            drawWordIcon(
+              ctx,
+              iconId,
+              0,
+              0,
+              Math.round(heroFontPx * 0.72),
+              isCurrent ? '#38bdf8' : '#93c5fd',
+              isCurrent ? 0.96 : 0.78
+            );
+            ctx.restore();
+          }
+        }
+      }
+    }
+
+    // 2c. Slim Bottom Sub-Bar (↳ Next: <upcoming line>)
+    const subY = bodyTopY + bodyH;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.30)';
+    ctx.fillRect(cardX, subY, cardW, subBarH);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cardX, subY);
+    ctx.lineTo(cardX + cardW, subY);
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = `600 12px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = 'rgba(203, 213, 225, 0.84)';
+    const nextLabel = nextLineText
+      ? `↳ Next: ${nextLineText}`
+      : '↳ Arriving at Destination';
+    ctx.fillText(nextLabel, cardX + bodyPadX, subY + subBarH * 0.5 + 0.5, cardW - bodyPadX * 2);
+
+    ctx.restore(); // end interior card clip
+
+    // Specular outer rim on CarPlay Hero Card
+    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 20);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+
+    // 3. Bottom CarPlay ETA Telemetry Pill inside focal rect
+    const lastLineEnd =
+      lyrics && lyrics.lines.length > 0 ? lyrics.lines[lyrics.lines.length - 1].endSeconds : 180;
+    const totalDurSec = Math.max(frame.timeSeconds, lastLineEnd, 45);
+    const remainingSec = Math.max(0, totalDurSec - frame.timeSeconds);
+    const routeProgress = clamp01(frame.timeSeconds / Math.max(1, totalDurSec));
+
+    const telemetryText = `${formatRemainingEta(remainingSec)} left · ${bpmVal} BPM · ${formatBiomeLabel(
+      env.biome
+    )} · ${formatTimeOfDayLabel(env.timeOfDay)}`;
+
+    ctx.save();
+    ctx.font = `600 13px ${IOS_FONT_STACK}`;
+    const textW = ctx.measureText(telemetryText).width;
+    const pillW = Math.min(focalWidth - 36, Math.max(250, Math.round(textW + 52)));
+    const pillH = 38;
+    const pillX = focalLeft + (focalWidth - pillW) * 0.5;
+    const pillY = height - 56;
+
+    drawRoundedRectPath(ctx, pillX, pillY, pillW, pillH, 19);
+    ctx.fillStyle = 'rgba(14, 19, 30, 0.88)';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
+    ctx.shadowBlur = 16;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Live emerald GPS status dot
+    ctx.fillStyle = '#30D158';
+    ctx.beginPath();
+    ctx.arc(pillX + 18, pillY + pillH * 0.5, 4.5 + beatLift * 1.1, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillText(telemetryText, pillX + 30, pillY + pillH * 0.5 - 0.5, pillW - 44);
+
+    // Slim Apple-blue route progress hairline inside bottom of pill
+    const barW = pillW - 36;
+    const barX = pillX + 18;
+    const barY = pillY + pillH - 5;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+    drawRoundedRectPath(ctx, barX, barY, barW, 2.2, 1.1);
+    ctx.fill();
+    ctx.fillStyle = IMSG_BLUE;
+    drawRoundedRectPath(ctx, barX, barY, Math.max(4, barW * routeProgress), 2.2, 1.1);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
   render(
     ctx: CanvasRenderingContext2D,
     frame: StyleFrameContext,
@@ -1308,70 +1783,23 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
   ): void {
     const isTransparent = isTransparentStage(frame);
     const motionScale = this.getMotionScale(frame);
-    const variationIdx = this.getVariationIndex(frame.variationId ?? 'ios-dark');
+    const variationIdx = this.getVariationIndex(frame.variationId ?? 'messages');
     const bgOpacity = clamp01(frame.backgroundOpacity ?? 1.0);
     const vignetteStrength = clamp01(frame.vignetteStrength ?? 0.5);
-
-    if (!isTransparent) {
-      ctx.save();
-      ctx.globalAlpha = bgOpacity;
-      const bg = ctx.createLinearGradient(0, 0, 0, height);
-      if (variationIdx === 1) {
-        // liquid-glass ambient dark stage
-        bg.addColorStop(0, '#070910');
-        bg.addColorStop(0.5, '#0f1422');
-        bg.addColorStop(1, '#06080d');
-      } else if (variationIdx === 2) {
-        // cinema-edit deep anamorphic dark
-        bg.addColorStop(0, '#040407');
-        bg.addColorStop(0.5, '#0c0d14');
-        bg.addColorStop(1, '#040407');
-      } else {
-        bg.addColorStop(0, '#09090d');
-        bg.addColorStop(0.55, '#111218');
-        bg.addColorStop(1, '#08090d');
-      }
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, width, height);
-
-      if (variationIdx === 1) {
-        // Ambient album glow behind liquid glass bubbles
-        const glow = ctx.createRadialGradient(
-          width * 0.52,
-          height * 0.48,
-          20,
-          width * 0.52,
-          height * 0.48,
-          Math.max(width, height) * 0.55
-        );
-        glow.addColorStop(0, frame.palette.accentPrimary);
-        glow.addColorStop(0.5, frame.palette.accentSecondary);
-        glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        ctx.globalAlpha = bgOpacity * (0.16 + frame.audio.bassEnergy * 0.1);
-        ctx.fillStyle = glow;
-        ctx.fillRect(0, 0, width, height);
-      }
-      ctx.restore();
-    }
 
     const focal = getFocalRect(frame, width);
     const focalWidth = focal.width;
     const lyrics = frame.lyrics;
     const layout = frame.layout;
-    if (!lyrics || !layout || lyrics.lines.length === 0 || layout.lines.length === 0) {
-      this.drawVoiceNoteGapBubble(ctx, focal.left + focalWidth * 0.5 - 99, height * 0.5 - 22, frame, motionScale, 1.0);
-      return;
+
+    // Precompute bubble metadata when lyrics & layout exist
+    if (lyrics && layout && lyrics.lines.length > 0 && layout.lines.length > 0) {
+      const trackId = frame.trackMetadata?.id ?? lyrics.providerName ?? '';
+      const scriptMode: LyricsScriptMode = frame.scriptMode ?? 'auto';
+      this.ensurePrecomputed(ctx, lyrics, layout, focalWidth, trackId, scriptMode);
     }
 
-    const trackId = frame.trackMetadata?.id ?? lyrics.providerName ?? '';
-    const scriptMode: LyricsScriptMode = frame.scriptMode ?? 'auto';
-    this.ensurePrecomputed(ctx, lyrics, layout, focalWidth, trackId, scriptMode);
-    if (this.bubbles.length === 0) {
-      this.drawVoiceNoteGapBubble(ctx, focal.left + focalWidth * 0.5 - 99, height * 0.5 - 22, frame, motionScale, 1.0);
-      return;
-    }
-
-    // Map frame activeLineIndex / lastActiveLineIndex into non-blank bubble index
+    // Resolve active bubble index (used by all 3 variations)
     let resolvedBubbleIdx = -1;
     if (frame.activeLineIndex >= 0 && frame.activeLineIndex < this.lineToBubbleIdx.length) {
       const mapped = this.lineToBubbleIdx[frame.activeLineIndex];
@@ -1380,8 +1808,16 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         this.lastKnownActiveIdx = mapped;
       }
     }
-    if (resolvedBubbleIdx < 0 && typeof frame.lastActiveLineIndex === 'number' && frame.lastActiveLineIndex >= 0) {
-      for (let li = Math.min(this.lineToBubbleIdx.length - 1, frame.lastActiveLineIndex); li >= 0; li--) {
+    if (
+      resolvedBubbleIdx < 0 &&
+      typeof frame.lastActiveLineIndex === 'number' &&
+      frame.lastActiveLineIndex >= 0
+    ) {
+      for (
+        let li = Math.min(this.lineToBubbleIdx.length - 1, frame.lastActiveLineIndex);
+        li >= 0;
+        li--
+      ) {
         if (this.lineToBubbleIdx[li] >= 0) {
           resolvedBubbleIdx = this.lineToBubbleIdx[li];
           break;
@@ -1391,7 +1827,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     if (resolvedBubbleIdx < 0 && this.lastKnownActiveIdx >= 0) {
       resolvedBubbleIdx = this.lastKnownActiveIdx;
     }
-    if (resolvedBubbleIdx < 0) {
+    if (resolvedBubbleIdx < 0 && lyrics && this.bubbles.length > 0) {
       resolvedBubbleIdx = 0;
       for (let bIdx = 0; bIdx < this.bubbles.length; bIdx++) {
         if (lyrics.lines[this.bubbles[bIdx].lineIndex].startSeconds <= frame.timeSeconds) {
@@ -1401,6 +1837,49 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         }
       }
     }
+
+    // Variation 3: 2.5D Apple Maps Navigation Mode
+    if (variationIdx === 2) {
+      this.renderNavigationMap(
+        ctx,
+        frame,
+        lyrics,
+        layout,
+        width,
+        height,
+        focal.left,
+        focalWidth,
+        resolvedBubbleIdx,
+        motionScale
+      );
+      return;
+    }
+
+    // Backdrop for Messages & Group Chat
+    if (!isTransparent) {
+      ctx.save();
+      ctx.globalAlpha = bgOpacity;
+      const bg = ctx.createLinearGradient(0, 0, 0, height);
+      bg.addColorStop(0, '#09090d');
+      bg.addColorStop(0.55, '#111218');
+      bg.addColorStop(1, '#08090d');
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, width, height);
+      ctx.restore();
+    }
+
+    if (!lyrics || !layout || lyrics.lines.length === 0 || layout.lines.length === 0 || this.bubbles.length === 0) {
+      this.drawVoiceNoteGapBubble(
+        ctx,
+        focal.left + focalWidth * 0.5 - 99,
+        height * 0.5 - 22,
+        frame,
+        motionScale,
+        1.0
+      );
+      return;
+    }
+
     const activeIdx = Math.max(0, Math.min(this.bubbles.length - 1, resolvedBubbleIdx));
     const activeBubble = this.bubbles[activeIdx];
     const activeLineIsBlank =
@@ -1436,12 +1915,11 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ? Math.min(prevLineObj.endSeconds, prevLineObj.words[prevLineObj.words.length - 1].endSeconds)
         : prevLineObj.endSeconds
       : 0;
-    const timeUntilNext =
-      nextLine
-        ? typeof frame.timeUntilNextLine === 'number' && Number.isFinite(frame.timeUntilNextLine)
-          ? frame.timeUntilNextLine
-          : Math.max(0, nextLine.startSeconds - frame.timeSeconds)
-        : Number.POSITIVE_INFINITY;
+    const timeUntilNext = nextLine
+      ? typeof frame.timeUntilNextLine === 'number' && Number.isFinite(frame.timeUntilNextLine)
+        ? frame.timeUntilNextLine
+        : Math.max(0, nextLine.startSeconds - frame.timeSeconds)
+      : Number.POSITIVE_INFINITY;
     const gapDur = nextLine ? Math.max(0, nextLine.startSeconds - prevEnd) : Number.POSITIVE_INFINITY;
 
     const inGapWindow =
@@ -1545,86 +2023,36 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       Math.min(this.totalThreadHeight + height * 0.35, this.scrollY + manualOffset)
     );
 
-    const isKineticMode = variationIdx === 0;
+    const isGroupChat = variationIdx === 1;
+    const isKineticPopup = !isGroupChat && frame.iosKineticPopup !== false;
     const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualOffset) > 3;
     const rawKineticZoom =
       typeof frame.iosKineticZoom === 'number' && Number.isFinite(frame.iosKineticZoom)
         ? Math.max(0.75, Math.min(1.85, frame.iosKineticZoom))
         : 1.45;
-    const kineticZoom = isKineticMode ? rawKineticZoom : 1.0;
+    const kineticZoom = isKineticPopup ? rawKineticZoom : 1.0;
 
     const marginSide = Math.max(24, Math.round(focalWidth * 0.09));
     const padX = Math.max(16, Math.round(layout.fontSizePx * 0.72));
     const padY = Math.max(11, Math.round(layout.fontSizePx * 0.48));
-    const anchorY = isKineticMode
+    const anchorY = isKineticPopup
       ? height * (isTransparent ? 0.56 : 0.62)
       : height * (isTransparent ? 0.52 : 0.5);
     const unsyncedOrLineLevel = isUnsyncedLyrics(frame) || frame.activeWordIndex < 0;
 
-    if (variationIdx === 10) {
-      this.renderWalletLedger(
-        ctx,
-        frame,
-        lyrics,
-        layout,
-        focal.left,
-        focalWidth,
-        height,
-        activeIdx,
-        effectiveScrollY,
-        motionScale
-      );
-      return;
-    }
-    if (variationIdx === 11) {
-      this.renderCityWalkMap(
-        ctx,
-        frame,
-        lyrics,
-        layout,
-        focal.left,
-        focalWidth,
-        height,
-        activeIdx,
-        motionScale
-      );
-      return;
-    }
-    if (variationIdx === 12) {
-      this.renderLockScreenAlerts(
-        ctx,
-        frame,
-        lyrics,
-        layout,
-        focal.left,
-        focalWidth,
-        height,
-        activeIdx,
-        effectiveScrollY,
-        motionScale
-      );
-      return;
-    }
-
-    // Subtle 3D tilt/drift + Cinema-Edit focal zoom (disabled in reduceMotion)
     const tiltAngle =
       motionScale === 0 ? 0 : Math.sin(frame.timeSeconds * 0.45) * 0.008 * motionScale;
     const driftX =
       motionScale === 0 ? 0 : Math.cos(frame.timeSeconds * 0.35) * 4.0 * motionScale;
-    const cinemaZoom =
-      variationIdx === 2
-        ? 1.05 + (motionScale > 0 ? frame.audio.bassEnergy * 0.042 : 0)
-        : 1.0;
 
     ctx.save();
-    // WS2: no hard focal.left clip; only translate content cleanly into focal area
     if (focal.left > 0) ctx.translate(focal.left, 0);
 
     // Minimal dark frosted Messages header bar (non-transparent full stage only; omitted in split view)
     const showHeader = !isTransparent && focal.left === 0;
     if (showHeader) {
       ctx.save();
-      ctx.fillStyle = isKineticMode ? 'rgba(6, 7, 10, 0.88)' : 'rgba(18, 18, 22, 0.78)';
+      ctx.fillStyle = isKineticPopup ? 'rgba(6, 7, 10, 0.88)' : 'rgba(18, 18, 22, 0.78)';
       ctx.fillRect(0, 0, focalWidth, 48);
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
       ctx.lineWidth = 1;
@@ -1637,13 +2065,16 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.textBaseline = 'middle';
       ctx.font = `600 13px ${IOS_FONT_STACK}`;
       ctx.fillStyle = '#f8fafc';
-      ctx.fillText('Messages · Synced Thread', focalWidth * 0.5, 24);
+      ctx.fillText(
+        isGroupChat ? 'Group Chat · 4 People' : 'Messages · Synced Thread',
+        focalWidth * 0.5,
+        24
+      );
       ctx.restore();
     }
 
-    // Keep thread clear of header bar and top-right NowPlaying window controls
     const topClipY = showHeader ? 49 : isTransparent ? 0 : 62;
-    const minY = isKineticMode ? -height : topClipY;
+    const minY = isKineticPopup ? -height : topClipY;
     const maxY = height + 60;
     const hoveredIdx = frame.hoveredLineIndex ?? -1;
 
@@ -1654,25 +2085,22 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.clip();
     }
 
-    // Apply macro camera zoom (Kinetic Messages) or Cinema Edit / micro drift transform around focal bubble stage
-    const combinedZoom = cinemaZoom * kineticZoom;
-    if (tiltAngle !== 0 || driftX !== 0 || combinedZoom !== 1.0) {
+    if (tiltAngle !== 0 || driftX !== 0 || kineticZoom !== 1.0) {
       ctx.translate(focalWidth * 0.5 + driftX, anchorY);
-      if (combinedZoom !== 1.0) ctx.scale(combinedZoom, combinedZoom);
+      if (kineticZoom !== 1.0) ctx.scale(kineticZoom, kineticZoom);
       if (tiltAngle !== 0) ctx.rotate(tiltAngle);
       ctx.translate(-focalWidth * 0.5, -anchorY);
     }
 
-    // Keep left/right bubble columns inside the zoomed viewport bounds when Kinetic Zoom > 1x
-    const zoomedMaxHalf = (focalWidth * 0.5 - 18) / Math.max(1.0, combinedZoom);
+    const zoomedMaxHalf = (focalWidth * 0.5 - 18) / Math.max(1.0, kineticZoom);
     const zoomedLeftBound = focalWidth * 0.5 - zoomedMaxHalf;
     const zoomedRightBound = focalWidth * 0.5 + zoomedMaxHalf;
     const laneLeftX = Math.max(marginSide, zoomedLeftBound);
     const laneRightEdge = Math.min(focalWidth - marginSide, zoomedRightBound);
 
     for (let i = 0; i < this.bubbles.length; i++) {
-      // Strict Zero Future Preview in Kinetic Messages (never render upcoming bubbles below active bubble)
-      if (isKineticMode && !isBrowsing && i > activeIdx) {
+      // Strict Zero Future Preview when iosKineticPopup is ON
+      if (isKineticPopup && !isBrowsing && i > activeIdx) {
         continue;
       }
 
@@ -1680,9 +2108,10 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       const lineIdx = b.lineIndex;
       const lineObj = lyrics.lines[lineIdx];
       const measured = layout.lines[lineIdx];
-      const slotShift = this.gapSplitBubbleIdx >= 0 && i >= this.gapSplitBubbleIdx ? this.gapShiftPx : 0;
+      const slotShift =
+        this.gapSplitBubbleIdx >= 0 && i >= this.gapSplitBubbleIdx ? this.gapShiftPx : 0;
       const popInOffsetY =
-        isKineticMode && i === activeIdx && motionScale > 0
+        isKineticPopup && i === activeIdx && motionScale > 0
           ? (1 - easeOutBack(clamp01((frame.timeSeconds - lineObj.startSeconds) / 0.28))) * 22
           : 0;
       const screenY = anchorY + (b.topY - effectiveScrollY) + slotShift + popInOffsetY;
@@ -1697,10 +2126,10 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ((frame.activeLineIndex < 0 || activeLineIsBlank) && lineObj.endSeconds < frame.timeSeconds);
       const dist = Math.abs(i - activeIdx);
 
-      // In Kinetic Messages, snugly hug revealed words width & height so partial lines never leave an oversized empty bubble
+      // In Kinetic Popup mode, snugly hug revealed words width & height
       let drawBubbleW = b.bubbleW;
       let drawBubbleH = b.bubbleH;
-      if (isKineticMode && isActive && !unsyncedOrLineLevel && measured.words.length > 0) {
+      if (isKineticPopup && isActive && !unsyncedOrLineLevel && measured.words.length > 0) {
         const clampedAw = Math.max(0, Math.min(measured.words.length - 1, frame.activeWordIndex));
         let revMaxRight = 0;
         let revMaxBottom = 0;
@@ -1711,7 +2140,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
           if (rEdge > revMaxRight) revMaxRight = rEdge;
           if (bEdge > revMaxBottom) revMaxBottom = bEdge;
         }
-        const emojiPad = b.inlineEmoji && clampedAw >= measured.words.length - 1 ? layout.fontSizePx + 8 : 0;
+        const emojiPad =
+          b.inlineEmoji && clampedAw >= measured.words.length - 1 ? layout.fontSizePx + 8 : 0;
         drawBubbleW = Math.min(
           b.bubbleW,
           Math.max(Math.round(revMaxRight + padX * 2 + emojiPad), 92)
@@ -1719,11 +2149,13 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         const subH = b.secondaryText ? Math.round(layout.fontSizePx * 0.92) : 0;
         drawBubbleH = Math.min(
           b.bubbleH,
-          Math.max(Math.round(revMaxBottom + padY * 2 + subH), Math.round(layout.fontSizePx * 1.2 + padY * 2))
+          Math.max(
+            Math.round(revMaxBottom + padY * 2 + subH),
+            Math.round(layout.fontSizePx * 1.2 + padY * 2)
+          )
         );
       }
 
-      // Record hit rectangle in canvas coordinate space (spanning bubble row for responsive click-to-seek)
       frame.recordHitRect?.(
         lineIdx,
         focal.left + laneLeftX,
@@ -1732,7 +2164,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         Math.max(drawBubbleH + (b.cardH > 0 ? b.cardH + 14 : 0), totalH) + 8
       );
 
-      // Timestamp group header
       if (b.timestampLabel) {
         ctx.save();
         ctx.textAlign = 'center';
@@ -1745,25 +2176,15 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
 
       const bx =
-        variationIdx === 13
+        isGroupChat
           ? b.side === 'right'
             ? laneRightEdge - drawBubbleW
-            : laneLeftX + 14
+            : laneLeftX + GROUP_AVATAR_GUTTER_PX
           : b.side === 'right'
           ? laneRightEdge - drawBubbleW
           : laneLeftX;
       const by = screenY;
 
-      if (variationIdx === 13 && b.side === 'left' && (isActive || isPast || dist <= 2)) {
-        ctx.save();
-        ctx.font = `600 10.5px ${IOS_FONT_STACK}`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#9ca3af';
-        ctx.globalAlpha = isActive ? 0.88 : 0.55;
-        ctx.fillText(b.senderName, bx + 6, by - 9);
-        ctx.restore();
-      }
       const rowAlpha = isActive
         ? 1.0 * frame.lineFadeAlpha
         : isHovered
@@ -1771,6 +2192,35 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         : isPast
         ? Math.max(0.42, 0.82 - dist * 0.14)
         : Math.max(0.18, 0.34 - dist * 0.06);
+
+      // Group Chat: Colored contact name above cluster + unique circular iOS-gradient user avatar PFP beside left bubbles
+      if (isGroupChat && b.side === 'left') {
+        const participant = GROUP_PARTICIPANTS[b.senderIdx];
+        if (b.isGroupClusterStart) {
+          ctx.save();
+          ctx.font = `600 11px ${IOS_FONT_STACK}`;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = participant.labelColor;
+          ctx.globalAlpha = isActive ? 0.96 : rowAlpha * 0.85;
+          ctx.fillText(participant.name, bx + 8, by - 9);
+          ctx.restore();
+        }
+        if (b.showTail || b.isGroupClusterStart) {
+          const avatarR = 14;
+          const avatarCx = laneLeftX + avatarR;
+          const avatarCy = by + drawBubbleH - avatarR;
+          this.drawGroupAvatarPfp(
+            ctx,
+            participant,
+            avatarCx,
+            avatarCy,
+            avatarR,
+            rowAlpha,
+            isActive
+          );
+        }
+      }
 
       const lineElapsed = Math.max(0, frame.timeSeconds - lineObj.startSeconds);
       const emojiWord =
@@ -1799,7 +2249,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
 
       const isContextualTapback = b.presentationMode === 'tapback' && hasWordSyncEmoji;
-      const showTapback = Boolean(b.tapback && (isPast || (isActive && (!isContextualTapback || emojiWordHit))));
+      const showTapback = Boolean(
+        b.tapback && (isPast || (isActive && (!isContextualTapback || emojiWordHit)))
+      );
       const tapPop = isContextualTapback
         ? isPast
           ? 1.0
@@ -1808,13 +2260,12 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ? clamp01(lineElapsed / 0.52)
         : 1.0;
 
-      // Pop-in scale + incoming rotational tilt (+/-3.5 deg -> 0) on active bubble entrance
       const enterScale =
         isActive && motionScale > 0 && lineElapsed < 0.35
           ? 0.94 + 0.06 * easeOutBack(lineElapsed / 0.35)
           : 1.0;
       const enterTiltRad =
-        variationIdx === 0 && isActive && motionScale > 0 && lineElapsed < 0.38
+        isKineticPopup && isActive && motionScale > 0 && lineElapsed < 0.38
           ? ((b.side === 'left' ? -3.5 : 3.5) * (Math.PI / 180)) *
             (1 - Math.min(1, lineElapsed / 0.38)) *
             motionScale
@@ -1836,49 +2287,28 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ctx.translate(-pivotX, -pivotY);
       }
 
-      // Bubble fill per variation + subtle glow on active/hovered
       drawBubbleWithTail(ctx, bx, by, drawBubbleW, drawBubbleH, 18, b.side, b.showTail);
-      const outgoingPrimary = variationIdx === 3 ? IMSG_GREEN : IMSG_BLUE;
-      if (variationIdx === 1) {
-        const glassGrad = ctx.createLinearGradient(bx, by, bx, by + b.bubbleH);
-        if (b.side === 'right') {
-          glassGrad.addColorStop(0, 'rgba(10, 132, 255, 0.52)');
-          glassGrad.addColorStop(1, 'rgba(10, 132, 255, 0.28)');
-        } else {
-          glassGrad.addColorStop(0, 'rgba(52, 54, 66, 0.62)');
-          glassGrad.addColorStop(1, 'rgba(32, 34, 42, 0.42)');
-        }
-        ctx.fillStyle = glassGrad;
-      } else {
-        ctx.fillStyle = b.side === 'right' ? outgoingPrimary : IMSG_CHARCOAL;
-      }
+      ctx.fillStyle = b.side === 'right' ? IMSG_BLUE : IMSG_CHARCOAL;
 
       if (isActive || isHovered) {
         ctx.shadowColor =
-          b.side === 'right'
-            ? variationIdx === 3
-              ? 'rgba(48, 209, 88, 0.45)'
-              : 'rgba(10, 132, 255, 0.45)'
-            : 'rgba(255, 255, 255, 0.16)';
+          b.side === 'right' ? 'rgba(10, 132, 255, 0.45)' : 'rgba(255, 255, 255, 0.16)';
         ctx.shadowBlur = isActive ? 18 : 12;
       }
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      if (variationIdx === 1 || isHovered || (variationIdx === 0 && isActive)) {
+      if (isHovered || (isKineticPopup && isActive)) {
         ctx.strokeStyle = isHovered
           ? 'rgba(255, 255, 255, 0.48)'
-          : variationIdx === 0 && isActive
-          ? b.side === 'right'
-            ? 'rgba(147, 197, 253, 0.85)'
-            : 'rgba(226, 232, 240, 0.45)'
-          : 'rgba(255, 255, 255, 0.22)';
-        ctx.lineWidth = variationIdx === 0 && isActive ? 1.5 : isHovered ? 1.5 : 1;
+          : b.side === 'right'
+          ? 'rgba(147, 197, 253, 0.85)'
+          : 'rgba(226, 232, 240, 0.45)';
+        ctx.lineWidth = 1.5;
         ctx.stroke();
       }
 
-      // Word-by-word illumination + Precomputed Magic Word effects inside bubble
-      ctx.font = `${isKineticMode && isActive ? 600 : 500} ${layout.fontSizePx}px ${IOS_FONT_STACK}`;
+      ctx.font = `${isKineticPopup && isActive ? 600 : 500} ${layout.fontSizePx}px ${IOS_FONT_STACK}`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       const textOriginX = bx + padX;
@@ -1916,14 +2346,13 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
           const isWordPassed = w < frame.activeWordIndex;
           if (isWordCurrent) {
             const p = clamp01(frame.wordProgress);
-            const revealT = isKineticMode ? clamp01(p / 0.36) : 1.0;
+            const revealT = isKineticPopup ? clamp01(p / 0.36) : 1.0;
             const blurSpringY =
-              isKineticMode && motionScale > 0
+              isKineticPopup && motionScale > 0
                 ? (1 - easeOutBack(revealT)) * 9
                 : motionScale > 0
                 ? -1.8 * Math.sin(p * Math.PI) * Math.min(1.2, motionScale)
                 : 0;
-            const revealAlpha = 1.0;
             if (magicKind) {
               this.drawMagicWord(
                 ctx,
@@ -1935,14 +2364,16 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
                 magicKind,
                 frame,
                 motionScale,
-                revealAlpha,
+                1.0,
                 w
               );
             } else {
               ctx.fillStyle = '#ffffff';
-              ctx.globalAlpha = revealAlpha;
-              ctx.shadowColor = isKineticMode ? 'rgba(0, 0, 0, 0.28)' : 'rgba(255, 255, 255, 0.65)';
-              ctx.shadowBlur = isKineticMode ? 4 : 8;
+              ctx.globalAlpha = 1.0;
+              ctx.shadowColor = isKineticPopup
+                ? 'rgba(0, 0, 0, 0.28)'
+                : 'rgba(255, 255, 255, 0.65)';
+              ctx.shadowBlur = isKineticPopup ? 4 : 8;
               ctx.fillText(word.text, wx, wy + blurSpringY);
               ctx.shadowBlur = 0;
             }
@@ -1967,8 +2398,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
               ctx.fillText(word.text, wx, wy);
             }
           } else {
-            // Kinetic Messages: ZERO future preview — never pre-render unsung words in grey
-            if (isKineticMode) continue;
+            // Kinetic Popup ON: ZERO future preview — never pre-render unsung words
+            if (isKineticPopup) continue;
             ctx.fillStyle = '#ffffff';
             ctx.globalAlpha = 0.64;
             ctx.fillText(word.text, wx, wy);
@@ -1976,7 +2407,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         }
       }
 
-      // Optional translation / romanization subtitle inside bubble
       if (b.secondaryText) {
         ctx.save();
         ctx.font = `400 ${Math.max(11, Math.round(layout.fontSizePx * 0.72))}px ${IOS_FONT_STACK}`;
@@ -1986,7 +2416,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ctx.restore();
       }
 
-      // Inline contextual Apple emoji suffix badge with easeOutBack spring pop-in
       if (b.inlineEmoji && measured.words.length > 0 && (isPast || (isActive && emojiWordHit))) {
         const lastW = measured.words[measured.words.length - 1];
         const emojiSize = Math.round(layout.fontSizePx * 0.96);
@@ -2012,7 +2441,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ctx.restore();
       }
 
-      // Authentic iOS Tapback Speech-Bubble Pill anchored cleanly to top corner
       if (showTapback && b.tapback) {
         this.drawTapbackBadge(
           ctx,
@@ -2023,46 +2451,44 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
           drawBubbleW,
           rowAlpha,
           tapPop,
-          variationIdx,
           motionScale
         );
       }
 
-      // Contextual embed card attached below bubble (full-width card span in Kinetic Messages)
       if (b.embedCard && b.cardH > 0) {
         const cardW =
-          isKineticMode && b.embedCard.kind === 'maps'
+          isKineticPopup && b.embedCard.kind === 'maps'
             ? Math.max(220, laneRightEdge - laneLeftX)
             : Math.min(Math.max(b.bubbleW, 230), Math.round((laneRightEdge - laneLeftX) * 0.85));
         const cardX =
-          isKineticMode && b.embedCard.kind === 'maps'
+          isKineticPopup && b.embedCard.kind === 'maps'
             ? laneLeftX
             : b.side === 'right'
             ? laneRightEdge - cardW
+            : isGroupChat
+            ? laneLeftX + GROUP_AVATAR_GUTTER_PX
             : laneLeftX;
-        const cardY = by + drawBubbleH + (isKineticMode ? 14 : 6);
+        const cardY = by + drawBubbleH + (isKineticPopup ? 14 : 6);
         ctx.globalAlpha = rowAlpha;
         this.drawEmbedCard(ctx, b.embedCard, cardX, cardY, cardW, b.cardH, frame, motionScale);
       }
 
       ctx.restore();
 
-      // Subtle glowing active-playing dot next to active bubble while manually browsing
       if (isActive && frame.isFollowingPlayback === false) {
         const dotX = b.side === 'right' ? bx - 14 : bx + b.bubbleW + 14;
         const dotY = by + b.bubbleH * 0.5;
-        const dotColor = variationIdx === 3 ? IMSG_GREEN : IMSG_BLUE;
         const pulse =
           motionScale > 0 ? 0.85 + 0.15 * Math.sin(frame.timeSeconds * 4.5) : 1.0;
         ctx.save();
         ctx.globalAlpha = 0.28 * rowAlpha * pulse;
-        ctx.fillStyle = dotColor;
+        ctx.fillStyle = IMSG_BLUE;
         ctx.beginPath();
         ctx.arc(dotX, dotY, 7.2, 0, Math.PI * 2);
         ctx.fill();
 
         ctx.globalAlpha = 0.95 * rowAlpha;
-        ctx.shadowColor = dotColor;
+        ctx.shadowColor = IMSG_BLUE;
         ctx.shadowBlur = 10;
         ctx.beginPath();
         ctx.arc(dotX, dotY, 3.6 * pulse, 0, Math.PI * 2);
@@ -2071,29 +2497,30 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
     }
 
-    // Unified non-overlapping gap / short-pause / typing slot rendering
+    // Unified non-overlapping gap / short-pause / typing slot rendering (ZERO closure allocation)
     if (hasActiveGapSlot && gapAlpha > 0.01) {
-      const gapY =
-        nextBubbleIdx === 0
-          ? anchorY + (this.bubbles[0].topY - 32 - effectiveScrollY)
-          : (() => {
-              const prevB = this.bubbles[prevBubbleIdx >= 0 ? prevBubbleIdx : activeIdx];
-              const prevBottom = prevB.topY + prevB.bubbleH + (prevB.cardH > 0 ? prevB.cardH + 6 : 0);
-              return anchorY + (prevBottom + 12 - effectiveScrollY);
-            })();
+      let gapY: number;
+      if (nextBubbleIdx === 0) {
+        gapY = anchorY + (this.bubbles[0].topY - 32 - effectiveScrollY);
+      } else {
+        const prevB = this.bubbles[prevBubbleIdx >= 0 ? prevBubbleIdx : activeIdx];
+        const prevBottom = prevB.topY + prevB.bubbleH + (prevB.cardH > 0 ? prevB.cardH + 6 : 0);
+        gapY = anchorY + (prevBottom + 12 - effectiveScrollY);
+      }
 
       if (gapY + 44 > minY && gapY < maxY) {
+        const leftSlotX = isGroupChat ? laneLeftX + GROUP_AVATAR_GUTTER_PX : laneLeftX;
         if (gapMode === 'voiceNote') {
-          this.drawVoiceNoteGapBubble(ctx, laneLeftX, gapY, frame, motionScale, gapAlpha);
+          this.drawVoiceNoteGapBubble(ctx, leftSlotX, gapY, frame, motionScale, gapAlpha);
         } else if (gapMode === 'shortPause') {
-          this.drawShortPauseNoteBubble(ctx, laneLeftX, gapY, frame, motionScale, gapAlpha);
+          this.drawShortPauseNoteBubble(ctx, leftSlotX, gapY, frame, motionScale, gapAlpha);
         } else if (gapMode === 'typing') {
           const nextBubble =
             nextBubbleIdx >= 0 && nextBubbleIdx < this.bubbles.length
               ? this.bubbles[nextBubbleIdx]
               : null;
           const typingSide: BubbleSide = nextBubble ? nextBubble.side : 'left';
-          const typingX = typingSide === 'right' ? laneRightEdge - 68 : laneLeftX;
+          const typingX = typingSide === 'right' ? laneRightEdge - 68 : leftSlotX;
           this.drawTypingIndicator(
             ctx,
             typingSide,
@@ -2101,7 +2528,6 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
             gapY + 4,
             frame,
             motionScale,
-            variationIdx,
             gapAlpha
           );
         }
@@ -2110,8 +2536,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
 
     ctx.restore(); // end topClipY + kineticZoom region
 
-    // Smooth seamless top vignette fade over older bubbles drifting upward in Kinetic Messages (starts cleanly at y=0 to avoid any seam)
-    if (isKineticMode && !isTransparent) {
+    // Smooth seamless top vignette fade over older bubbles drifting upward in Kinetic Popup mode
+    if (isKineticPopup && !isTransparent) {
       const fadeEndY = height * 0.29;
       const topFade = ctx.createLinearGradient(0, 0, 0, fadeEndY);
       topFade.addColorStop(0, 'rgba(6, 7, 11, 0.88)');
@@ -2123,836 +2549,23 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     }
 
     ctx.restore();
-    if (!isTransparent) {
-      if (variationIdx === 2) {
-        const barH = Math.round(height * 0.058);
-        ctx.save();
-        ctx.fillStyle = '#030305';
-        ctx.fillRect(0, 0, width, barH);
-        ctx.fillRect(0, height - barH, width, barH);
-        ctx.restore();
-      }
 
-      if (vignetteStrength > 0.02) {
-        ctx.save();
-        const vig = ctx.createRadialGradient(
-          width * 0.5,
-          height * 0.5,
-          Math.min(width, height) * 0.28,
-          width * 0.5,
-          height * 0.5,
-          Math.max(width, height) * 0.78
-        );
-        vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
-        vig.addColorStop(1, 'rgba(0, 0, 0, 0.72)');
-        ctx.globalAlpha = vignetteStrength * bgOpacity;
-        ctx.fillStyle = vig;
-        ctx.fillRect(0, 0, width, height);
-        ctx.restore();
-      }
-    }
-  }
-
-  private renderWalletLedger(
-    ctx: CanvasRenderingContext2D,
-    frame: StyleFrameContext,
-    lyrics: Lyrics,
-    layout: LyricsLayout,
-    focalLeft: number,
-    focalWidth: number,
-    height: number,
-    activeIdx: number,
-    _effectiveScrollY: number,
-    motionScale: number
-  ): void {
-    const cx = focalLeft + focalWidth * 0.5;
-    const bass = frame.audio.bassEnergy || 0;
-    const beatPulse = frame.audio.beatDetected && motionScale > 0 ? 1.0 : bass * 0.65;
-    const manualOffset = Number.isFinite(frame.manualScrollY) ? (frame.manualScrollY ?? 0) : 0;
-    const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualOffset) > 3;
-
-    // 1. Sleek dark metallic / album-tinted Apple Card pass anchored cleanly at top (ZERO "Apple Wallet · Live Ledger" header)
-    const walletCardW = Math.min(430, Math.max(250, focalWidth * 0.78));
-    const walletCardH = Math.min(168, Math.max(120, Math.round(height * 0.225)));
-    const walletCardX = cx - walletCardW * 0.5;
-    const walletCardY = Math.max(26, Math.round(height * 0.055));
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(focalLeft, 0, focalWidth, height);
-    ctx.clip();
-
-    ctx.save();
-    drawRoundedRectPath(ctx, walletCardX, walletCardY, walletCardW, walletCardH, 20);
-    const cardGrad = ctx.createLinearGradient(
-      walletCardX,
-      walletCardY,
-      walletCardX + walletCardW,
-      walletCardY + walletCardH
-    );
-    cardGrad.addColorStop(0, '#1e2028');
-    cardGrad.addColorStop(0.5, '#14151b');
-    cardGrad.addColorStop(1, '#252732');
-    ctx.fillStyle = cardGrad;
-    ctx.fill();
-
-    // Subtle album-art radial glow inside Apple Card + beat-reactive specular shimmer
-    ctx.save();
-    ctx.clip();
-    const aura = ctx.createRadialGradient(
-      walletCardX + walletCardW * 0.82,
-      walletCardY + walletCardH * 0.18,
-      10,
-      walletCardX + walletCardW * 0.75,
-      walletCardY + walletCardH * 0.35,
-      walletCardW * 0.75
-    );
-    aura.addColorStop(0, frame.palette.accentPrimary);
-    aura.addColorStop(0.55, frame.palette.accentSecondary);
-    aura.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.globalAlpha = 0.22 + beatPulse * 0.14;
-    ctx.fillStyle = aura;
-    ctx.fillRect(walletCardX, walletCardY, walletCardW, walletCardH);
-
-    // Brushed metallic diagonal shimmer
-    const sweepT = motionScale > 0 ? ((frame.timeSeconds * 0.32) % 1.4) - 0.2 : 0.4;
-    const sx = walletCardX + walletCardW * sweepT;
-    const shimmer = ctx.createLinearGradient(sx - 60, walletCardY, sx + 60, walletCardY + walletCardH);
-    shimmer.addColorStop(0, 'rgba(255,255,255,0)');
-    shimmer.addColorStop(0.5, `rgba(255,255,255,${(0.08 + beatPulse * 0.08).toFixed(3)})`);
-    shimmer.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = shimmer;
-    ctx.fillRect(walletCardX, walletCardY, walletCardW, walletCardH);
-    ctx.restore();
-
-    // Metallic rim highlight on Apple Card
-    drawRoundedRectPath(ctx, walletCardX, walletCardY, walletCardW, walletCardH, 20);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
-    ctx.lineWidth = 1.25;
-    ctx.stroke();
-
-    // Titanium EMV Chip
-    const chipX = walletCardX + 24;
-    const chipY = walletCardY + Math.round(walletCardH * 0.42);
-    drawRoundedRectPath(ctx, chipX, chipY, 34, 25, 5);
-    const chipGrad = ctx.createLinearGradient(chipX, chipY, chipX + 34, chipY + 25);
-    chipGrad.addColorStop(0, '#cbd5e1');
-    chipGrad.addColorStop(0.5, '#94a3b8');
-    chipGrad.addColorStop(1, '#e2e8f0');
-    ctx.fillStyle = chipGrad;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(15, 23, 42, 0.45)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(chipX + 12, chipY);
-    ctx.lineTo(chipX + 12, chipY + 25);
-    ctx.moveTo(chipX + 22, chipY);
-    ctx.lineTo(chipX + 22, chipY + 25);
-    ctx.moveTo(chipX, chipY + 12.5);
-    ctx.lineTo(chipX + 34, chipY + 12.5);
-    ctx.stroke();
-
-    // Top-right contactless icon & card brand label
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = `700 15px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = '#f8fafc';
-    ctx.fillText('WaveForm Card', walletCardX + 24, walletCardY + 26);
-
-    const nfcCx = walletCardX + walletCardW - 32;
-    const nfcCy = walletCardY + 26;
-    ctx.strokeStyle = 'rgba(248, 250, 252, 0.78)';
-    ctx.lineWidth = 1.8;
-    ctx.lineCap = 'round';
-    for (let ring = 0; ring < 3; ring++) {
-      ctx.beginPath();
-      ctx.arc(nfcCx - 4, nfcCy, 4 + ring * 4, -0.65, 0.65);
-      ctx.stroke();
-    }
-
-    // Track title & artist embossed at bottom of card
-    const trackTitle = frame.trackMetadata?.title || 'Now Playing';
-    const trackArtist = frame.trackMetadata?.artist || 'Apple Pay Cash';
-    ctx.font = `600 13px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = 'rgba(248, 250, 252, 0.92)';
-    ctx.fillText(trackTitle, walletCardX + 24, walletCardY + walletCardH - 36, walletCardW * 0.56);
-    ctx.font = `500 11px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = 'rgba(203, 213, 225, 0.68)';
-    ctx.fillText(trackArtist, walletCardX + 24, walletCardY + walletCardH - 19, walletCardW * 0.56);
-
-    // Beat-reactive card balance display
-    const cardTotalDollars = (128.4 + activeIdx * 14.35 + bass * 4.2).toFixed(2);
-    ctx.textAlign = 'right';
-    ctx.font = `700 16px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(`$${cardTotalDollars}`, walletCardX + walletCardW - 22, walletCardY + walletCardH - 28);
-    ctx.restore();
-
-    // 2. Arrived Transaction Ledger strictly BELOW Apple Card (ZERO future transactions, ZERO truncation)
-    const ledgerTop = walletCardY + walletCardH + 22;
-    const ledgerBottom = height - 18;
-    const ledgerCardW = Math.min(540, Math.max(260, focalWidth - 48));
-    const ledgerCardX = cx - ledgerCardW * 0.5;
-    const maxEndIdx = isBrowsing ? this.bubbles.length - 1 : activeIdx;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(focalLeft, ledgerTop - 4, focalWidth, Math.max(1, ledgerBottom - ledgerTop + 4));
-    ctx.clip();
-
-    const lyricFontPx = Math.max(15, Math.min(18, Math.round(layout.fontSizePx * 0.92)));
-    const lineStepPx = Math.round(lyricFontPx * 1.26);
-    let cursorY = ledgerTop;
-    if (isBrowsing) {
-      cursorY -= manualOffset * 0.45;
-    }
-
-    // Active line pops in at top of ledger; prior arrived lines cascade smoothly downward
-    for (let offset = 0; offset < 6; offset++) {
-      const i = maxEndIdx - offset;
-      if (i < 0) break;
-      const b = this.bubbles[i];
-      const lineObj = lyrics.lines[b.lineIndex];
-      const measured = layout.lines[b.lineIndex];
-      const isActive = i === activeIdx && frame.activeLineIndex >= 0;
-
-      const textMaxW = Math.max(120, ledgerCardW - 156);
-      ctx.font = `${isActive ? 700 : 600} ${lyricFontPx}px ${IOS_FONT_STACK}`;
-      const wrapped = this.wrapTextIntoScratch(ctx, measured.text, textMaxW);
-      const wrappedCount = Math.max(1, wrapped.length);
-      const rowH = Math.max(68, wrappedCount * lineStepPx + 36);
-
-      const entryAge = Math.max(0, frame.timeSeconds - lineObj.startSeconds);
-      const slideOffset =
-        offset === 0 && isActive && motionScale > 0 && entryAge < 0.34
-          ? (1 - easeOutBack(clamp01(entryAge / 0.34))) * 24
-          : 0;
-      const y = cursorY + slideOffset;
-      cursorY += rowH + 10;
-
-      if (y + rowH < ledgerTop - 10 || y > ledgerBottom + 10) continue;
-
-      const bottomFade = y + rowH > ledgerBottom - 56 ? clamp01((ledgerBottom - y) / 68) : 1.0;
-      const alpha = (isActive ? 1.0 * frame.lineFadeAlpha : Math.max(0.28, 0.88 - offset * 0.16)) * bottomFade;
-
-      const amountCents =
-        240 + Math.round(((lineObj.text.length * 137 + i * 313) % 9500) * (1 + (isActive ? bass * 0.32 : 0)));
-      const amountText = `$${(amountCents / 100).toFixed(2)}`;
-      const badgeColor = WALLET_BADGE_COLORS[i % WALLET_BADGE_COLORS.length];
-      const subtitle = WALLET_SUBTITLES[i % WALLET_SUBTITLES.length];
-
-      frame.recordHitRect?.(b.lineIndex, ledgerCardX, y, ledgerCardW, rowH);
-
+    if (!isTransparent && vignetteStrength > 0.02) {
       ctx.save();
-      ctx.globalAlpha = alpha;
-      drawRoundedRectPath(ctx, ledgerCardX, y, ledgerCardW, rowH, 16);
-      ctx.fillStyle = isActive ? '#1f222b' : '#161820';
-      ctx.fill();
-      ctx.strokeStyle = isActive ? 'rgba(10, 132, 255, 0.65)' : 'rgba(255, 255, 255, 0.1)';
-      ctx.lineWidth = isActive ? 1.5 : 1;
-      ctx.stroke();
-
-      // Merchant rounded icon badge
-      const iconBox = 38;
-      const iconX = ledgerCardX + 14;
-      const iconY = y + (rowH - iconBox) * 0.5;
-      drawRoundedRectPath(ctx, iconX, iconY, iconBox, iconBox, 10);
-      ctx.fillStyle = badgeColor;
-      ctx.fill();
-      drawWordIcon(ctx, b.lineIconId, iconX + iconBox * 0.5, iconY + iconBox * 0.5, 20, '#ffffff', 1.0);
-
-      // Full-wrap lyric text (ZERO truncation) + varied subtitle
-      const textLeft = iconX + iconBox + 14;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.font = `${isActive ? 700 : 600} ${lyricFontPx}px ${IOS_FONT_STACK}`;
-      ctx.fillStyle = '#ffffff';
-      let lineY = y + 12;
-      for (let li = 0; li < wrappedCount; li++) {
-        ctx.fillText(wrapped[li], textLeft, lineY, textMaxW);
-        lineY += lineStepPx;
-      }
-
-      ctx.font = `500 11.5px ${IOS_FONT_STACK}`;
-      ctx.fillStyle = isActive ? '#93c5fd' : '#9ca3af';
-      ctx.fillText(subtitle, textLeft, y + rowH - 22, textMaxW);
-
-      // Beat-reactive dollar amount + animated circular Apple Pay checkmark
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      ctx.font = `700 15.5px ${IOS_FONT_STACK}`;
-      ctx.fillStyle = isActive ? '#ffffff' : '#d1d5db';
-      ctx.fillText(amountText, ledgerCardX + ledgerCardW - (isActive ? 44 : 16), y + rowH * 0.44);
-
-      if (isActive) {
-        const ringCx = ledgerCardX + ledgerCardW - 24;
-        const ringCy = y + rowH * 0.5;
-        const p = clamp01(0.62 + entryAge * 2.2);
-        ctx.strokeStyle = IMSG_BLUE;
-        ctx.lineWidth = 2.2;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.arc(ringCx, ringCy, 11, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * p);
-        ctx.stroke();
-
-        const checkP = clamp01((p - 0.3) / 0.7);
-        if (checkP > 0.05) {
-          ctx.beginPath();
-          ctx.moveTo(ringCx - 4.5, ringCy + 0.5);
-          ctx.lineTo(ringCx - 1.2, ringCy + 3.8);
-          const seg2 = Math.min(1, Math.max(0.18, (checkP - 0.3) / 0.7));
-          ctx.lineTo((ringCx - 1.2) + 6.2 * seg2, (ringCy + 3.8) - 7.3 * seg2);
-          ctx.stroke();
-        }
-      }
+      const vig = ctx.createRadialGradient(
+        width * 0.5,
+        height * 0.5,
+        Math.min(width, height) * 0.28,
+        width * 0.5,
+        height * 0.5,
+        Math.max(width, height) * 0.78
+      );
+      vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      vig.addColorStop(1, 'rgba(0, 0, 0, 0.72)');
+      ctx.globalAlpha = vignetteStrength * bgOpacity;
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, width, height);
       ctx.restore();
     }
-
-    ctx.restore(); // end ledger clip
-    ctx.restore(); // end focal clip
-  }
-
-  private getMapWaypointX(idx: number): number {
-    return idx * 250 + Math.sin(idx * 1.15) * 68;
-  }
-
-  private getMapWaypointY(idx: number): number {
-    return Math.sin(idx * 0.85) * 155 + Math.cos(idx * 0.42) * 52;
-  }
-
-  private renderCityWalkMap(
-    ctx: CanvasRenderingContext2D,
-    frame: StyleFrameContext,
-    lyrics: Lyrics,
-    layout: LyricsLayout,
-    focalLeft: number,
-    focalWidth: number,
-    height: number,
-    activeIdx: number,
-    motionScale: number
-  ): void {
-    const cx = focalLeft + focalWidth * 0.5;
-    const cy = height * 0.56;
-    const t = frame.timeSeconds || 0;
-    const bass = frame.audio.bassEnergy || 0;
-    const activeWpX = this.getMapWaypointX(activeIdx);
-    const activeWpY = this.getMapWaypointY(activeIdx);
-    const walkSlide = motionScale > 0 ? clamp01(frame.wordProgress || 0) * 14 : 0;
-    const targetCamX = activeWpX + walkSlide;
-    const targetCamY = activeWpY;
-
-    if (!this.mapCamInit || frame.didSeekThisFrame || frame.reduceMotion) {
-      this.mapCamX = targetCamX;
-      this.mapCamY = targetCamY;
-      this.mapCamInit = true;
-    } else {
-      const rate = 1 - Math.exp(-Math.max(0.001, frame.deltaSeconds) * 4.5);
-      this.mapCamX += (targetCamX - this.mapCamX) * rate;
-      this.mapCamY += (targetCamY - this.mapCamY) * rate;
-    }
-
-    // Determine city metadata from lyrics/track seed
-    let cityLabel = 'San Francisco';
-    let streetA = 'Market St';
-    const sampleText = lyrics.lines[Math.min(lyrics.lines.length - 1, Math.max(0, activeIdx))]?.text ?? '';
-    if (/\btokyo|shibuya|harajuku\b/i.test(sampleText)) {
-      cityLabel = 'Tokyo';
-      streetA = 'Shibuya';
-    } else if (/\bnew york|nyc|brooklyn|manhattan|broadway\b/i.test(sampleText)) {
-      cityLabel = 'New York';
-      streetA = 'Broadway';
-    } else if (/\blondon|soho|thames\b/i.test(sampleText)) {
-      cityLabel = 'London';
-      streetA = 'Oxford St';
-    }
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(focalLeft, 0, focalWidth, height);
-    ctx.clip();
-
-    // 1. Procedural Dark-Mode Apple Maps City Canvas
-    ctx.fillStyle = '#0b101a';
-    ctx.fillRect(focalLeft, 0, focalWidth, height);
-
-    const camX = this.mapCamX;
-    const camY = this.mapCamY;
-
-    ctx.save();
-    // Varied city parks & organic urban block shapes
-    const blockStep = 170;
-    const startCellX = Math.floor((camX - focalWidth * 0.65) / blockStep) - 1;
-    const endCellX = Math.ceil((camX + focalWidth * 0.65) / blockStep) + 1;
-    const startCellY = Math.floor((camY - height * 0.65) / blockStep) - 1;
-    const endCellY = Math.ceil((camY + height * 0.65) / blockStep) + 1;
-
-    for (let gx = startCellX; gx <= endCellX; gx++) {
-      for (let gy = startCellY; gy <= endCellY; gy++) {
-        const sx = cx + gx * blockStep - camX;
-        const sy = cy + gy * blockStep - camY;
-        const cellHash = Math.abs((gx * 73856093) ^ (gy * 19349663));
-        const isPark = cellHash % 6 === 0;
-
-        if (isPark) {
-          drawRoundedRectPath(ctx, sx + 12, sy + 12, blockStep - 24, blockStep - 24, 18);
-          ctx.fillStyle = '#102921';
-          ctx.fill();
-          ctx.strokeStyle = '#183d30';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        } else {
-          // Varied city block base + irregular architectural building footprints
-          const splitH = (cellHash & 1) === 1;
-          drawRoundedRectPath(ctx, sx + 10, sy + 10, blockStep - 20, blockStep - 20, 8);
-          ctx.fillStyle = '#131a26';
-          ctx.fill();
-
-          ctx.fillStyle = '#1a2436';
-          if (splitH) {
-            ctx.fillRect(sx + 22, sy + 20, blockStep - 44, 48);
-            ctx.fillRect(sx + 24, sy + 82, (blockStep - 56) * 0.55, 58);
-            ctx.fillRect(sx + 24 + (blockStep - 56) * 0.55 + 10, sy + 86, (blockStep - 56) * 0.4, 50);
-          } else {
-            ctx.fillRect(sx + 22, sy + 22, 54, blockStep - 44);
-            ctx.fillRect(sx + 88, sy + 22, 58, 66);
-            ctx.fillRect(sx + 92, sy + 98, 52, 46);
-          }
-        }
-      }
-    }
-
-    // Secondary street grid & primary avenues
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 2.2;
-    for (let gx = startCellX; gx <= endCellX + 1; gx++) {
-      const sx = cx + gx * blockStep - camX;
-      ctx.beginPath();
-      ctx.moveTo(sx, 0);
-      ctx.lineTo(sx, height);
-      ctx.stroke();
-    }
-    for (let gy = startCellY; gy <= endCellY + 1; gy++) {
-      const sy = cy + gy * blockStep - camY;
-      ctx.beginPath();
-      ctx.moveTo(focalLeft, sy);
-      ctx.lineTo(focalLeft + focalWidth, sy);
-      ctx.stroke();
-    }
-
-    // Winding visible bay/river coastline drawn cleanly over northern grid/blocks (zero streets in water)
-    const bayOffsetY = -camY * 0.18 + height * 0.17;
-    ctx.fillStyle = '#0e2238';
-    ctx.strokeStyle = '#1d3c5e';
-    ctx.lineWidth = 3.2;
-    ctx.beginPath();
-    ctx.moveTo(focalLeft - 20, -20);
-    for (let sx = focalLeft - 20; sx <= focalLeft + focalWidth + 40; sx += 48) {
-      const wx = sx - cx + camX;
-      const wy = Math.sin(wx * 0.0036) * 58 + Math.cos(wx * 0.0017) * 34 + bayOffsetY;
-      ctx.lineTo(sx, wy);
-    }
-    ctx.lineTo(focalLeft + focalWidth + 40, -20);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // Curved golden-amber Apple Maps expressway highway
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    for (let sx = focalLeft - 40; sx <= focalLeft + focalWidth + 40; sx += 48) {
-      const wx = sx - cx + camX;
-      const hwY = cy + (Math.sin(wx * 0.0024) * 140 + 185 - (camY % 340));
-      if (sx === focalLeft - 40) ctx.moveTo(sx, hwY);
-      else ctx.lineTo(sx, hwY);
-    }
-    ctx.strokeStyle = '#6b4e23';
-    ctx.lineWidth = 9;
-    ctx.stroke();
-    ctx.strokeStyle = '#b58432';
-    ctx.lineWidth = 4.2;
-    ctx.stroke();
-
-    // Non-duplicate district labels cleanly clear of stage edges
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `700 11px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.36)';
-    let labelSlotIdx = 0;
-    for (let gx = startCellX; gx <= endCellX; gx += 2) {
-      const gy = ((gx % 2 === 0 ? 1 : -1) + Math.round(camY / blockStep));
-      const sx = cx + gx * blockStep + blockStep * 0.5 - camX;
-      const sy = cy + gy * blockStep + blockStep * 0.5 - camY;
-      if (sx < focalLeft + 76 || sx > focalLeft + focalWidth - 76 || sy < 72 || sy > height - 48) {
-        continue;
-      }
-      const dLabel = MAP_DISTRICTS[(Math.abs(gx) + labelSlotIdx++) % MAP_DISTRICTS.length];
-      ctx.fillText(dLabel, sx, sy);
-    }
-    ctx.restore();
-
-    // Clean Apple Maps district badge in top-left corner
-    const hudPillX = focalLeft + 20;
-    const hudPillY = 20;
-    drawRoundedRectPath(ctx, hudPillX, hudPillY, 210, 30, 15);
-    ctx.fillStyle = 'rgba(17, 22, 34, 0.86)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = `600 11.5px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = '#e2e8f0';
-    ctx.fillText(`Apple Maps · ${cityLabel} · ${streetA}`, hudPillX + 12, hudPillY + 15, 186);
-
-    // 2. Walking Route Polyline connecting ONLY visited pins (0..activeIdx — ZERO future pins!)
-    const routeStart = Math.max(0, activeIdx - 5);
-    ctx.save();
-    ctx.strokeStyle = IMSG_BLUE;
-    ctx.lineWidth = 5.5;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.shadowColor = IMSG_BLUE;
-    ctx.shadowBlur = 14;
-    ctx.beginPath();
-    for (let i = routeStart; i <= activeIdx; i++) {
-      const sx = cx + (this.getMapWaypointX(i) - camX);
-      const sy = cy + (this.getMapWaypointY(i) - camY);
-      if (i === routeStart) ctx.moveTo(sx, sy);
-      else ctx.lineTo(sx, sy);
-    }
-    ctx.stroke();
-    ctx.restore();
-
-    // 3. Trail of max 2-3 recent visited pins behind the active GPS beacon (well separated in world space)
-    const trailStart = Math.max(0, activeIdx - 3);
-    for (let i = trailStart; i < activeIdx; i++) {
-      const b = this.bubbles[i];
-      const px = cx + (this.getMapWaypointX(i) - camX);
-      const py = cy + (this.getMapWaypointY(i) - camY);
-      if (px < focalLeft - 40 || px > focalLeft + focalWidth + 40) continue;
-
-      ctx.save();
-      ctx.fillStyle = '#0A84FF';
-      ctx.beginPath();
-      ctx.arc(px, py, 6.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      const tag = layout.lines[b.lineIndex].text.split(/\s+/).slice(0, 3).join(' ');
-      ctx.font = `600 11px ${IOS_FONT_STACK}`;
-      const tagW = Math.min(150, ctx.measureText(tag).width + 18);
-      drawRoundedRectPath(ctx, px - tagW * 0.5, py + 12, tagW, 22, 11);
-      ctx.fillStyle = 'rgba(16, 20, 30, 0.82)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(226, 232, 240, 0.78)';
-      ctx.fillText(tag, px, py + 23, tagW - 10);
-      ctx.restore();
-    }
-
-    // 4. Active Pulsing Blue Apple Maps GPS Beacon + Full-Wrap Non-Colliding Lyric Callout
-    const actBubble = this.bubbles[activeIdx];
-    if (actBubble) {
-      const measured = layout.lines[actBubble.lineIndex];
-      const lineObj = lyrics.lines[actBubble.lineIndex];
-      const px = cx + (activeWpX - camX);
-      const py = cy + (activeWpY - camY);
-
-      // Pulsing GPS radar ring
-      const radarPhase = motionScale > 0 ? (t * 1.45) % 1 : 0.35;
-      const radarR = 14 + radarPhase * 26 + bass * 8;
-      ctx.save();
-      ctx.globalAlpha = (1 - radarPhase) * 0.52;
-      ctx.fillStyle = IMSG_BLUE;
-      ctx.beginPath();
-      ctx.arc(px, py, radarR, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#0A84FF';
-      ctx.beginPath();
-      ctx.arc(px, py, 10.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 3;
-      ctx.stroke();
-      ctx.restore();
-
-      // Generous non-colliding Apple Maps callout card above beacon
-      const calloutW = Math.min(460, Math.max(240, focalWidth * 0.72));
-      const calloutFontPx = Math.max(17, Math.min(22, Math.round(layout.fontSizePx * 1.05)));
-      const calloutStep = Math.round(calloutFontPx * 1.28);
-      ctx.font = `700 ${calloutFontPx}px ${IOS_FONT_STACK}`;
-      const wrapped = this.wrapTextIntoScratch(ctx, measured.text, calloutW - 36);
-      const calloutH = Math.max(76, wrapped.length * calloutStep + 46);
-
-      const boxX = Math.max(focalLeft + 16, Math.min(focalLeft + focalWidth - calloutW - 16, px - calloutW * 0.5));
-      const boxY = Math.max(60, py - calloutH - 22);
-
-      frame.recordHitRect?.(actBubble.lineIndex, boxX, boxY, calloutW, calloutH);
-
-      const entryAge = Math.max(0, frame.timeSeconds - lineObj.startSeconds);
-      const popScale =
-        motionScale > 0 && entryAge < 0.32 ? 0.92 + 0.08 * easeOutBack(clamp01(entryAge / 0.32)) : 1.0;
-
-      ctx.save();
-      ctx.globalAlpha = frame.lineFadeAlpha;
-      if (popScale !== 1.0) {
-        ctx.translate(boxX + calloutW * 0.5, py);
-        ctx.scale(popScale, popScale);
-        ctx.translate(-(boxX + calloutW * 0.5), -py);
-      }
-
-      drawRoundedRectPath(ctx, boxX, boxY, calloutW, calloutH, 18);
-      ctx.fillStyle = 'rgba(20, 24, 34, 0.94)';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
-      ctx.shadowBlur = 22;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = 'rgba(10, 132, 255, 0.72)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      // Callout ETA sub-row
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.font = `700 11px ${IOS_FONT_STACK}`;
-      ctx.fillStyle = '#38bdf8';
-      ctx.fillText('1 min walk · Live Route', boxX + 18, boxY + 18);
-
-      // Multi-line bold lyric inside callout
-      ctx.font = `700 ${calloutFontPx}px ${IOS_FONT_STACK}`;
-      ctx.fillStyle = '#ffffff';
-      ctx.textBaseline = 'top';
-      let lineY = boxY + 34;
-      for (let li = 0; li < wrapped.length; li++) {
-        ctx.fillText(wrapped[li], boxX + 18, lineY, calloutW - 36);
-        lineY += calloutStep;
-      }
-      ctx.restore();
-    }
-
-    ctx.restore();
-  }
-
-  private renderLockScreenAlerts(
-    ctx: CanvasRenderingContext2D,
-    frame: StyleFrameContext,
-    lyrics: Lyrics,
-    layout: LyricsLayout,
-    focalLeft: number,
-    focalWidth: number,
-    height: number,
-    activeIdx: number,
-    _effectiveScrollY: number,
-    motionScale: number
-  ): void {
-    const cx = focalLeft + focalWidth * 0.5;
-    const bass = frame.audio.bassEnergy || 0;
-    const manualOffset = Number.isFinite(frame.manualScrollY) ? (frame.manualScrollY ?? 0) : 0;
-    const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualOffset) > 3;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(focalLeft, 0, focalWidth, height);
-    ctx.clip();
-
-    // Subtle Lock Screen ambient wallpaper aura (tinted by album artwork)
-    if (!isTransparentStage(frame)) {
-      const aura = ctx.createRadialGradient(cx, height * 0.25, 24, cx, height * 0.45, Math.max(focalWidth, height) * 0.65);
-      aura.addColorStop(0, frame.palette.accentPrimary);
-      aura.addColorStop(0.5, frame.palette.bgMid);
-      aura.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.save();
-      ctx.globalAlpha = 0.22 + bass * 0.08;
-      ctx.fillStyle = aura;
-      ctx.fillRect(focalLeft, 0, focalWidth, height);
-      ctx.restore();
-    }
-
-    // 1. Crisp large SF Pro Display clock & date strictly inside top 22% (ZERO card overlap)
-    const topMargin = Math.max(18, Math.round(height * 0.04));
-    const clockFontPx = Math.max(48, Math.min(82, Math.round(height * 0.115)));
-    const dateY = topMargin + 10;
-    const clockY = dateY + Math.round(clockFontPx * 0.68);
-    const totalSec = Math.max(0, Math.floor(frame.timeSeconds || 0));
-    const clockMins = Math.floor(totalSec / 60);
-    const clockSecs = totalSec % 60;
-    const clockText = `${9 + (clockMins % 3)}:${String((41 + clockMins) % 60).padStart(2, '0')}`;
-    const subDateLabel = frame.trackMetadata?.artist
-      ? `Thursday, Nov 26 · ${frame.trackMetadata.artist} · ${clockMins}:${String(clockSecs).padStart(2, '0')}`
-      : 'Thursday, November 26';
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `600 14.5px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = 'rgba(241, 245, 249, 0.82)';
-    ctx.fillText(subDateLabel, cx, dateY, focalWidth - 40);
-
-    ctx.font = `700 ${clockFontPx}px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.94)';
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-    ctx.shadowBlur = 18;
-    ctx.fillText(clockText, cx, clockY);
-    ctx.shadowBlur = 0;
-
-    // 2. Depth-Stacked Arrived Notification Deck (strictly below top 22% clock area, ZERO future notifications)
-    const deckTop = Math.max(Math.round(height * 0.275), clockY + Math.round(clockFontPx * 0.65) + 18);
-    const deckBottom = height - 74;
-    const baseBannerW = Math.min(540, Math.max(250, focalWidth * 0.84));
-    const trackTitle = frame.trackMetadata?.title || 'WaveForm';
-    const maxEndIdx = isBrowsing ? Math.min(this.bubbles.length - 1, activeIdx + 2) : activeIdx;
-
-    // Pre-calculate active front card height so back stack cards peek neatly underneath
-    const activeBubble = this.bubbles[maxEndIdx];
-    const lyricFontPx = Math.max(16, Math.min(19, Math.round(layout.fontSizePx * 0.95)));
-    const lineStepPx = Math.round(lyricFontPx * 1.26);
-    ctx.font = `600 ${lyricFontPx}px ${IOS_FONT_STACK}`;
-    const frontWrappedCount = activeBubble
-      ? Math.max(1, this.wrapTextIntoScratch(ctx, layout.lines[activeBubble.lineIndex].text, baseBannerW - 84).length)
-      : 1;
-    const frontCardH = Math.max(78, frontWrappedCount * lineStepPx + 46);
-
-    // Draw back-to-front depth layers (depth 3 -> depth 0 active card)
-    const maxDepth = Math.min(3, maxEndIdx);
-    for (let depth = maxDepth; depth >= 0; depth--) {
-      const i = maxEndIdx - depth;
-      const b = this.bubbles[i];
-      const lineObj = lyrics.lines[b.lineIndex];
-      const measured = layout.lines[b.lineIndex];
-      const isFront = depth === 0;
-      const depthScale = isFront ? 1.0 : Math.max(0.8, 1.0 - depth * 0.06);
-      const cardW = baseBannerW * depthScale;
-      const cardX = cx - cardW * 0.5;
-
-      const entryAge = Math.max(0, frame.timeSeconds - lineObj.startSeconds);
-      const popLift =
-        isFront && motionScale > 0 && entryAge < 0.34
-          ? (1 - easeOutBack(clamp01(entryAge / 0.34))) * 20
-          : 0;
-
-      const rowH = isFront ? frontCardH : 74;
-      const y = isFront
-        ? deckTop + popLift
-        : deckTop + frontCardH + 14 + (depth - 1) * 20;
-
-      if (y + rowH > deckBottom + 24) continue;
-
-      const alpha = isFront
-        ? 1.0 * frame.lineFadeAlpha
-        : depth === 1
-        ? 0.68
-        : depth === 2
-        ? 0.42
-        : 0.22;
-
-      if (isFront) {
-        frame.recordHitRect?.(b.lineIndex, cardX, y, cardW, rowH);
-      }
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      drawRoundedRectPath(ctx, cardX, y, cardW, rowH, 20);
-      ctx.fillStyle = isFront ? 'rgba(30, 32, 42, 0.86)' : 'rgba(24, 26, 34, 0.8)';
-      ctx.fill();
-
-      // Frosted specular top rim
-      ctx.strokeStyle = isFront ? 'rgba(255, 255, 255, 0.28)' : 'rgba(255, 255, 255, 0.12)';
-      ctx.lineWidth = isFront ? 1.25 : 1;
-      ctx.stroke();
-
-      if (isFront) {
-        // App / artwork rounded icon badge
-        const iconBox = 38;
-        drawRoundedRectPath(ctx, cardX + 14, y + 16, iconBox, iconBox, 10);
-        const badgeGrad = ctx.createLinearGradient(cardX + 14, y + 16, cardX + 52, y + 54);
-        badgeGrad.addColorStop(0, frame.palette.accentPrimary || '#FA2D48');
-        badgeGrad.addColorStop(1, frame.palette.accentSecondary || '#818CF8');
-        ctx.fillStyle = badgeGrad;
-        ctx.fill();
-        drawWordIcon(ctx, b.lineIconId, cardX + 33, y + 35, 20, '#ffffff', 1.0);
-
-        // Bold title + "now" badge
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.font = `700 13px ${IOS_FONT_STACK}`;
-        ctx.fillStyle = '#f8fafc';
-        ctx.fillText(trackTitle, cardX + 62, y + 23, cardW - 130);
-
-        ctx.textAlign = 'right';
-        ctx.font = `500 11.5px ${IOS_FONT_STACK}`;
-        ctx.fillStyle = 'rgba(226, 232, 240, 0.65)';
-        ctx.fillText('now', cardX + cardW - 16, y + 23);
-
-        // Word-by-word glowing full-wrap lyric body inside active alert
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.font = `600 ${lyricFontPx}px ${IOS_FONT_STACK}`;
-        const bodyLines = this.wrapTextIntoScratch(ctx, measured.text, cardW - 84);
-        let ly = y + 38;
-        for (let li = 0; li < bodyLines.length; li++) {
-          ctx.fillStyle = '#ffffff';
-          ctx.shadowColor = 'rgba(255, 255, 255, 0.25)';
-          ctx.shadowBlur = 6;
-          ctx.fillText(bodyLines[li], cardX + 62, ly, cardW - 80);
-          ctx.shadowBlur = 0;
-          ly += lineStepPx;
-        }
-      } else {
-        // Subtle peek title & line preview on stacked cards beneath
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.font = `500 13px ${IOS_FONT_STACK}`;
-        ctx.fillStyle = 'rgba(226, 232, 240, 0.78)';
-        ctx.fillText(measured.text, cardX + 18, y + rowH - 18, cardW - 36);
-      }
-
-      ctx.restore();
-    }
-
-    // 3. Dynamic Island / Live Activity audio waveform pill at bottom
-    const liveW = Math.min(290, baseBannerW * 0.76);
-    const liveH = 38;
-    const liveX = cx - liveW * 0.5;
-    const liveY = height - 56;
-    drawRoundedRectPath(ctx, liveX, liveY, liveW, liveH, 19);
-    ctx.fillStyle = 'rgba(14, 16, 22, 0.92)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    // Mini artwork glowing dot + title + 8-bar audio-reactive waveform
-    ctx.fillStyle = frame.palette.accentPrimary || '#FA2D48';
-    ctx.beginPath();
-    ctx.arc(liveX + 20, liveY + liveH * 0.5, 8, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = `600 12px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = 'rgba(248, 250, 252, 0.86)';
-    ctx.fillText(trackTitle, liveX + 36, liveY + liveH * 0.5, liveW - 115);
-
-    const barCount = 8;
-    const barStartX = liveX + liveW - 64;
-    for (let k = 0; k < barCount; k++) {
-      const wave = 0.25 + 0.75 * Math.abs(Math.sin((frame.timeSeconds || 0) * 5.4 + k * 0.75));
-      const amp = wave * (0.45 + bass * 0.85) * Math.max(0.25, motionScale);
-      const bh = Math.max(4, Math.min(20, Math.round(18 * amp)));
-      ctx.fillStyle = k % 2 === 0 ? frame.palette.accentPrimary : frame.palette.accentSecondary;
-      drawRoundedRectPath(ctx, barStartX + k * 6.5, liveY + liveH * 0.5 - bh * 0.5, 3.5, bh, 1.5);
-      ctx.fill();
-    }
-
-    ctx.restore();
   }
 }

@@ -596,49 +596,45 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
           <div
             data-testid="visualizer-submenu-appearance"
             style={submenuPositionStyle}
-            className="liquid-glass-capsule w-72 rounded-2xl text-white p-2.5 max-h-[75vh] overflow-y-auto shadow-2xl border border-white/15 space-y-2.5"
+            className="liquid-glass-capsule w-72 rounded-2xl text-white p-2.5 max-h-[78vh] overflow-y-auto shadow-2xl border border-white/15 space-y-2.5"
           >
-            {/* Active Style Variation Selector */}
-            {activeStyle && activeStyle.variations.length > 1 && (
-              <>
-                <div className="space-y-1.5 px-1">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-white/45">
-                    Variation ({activeStyle.label})
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {activeStyle.variations.map((v) => {
-                      const active = activeVariationId === v.id;
-                      return (
-                        <button
-                          key={v.id}
-                          type="button"
-                          onClick={() => setStyleVariation(activeStyle.id, v.id)}
-                          title={v.description}
-                          className={`px-2 py-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer ${
-                            active
-                              ? 'bg-white/25 text-white font-semibold'
-                              : 'bg-white/5 hover:bg-white/15 text-white/75'
-                          }`}
-                        >
-                          {v.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-                <div className="h-[1px] bg-white/10" />
-              </>
-            )}
+            {/* Group 1: Style & Variation */}
+            <div className="space-y-2 px-1">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-white/45">
+                1. Style & Variation
+              </div>
 
-            {/* iOS Kinetic Pop-up Mode & Zoom Slider (Messages, Liquid Glass & Group Chat) */}
-            {config.styleId === 'IosTextingMotion' && activeVariationId !== 'navigation-map' && (
-              <>
-                <div className="space-y-1.5 px-1">
+              {activeStyle && activeStyle.variations.length > 1 && (
+                <div className="flex flex-wrap gap-1">
+                  {activeStyle.variations.map((v) => {
+                    const active = activeVariationId === v.id;
+                    return (
+                      <button
+                        key={v.id}
+                        type="button"
+                        onClick={() => setStyleVariation(activeStyle.id, v.id)}
+                        title={v.description}
+                        className={`px-2 py-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-white/25 text-white font-semibold'
+                            : 'bg-white/5 hover:bg-white/15 text-white/75'
+                        }`}
+                      >
+                        {v.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* iOS Kinetic Pop-up Mode & Zoom Slider (Messages, Liquid Glass & Group Chat only) */}
+              {config.styleId === 'IosTextingMotion' && activeVariationId !== 'navigation-map' && (
+                <div className="space-y-1.5 pt-0.5">
                   <button
                     type="button"
                     data-testid="ios-kinetic-popup-toggle"
                     onClick={() => setIosKineticPopup(!(config.iosKineticPopup ?? false))}
-                    className="w-full flex items-center justify-between px-1.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                    className="w-full flex items-center justify-between px-1.5 py-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
                   >
                     <span className="flex items-center gap-2 text-white/85">
                       <Sparkles size={12} className="text-sky-400" />
@@ -649,34 +645,11 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
 
                   {config.iosKineticPopup && (
                     <>
-                      <div className="flex items-center justify-between text-[11px] text-white/75 pt-0.5">
+                      <div className="flex items-center justify-between text-[11px] text-white/75">
                         <span>Kinetic Zoom</span>
                         <span className="font-mono text-white font-semibold">
                           {(config.iosKineticZoom ?? 1.45).toFixed(2)}x
                         </span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-1">
-                        {[
-                          { label: '0.85x', value: 0.85 },
-                          { label: '1.45x', value: 1.45 },
-                          { label: '1.80x', value: 1.8 },
-                        ].map((preset) => {
-                          const active = Math.abs((config.iosKineticZoom ?? 1.45) - preset.value) < 0.04;
-                          return (
-                            <button
-                              key={preset.label}
-                              type="button"
-                              onClick={() => setIosKineticZoom(preset.value)}
-                              className={`py-1 rounded-md text-[10px] font-mono transition-colors cursor-pointer ${
-                                active
-                                  ? 'bg-white/25 text-white font-bold'
-                                  : 'bg-white/5 hover:bg-white/15 text-white/70'
-                              }`}
-                            >
-                              {preset.label}
-                            </button>
-                          );
-                        })}
                       </div>
                       <input
                         aria-label="iOS Kinetic Zoom"
@@ -691,15 +664,12 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                     </>
                   )}
                 </div>
-                <div className="h-[1px] bg-white/10" />
-              </>
-            )}
+              )}
 
-            {/* 2.5D Navigation Map Scene & Time of Day */}
-            {config.styleId === 'IosTextingMotion' && activeVariationId === 'navigation-map' && (
-              <>
-                <div className="space-y-1.5 px-1">
-                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-white/45">
+              {/* 2.5D Navigation Map Scene & Time of Day (Navigation Map variation only) */}
+              {config.styleId === 'IosTextingMotion' && activeVariationId === 'navigation-map' && (
+                <div className="space-y-1.5 pt-0.5">
+                  <div className="flex items-center gap-1.5 text-[10px] font-semibold text-white/60">
                     <MapIcon size={10} />
                     <span>Map Scene</span>
                   </div>
@@ -723,7 +693,7 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                     })}
                   </div>
 
-                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-white/45 pt-1">
+                  <div className="flex items-center gap-1.5 text-[10px] font-semibold text-white/60 pt-0.5">
                     <Sun size={10} />
                     <span>Time of Day</span>
                   </div>
@@ -747,20 +717,13 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                     })}
                   </div>
                 </div>
-                <div className="h-[1px] bg-white/10" />
-              </>
-            )}
+              )}
 
-            {/* Lyric Justification: Centered / Left */}
-            <div className="space-y-1.5 px-1">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-white/45">
-                Lyric Justification
-              </div>
-              <div className="grid grid-cols-2 gap-1">
+              <div className="grid grid-cols-2 gap-1 pt-0.5">
                 {(
                   [
                     { id: 'center', label: 'Centered', icon: <AlignCenter size={11} /> },
-                    { id: 'left', label: 'Left', icon: <AlignLeft size={11} /> },
+                    { id: 'left', label: 'Left Align', icon: <AlignLeft size={11} /> },
                   ] as const
                 ).map((opt) => {
                   const active = currentTextAlign === opt.id;
@@ -769,7 +732,7 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                       key={opt.id}
                       type="button"
                       onClick={() => setTextAlign(opt.id)}
-                      className={`py-1 rounded-md text-[11px] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      className={`py-1 rounded-md text-[10.5px] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                         active
                           ? 'bg-white/25 text-white font-semibold'
                           : 'bg-white/5 hover:bg-white/15 text-white/70'
@@ -785,8 +748,83 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
 
             <div className="h-[1px] bg-white/10" />
 
-            {/* Background Opacity & Vignette Strength */}
+            {/* Group 2: Typography & Look */}
             <div className="space-y-2 px-1">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-white/45">
+                2. Typography & Look
+              </div>
+
+              {/* Compact Font Family Select Dropdown */}
+              <div className="space-y-1">
+                <label
+                  htmlFor="viz-font-family-select"
+                  className="flex items-center gap-1.5 text-[11px] text-white/75"
+                >
+                  <Type size={11} className="text-white/65" />
+                  <span>Font Family</span>
+                </label>
+                <select
+                  id="viz-font-family-select"
+                  data-testid="viz-font-select"
+                  aria-label="Font Family"
+                  value={config.fontId}
+                  onChange={(e) => setFontId(e.target.value as BundledFontId)}
+                  style={{ fontFamily: getBundledFontCssFamily(config.fontId) }}
+                  className="w-full rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-white/40 cursor-pointer"
+                >
+                  {BUNDLED_FONTS.map((font) => (
+                    <option
+                      key={font.id}
+                      value={font.id}
+                      className="bg-[#161822] text-white"
+                      style={{ fontFamily: getBundledFontCssFamily(font.id) }}
+                    >
+                      {font.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Text Size Stepper + Slider */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] text-white/75">
+                  <span>Text Size</span>
+                  <span className="font-mono text-white font-semibold">
+                    {config.fontSizeScale.toFixed(2)}x
+                  </span>
+                </div>
+                <div className="grid grid-cols-5 gap-1">
+                  {SIZE_PRESETS.map((preset) => {
+                    const active = Math.abs(config.fontSizeScale - preset.value) < 0.03;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() => setFontSizeScale(preset.value)}
+                        className={`py-0.5 rounded-md text-[10px] font-mono transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-white/25 text-white font-bold'
+                            : 'bg-white/5 hover:bg-white/15 text-white/70'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <input
+                  aria-label="Text Size Scale"
+                  type="range"
+                  min={MIN_FONT_SIZE_SCALE}
+                  max={MAX_FONT_SIZE_SCALE}
+                  step="0.05"
+                  value={config.fontSizeScale}
+                  onChange={(e) => setFontSizeScale(parseFloat(e.target.value))}
+                  className="w-full h-1.5 accent-[var(--color-accent)] bg-white/20 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Background Opacity & Vignette */}
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-[11px] text-white/75">
                   <span>Background Opacity</span>
@@ -824,85 +862,42 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                   className="w-full h-1.5 accent-[var(--color-accent)] bg-white/20 rounded-lg cursor-pointer"
                 />
               </div>
-            </div>
 
-            <div className="h-[1px] bg-white/10" />
+              <div className="space-y-0.5 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => setAlbumArtColorMatch(!config.albumArtColorMatch)}
+                  className="w-full flex items-center justify-between px-1.5 py-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Palette size={12} className="text-white/75" />
+                    <span>Album-Art Color Matching</span>
+                  </span>
+                  {config.albumArtColorMatch && <Check size={12} className="text-cyan-400" />}
+                </button>
 
-            {/* Font Family (8 BUNDLED_FONTS) */}
-            <div className="space-y-1">
-              <div className="flex items-center gap-1.5 px-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
-                <Type size={11} />
-                <span>Font Family</span>
-              </div>
-              <div className="space-y-0.5">
-                {BUNDLED_FONTS.map((font) => {
-                  const selected = config.fontId === font.id;
-                  return (
-                    <button
-                      key={font.id}
-                      type="button"
-                      onClick={() => setFontId(font.id as BundledFontId)}
-                      style={{ fontFamily: getBundledFontCssFamily(font.id) }}
-                      className={`w-full flex items-center justify-between px-2 py-1 rounded-lg text-xs transition-colors cursor-pointer ${
-                        selected ? 'bg-white/15 text-white font-semibold' : 'hover:bg-white/10 text-white/80'
-                      }`}
-                    >
-                      <span>{font.label}</span>
-                      {selected && <Check size={12} className="text-[var(--color-accent)]" />}
-                    </button>
-                  );
-                })}
+                <button
+                  type="button"
+                  onClick={() => setWordIconsEnabled(!(config.wordIconsEnabled ?? true))}
+                  className="w-full flex items-center justify-between px-1.5 py-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Sparkles size={12} className="text-white/75" />
+                    <span>Word Visual Icons</span>
+                  </span>
+                  {(config.wordIconsEnabled ?? true) && <Check size={12} className="text-violet-400" />}
+                </button>
               </div>
             </div>
 
             <div className="h-[1px] bg-white/10" />
 
-            {/* Text Size / Scale Presets + Slider */}
-            <div className="space-y-1.5 px-1">
-              <div className="flex items-center justify-between text-[11px] text-white/75">
-                <span>Text Size</span>
-                <span className="font-mono text-white font-semibold">
-                  {config.fontSizeScale.toFixed(2)}x
-                </span>
-              </div>
-              <div className="grid grid-cols-5 gap-1">
-                {SIZE_PRESETS.map((preset) => {
-                  const active = Math.abs(config.fontSizeScale - preset.value) < 0.03;
-                  return (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => setFontSizeScale(preset.value)}
-                      className={`py-1 rounded-md text-[10px] font-mono transition-colors cursor-pointer ${
-                        active
-                          ? 'bg-white/25 text-white font-bold'
-                          : 'bg-white/5 hover:bg-white/15 text-white/70'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <input
-                aria-label="Text Size Scale"
-                type="range"
-                min={MIN_FONT_SIZE_SCALE}
-                max={MAX_FONT_SIZE_SCALE}
-                step="0.05"
-                value={config.fontSizeScale}
-                onChange={(e) => setFontSizeScale(parseFloat(e.target.value))}
-                className="w-full h-1.5 accent-[var(--color-accent)] bg-white/20 rounded-lg cursor-pointer"
-              />
-            </div>
-
-            <div className="h-[1px] bg-white/10" />
-
-            {/* Motion Intensity: Subtle / Normal / Vivid + Reduce Motion */}
-            <div className="space-y-1.5 px-1">
+            {/* Group 3: Motion & Extras */}
+            <div className="space-y-2 px-1">
               <div className="text-[10px] font-bold uppercase tracking-wider text-white/45">
-                Motion Intensity
+                3. Motion & Extras
               </div>
+
               <div className="grid grid-cols-3 gap-1">
                 {MOTION_INTENSITY_OPTIONS.map((opt) => {
                   const active = currentMotionIntensity === opt.id && !config.reduceMotion;
@@ -914,7 +909,7 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                         setMotionIntensity(opt.id);
                         if (config.reduceMotion) setReduceMotion(false);
                       }}
-                      className={`py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
+                      className={`py-1 rounded-md text-[10.5px] font-medium transition-colors cursor-pointer ${
                         active
                           ? 'bg-white/25 text-white font-semibold'
                           : 'bg-white/5 hover:bg-white/15 text-white/70'
@@ -925,89 +920,73 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                   );
                 })}
               </div>
-            </div>
 
-            <div className="h-[1px] bg-white/10" />
+              <div className="space-y-0.5">
+                <button
+                  type="button"
+                  onClick={() => setBeatCameraThump(!(config.beatCameraThump ?? true))}
+                  className="w-full flex items-center justify-between px-1.5 py-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Sparkles size={12} className="text-white/75" />
+                    <span>Beat Camera Thump</span>
+                  </span>
+                  {(config.beatCameraThump ?? true) && <Check size={12} className="text-pink-400" />}
+                </button>
 
-            {/* Feature Toggles */}
-            <div className="space-y-0.5">
-              <button
-                type="button"
-                onClick={() => setAlbumArtColorMatch(!config.albumArtColorMatch)}
-                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
-              >
-                <span className="flex items-center gap-2">
-                  <Palette size={13} className="text-white/75" />
-                  <span>Album-Art Color Matching</span>
-                </span>
-                {config.albumArtColorMatch && <Check size={13} className="text-cyan-400" />}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setAudioReactive(!config.audioReactive)}
+                  className="w-full flex items-center justify-between px-1.5 py-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Activity size={12} className="text-white/75" />
+                    <span>Audio-Reactive FFT</span>
+                  </span>
+                  {config.audioReactive && <Check size={12} className="text-emerald-400" />}
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setAudioReactive(!config.audioReactive)}
-                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
-              >
-                <span className="flex items-center gap-2">
-                  <Activity size={13} className="text-white/75" />
-                  <span>Audio-Reactive FFT</span>
-                </span>
-                {config.audioReactive && <Check size={13} className="text-emerald-400" />}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setReduceMotion(!config.reduceMotion)}
+                  className="w-full flex items-center justify-between px-1.5 py-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Eye size={12} className="text-white/75" />
+                    <span>Reduce Motion</span>
+                  </span>
+                  {config.reduceMotion && <Check size={12} className="text-amber-400" />}
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setWordIconsEnabled(!(config.wordIconsEnabled ?? true))}
-                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
-              >
-                <span className="flex items-center gap-2">
-                  <Sparkles size={13} className="text-white/75" />
-                  <span>Word Visual Icons</span>
-                </span>
-                {(config.wordIconsEnabled ?? true) && <Check size={13} className="text-violet-400" />}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setBeatCameraThump(!(config.beatCameraThump ?? true))}
-                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
-              >
-                <span className="flex items-center gap-2">
-                  <Sparkles size={13} className="text-white/75" />
-                  <span>Beat Camera Thump</span>
-                </span>
-                {(config.beatCameraThump ?? true) && <Check size={13} className="text-pink-400" />}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setSandboxEnabled(!config.sandboxEnabled)}
+                  className="w-full flex items-center justify-between px-1.5 py-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-[11px]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Sparkles size={12} className="text-amber-300" />
+                    <span>Sandbox Demo Mode</span>
+                  </span>
+                  {config.sandboxEnabled && <Check size={12} className="text-amber-400" />}
+                </button>
+              </div>
 
               <button
                 type="button"
-                onClick={() => setReduceMotion(!config.reduceMotion)}
-                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+                onClick={() => {
+                  onClose();
+                  if (onOpenClipExport) {
+                    onOpenClipExport();
+                  } else if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('waveform:open-clip-export'));
+                  }
+                }}
+                className="w-full py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-pink-500/20 hover:bg-pink-500/30 border border-pink-400/30 text-pink-200 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
               >
-                <span className="flex items-center gap-2">
-                  <Eye size={13} className="text-white/75" />
-                  <span>Reduce Motion</span>
-                </span>
-                {config.reduceMotion && <Check size={13} className="text-amber-400" />}
+                <Film size={12} />
+                <span>Export 15s Clip</span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => setSandboxEnabled(!config.sandboxEnabled)}
-                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
-              >
-                <span className="flex items-center gap-2">
-                  <Sparkles size={13} className="text-amber-300" />
-                  <span>Sandbox Demo Mode</span>
-                </span>
-                {config.sandboxEnabled && <Check size={13} className="text-amber-400" />}
-              </button>
-            </div>
-
-            <div className="h-[1px] bg-white/10" />
-
-            {/* Preset JSON Copy / Import */}
-            <div className="space-y-1 px-1">
               <div className="grid grid-cols-2 gap-1">
                 <button
                   type="button"
@@ -1034,7 +1013,7 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                 </button>
               </div>
               {showPresetImport && (
-                <div className="space-y-1 pt-1">
+                <div className="space-y-1 pt-0.5">
                   <textarea
                     value={presetDraft}
                     onChange={(e) => setPresetDraft(e.target.value)}

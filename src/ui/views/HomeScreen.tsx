@@ -15,6 +15,7 @@ import { MusicService } from '../../services/MusicService';
 import { AccountAuthService } from '../../services/AccountAuthService';
 import type { HomeShelf, BrowseItem } from '../../models/Navigation';
 import type { Song } from '../../models/Song';
+import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
@@ -22,7 +23,7 @@ import { useLibraryStore } from '../../state/libraryStore';
 import { PlayerPlayIcon, LosslessWaveIcon } from '../common/WaveFormIcons';
 
 export interface HomeScreenProps {
-  onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
+  onOpenContextMenu?: OpenContextMenuFn;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = memo(({ onOpenContextMenu }) => {

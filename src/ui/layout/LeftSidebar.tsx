@@ -23,15 +23,22 @@ import {
   X,
   Sparkles,
   Play,
+  Pause,
   PanelLeftClose,
   PanelLeftOpen,
   ChevronDown,
 } from 'lucide-react';
-import { useLibraryStore } from '../../state/libraryStore';
+import {
+  useLibraryStore,
+  selectUnifiedSongs,
+  resolvePlaylistSongs,
+} from '../../state/libraryStore';
 import { useNavigationStore, PrimaryTab } from '../../state/navigationStore';
 import { usePlayerStore } from '../../state/playerStore';
+import { useQueueStore } from '../../state/queueStore';
 import { MusicService } from '../../services/MusicService';
 import { WaveFormLogoIcon } from '../common/WaveFormIcons';
+import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 // Inline vector WaveFormLogoIcon replaces LogoTransparent.svg img to eliminate broken image flash
 
 function isValidImageUrl(url: unknown): url is string {
@@ -51,9 +58,14 @@ const SIDEBAR_COLLAPSED_KEY = 'waveform_sidebar_collapsed';
 interface LeftSidebarProps {
   currentTab: NavTab;
   onSelectTab: (tab: NavTab, subView?: string) => void;
+  onOpenContextMenu?: OpenContextMenuFn;
 }
 
-export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTab }) => {
+export const LeftSidebar: React.FC<LeftSidebarProps> = ({
+  currentTab,
+  onSelectTab,
+  onOpenContextMenu,
+}) => {
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
     try {
       return typeof localStorage !== 'undefined' && localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
@@ -75,7 +87,14 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
 
   const playlists = useLibraryStore((s) => s.playlists);
+  const favorites = useLibraryStore((s) => s.favorites);
+  const localSongs = useLibraryStore((s) => s.localSongs);
   const isNowPlayingModalOpen = usePlayerStore((s) => s.isNowPlayingModalOpen);
+  const playbackState = usePlayerStore((s) => s.playbackState);
+  const loadTrack = usePlayerStore((s) => s.loadTrack);
+  const togglePlay = usePlayerStore((s) => s.togglePlay);
+  const queueContext = useQueueStore((s) => s.context);
+  const setContextQueue = useQueueStore((s) => s.setContextQueue);
   const {
     current,
     navigateToTab,
@@ -626,10 +645,41 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
                   {playlists.map((pl) => {
                     const trackCount = (pl as any).trackCount ?? pl.songCount ?? pl.songIds?.length;
                     const isSelected = current.type === 'release' && current.id === pl.id;
+                    const isThisPlaylistPlaying =
+                      playbackState === 'PLAYING' &&
+                      queueContext?.type === 'playlist' &&
+                      queueContext?.id === pl.id;
+
+                    const handlePlayPlaylist = (e: React.MouseEvent) => {
+                      e.stopPropagation();
+                      if (queueContext?.type === 'playlist' && queueContext?.id === pl.id) {
+                        togglePlay();
+                        return;
+                      }
+                      const unified = selectUnifiedSongs(favorites, localSongs);
+                      const playlistSongs = resolvePlaylistSongs(pl, unified);
+                      if (playlistSongs.length > 0) {
+                        setContextQueue(playlistSongs, 0, {
+                          id: pl.id,
+                          browseId: pl.id,
+                          title: pl.title,
+                          type: 'playlist',
+                          currentIndex: 0,
+                        });
+                        loadTrack(playlistSongs[0], 'active', true);
+                      } else {
+                        navigateToRelease(pl.id, 'playlist');
+                      }
+                    };
+
                     return (
                       <button
                         key={pl.id}
+                        data-testid={`sidebar-playlist-row-${pl.id}`}
                         onClick={() => navigateToRelease(pl.id, 'playlist')}
+                        onContextMenu={(e) =>
+                          onOpenContextMenu?.(e, { kind: 'playlist', playlist: pl })
+                        }
                         title={pl.title}
                         className={`relative group w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all truncate cursor-pointer ${
                           isSelected
@@ -655,15 +705,21 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ currentTab, onSelectTa
                               <ListMusic size={12} className="dark:text-white/60 text-black/50" />
                             )}
                             <div
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                navigateToRelease(pl.id, 'playlist');
-                              }}
-                              className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"
-                              title={`Play ${pl.title}`}
+                              data-testid={`sidebar-playlist-play-${pl.id}`}
+                              onClick={handlePlayPlaylist}
+                              className={`absolute inset-0 bg-black/60 flex items-center justify-center transition-opacity ${
+                                isThisPlaylistPlaying
+                                  ? 'opacity-100'
+                                  : 'opacity-0 group-hover:opacity-100'
+                              }`}
+                              title={isThisPlaylistPlaying ? `Pause ${pl.title}` : `Play ${pl.title}`}
                             >
                               <div className="w-4 h-4 rounded-full bg-[#FA2D48] flex items-center justify-center">
-                                <Play size={8} className="text-white fill-white ml-0.5" />
+                                {isThisPlaylistPlaying ? (
+                                  <Pause size={8} className="text-white fill-white" />
+                                ) : (
+                                  <Play size={8} className="text-white fill-white ml-0.5" />
+                                )}
                               </div>
                             </div>
                           </div>

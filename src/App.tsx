@@ -146,6 +146,7 @@ export const App: React.FC = () => {
                 setSettingsOpen(true);
               }
             }}
+            onOpenContextMenu={openContextMenu}
           />
         )}
 
@@ -215,6 +216,7 @@ export const App: React.FC = () => {
         isOpen={menuState.isOpen}
         x={menuState.x}
         y={menuState.y}
+        target={menuState.target}
         track={menuState.track}
         queueContext={menuState.queueContext}
         onClose={closeContextMenu}

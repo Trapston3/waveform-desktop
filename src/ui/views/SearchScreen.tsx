@@ -8,6 +8,7 @@ import { X, Clock, Sparkles, Loader2 } from 'lucide-react';
 import { MusicService } from '../../services/MusicService';
 import type { SearchResult } from '../../models/Navigation';
 import type { Song } from '../../models/Song';
+import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
@@ -22,7 +23,7 @@ import { PlayerPlayIcon, LosslessWaveIcon } from '../common/WaveFormIcons';
 export type SearchFilterPill = 'all' | 'songs' | 'videos' | 'albums' | 'artists' | 'playlists';
 
 export interface SearchScreenProps {
-  onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
+  onOpenContextMenu?: OpenContextMenuFn;
 }
 
 const FILTER_PILLS: { id: SearchFilterPill; label: string }[] = [
@@ -373,9 +374,7 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
                     </h3>
                     <div
                       onClick={() => handleItemClick(topResult)}
-                      onContextMenu={(e) =>
-                        onOpenContextMenu && onOpenContextMenu(e, topResult as any)
-                      }
+                      onContextMenu={(e) => onOpenContextMenu?.(e, topResult as any)}
                       className="acrylic-tile flex-1 p-5 rounded-3xl flex flex-col justify-between gap-4 cursor-pointer group"
                     >
                       <div className="flex items-center gap-4">
@@ -513,7 +512,7 @@ export const SearchScreen: React.FC<SearchScreenProps> = memo(({ onOpenContextMe
                       <div
                         key={item.id || item.videoId || idx}
                         onClick={() => handleItemClick(item)}
-                        onContextMenu={(e) => onOpenContextMenu && onOpenContextMenu(e, item)}
+                        onContextMenu={(e) => onOpenContextMenu?.(e, item)}
                         className={`acrylic-tile group flex items-center justify-between p-3 rounded-2xl cursor-pointer ${
                           isActiveTrack ? 'border-[var(--color-accent)]/60' : ''
                         }`}

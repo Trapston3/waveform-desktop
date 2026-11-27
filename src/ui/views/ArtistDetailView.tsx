@@ -12,6 +12,7 @@ import type { AppleArtistArt } from '../../services/AppleArtistArtService';
 import { MusicService } from '../../services/MusicService';
 import type { ArtistPage } from '../../models/Navigation';
 import type { Song } from '../../models/Song';
+import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
@@ -21,7 +22,7 @@ import { ArtistCredits } from '../common/ArtistCredits';
 
 export interface ArtistDetailViewProps {
   artistId: string;
-  onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
+  onOpenContextMenu?: OpenContextMenuFn;
 }
 
 export function formatArtistStats(
@@ -493,6 +494,17 @@ export const ArtistDetailView: React.FC<ArtistDetailViewProps> = memo(({ artistI
               <div
                 key={rel.id}
                 onClick={() => navigateToRelease(rel.id, 'album')}
+                onContextMenu={(e) =>
+                  onOpenContextMenu?.(e, {
+                    kind: 'album',
+                    album: {
+                      id: rel.id,
+                      title: rel.title,
+                      artist: artist?.name || rel.subtitle || '',
+                      coverUrl: rel.thumbnailUrl,
+                    },
+                  })
+                }
                 className="acrylic-tile group p-3.5 rounded-lg transition-all cursor-pointer hover:border-white/20"
               >
                 <div className="artwork-lockup relative aspect-square rounded-lg overflow-hidden mb-3 bg-neutral-900 shadow-md">
@@ -506,7 +518,18 @@ export const ArtistDetailView: React.FC<ArtistDetailViewProps> = memo(({ artistI
                   />
                   <button
                     title="More"
-                    onClick={(e) => { e.stopPropagation(); onOpenContextMenu?.(e, { videoId: rel.id, title: rel.title, artist: artist?.name || rel.subtitle || '', albumId: rel.id, albumName: rel.title, thumbnailUrl: rel.thumbnailUrl } as unknown as Song); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenContextMenu?.(e, {
+                        kind: 'album',
+                        album: {
+                          id: rel.id,
+                          title: rel.title,
+                          artist: artist?.name || rel.subtitle || '',
+                          coverUrl: rel.thumbnailUrl,
+                        },
+                      });
+                    }}
                     className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/55 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
                   >
                     <MoreHorizontal size={14} />

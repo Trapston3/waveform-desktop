@@ -12,10 +12,11 @@ import { EqualizerView } from '../views/EqualizerView';
 import { ReleaseDetailView } from '../views/ReleaseDetailView';
 import { ArtistDetailView } from '../views/ArtistDetailView';
 import type { Song } from '../../models/Song';
+import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 
 export interface MainViewportProps {
   currentTab?: string;
-  onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
+  onOpenContextMenu?: OpenContextMenuFn;
   onPlayTrack?: (track: any) => void;
 }
 

@@ -908,6 +908,49 @@ export class StorageService implements IStorageService {
     return this.addTracksToPlaylist(playlistId, [songId]);
   }
 
+  async renamePlaylist(playlistId: string, newTitle: string): Promise<Playlist | null> {
+    const sanitized = (newTitle || '').trim().slice(0, 100);
+    if (!sanitized) {
+      throw new Error('Playlist title cannot be empty');
+    }
+    return this.enqueue('playlists', async () => {
+      const playlists = await this.getPlaylists();
+      const target = playlists.find((p) => p.id === playlistId);
+      if (!target) return null;
+      target.title = sanitized;
+      target.updatedAt = new Date().toISOString();
+      this.playlistsCache = playlists;
+      const filePath = joinPath(this.baseDir, 'playlists.json');
+      await writeJsonAtomic(filePath, playlists);
+      return { ...target };
+    });
+  }
+
+  async duplicatePlaylist(playlistId: string): Promise<Playlist | null> {
+    return this.enqueue('playlists', async () => {
+      const playlists = await this.getPlaylists();
+      const source = playlists.find((p) => p.id === playlistId);
+      if (!source) return null;
+      const nowIso = new Date().toISOString();
+      const baseTitle = (source.title || 'Playlist').replace(/\s*\(Copy\)$/i, '').trim();
+      const copyTitle = `${baseTitle} (Copy)`.slice(0, 100);
+      const duplicated: Playlist = {
+        ...source,
+        id: `pl_custom_${Date.now()}_${++StorageService.playlistSeq}_${Math.random().toString(36).slice(2, 8)}`,
+        title: copyTitle,
+        isCustom: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        songIds: Array.isArray(source.songIds) ? [...source.songIds] : [],
+      };
+      playlists.push(duplicated);
+      this.playlistsCache = playlists;
+      const filePath = joinPath(this.baseDir, 'playlists.json');
+      await writeJsonAtomic(filePath, playlists);
+      return { ...duplicated };
+    });
+  }
+
   async deletePlaylist(playlistId: string): Promise<boolean> {
     return this.enqueue('playlists', async () => {
       const playlists = await this.getPlaylists();

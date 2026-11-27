@@ -26,6 +26,9 @@ import {
   PanelLeft,
   Mic2,
   Repeat2,
+  SlidersHorizontal,
+  Sliders,
+  Radio,
 } from 'lucide-react';
 import { MlAudioService, type TrackBeatAnalysis } from '../../services/MlAudioService';
 import { clampPlaybackRate, snapLoopToBars } from '../../utils/practiceLoop';
@@ -96,13 +99,12 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     x: 0,
     y: 0,
   });
-  const [isKaraokeOpen, setIsKaraokeOpen] = useState(false);
+  const [isStudioToolsOpen, setIsStudioToolsOpen] = useState(false);
   const [karaokeEnabled, setKaraokeEnabled] = useState(false);
   const [karaokeVocalLevel, setKaraokeVocalLevel] = useState(0);
   const [karaokeIsolateVocals, setKaraokeIsolateVocals] = useState(false);
   const [hasNeuralStem, setHasNeuralStem] = useState(false);
   const [isSeparatingVocals, setIsSeparatingVocals] = useState(false);
-  const [isPracticeOpen, setIsPracticeOpen] = useState(false);
   const [trackBeatAnalysis, setTrackBeatAnalysis] = useState<TrackBeatAnalysis | null>(null);
   const [isLrcEditorOpen, setIsLrcEditorOpen] = useState(false);
   const [isLrcDragOver, setIsLrcDragOver] = useState(false);
@@ -126,6 +128,9 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const setHideAlbumCover = useLyricVisualizerStore((s) => s.setHideAlbumCover);
   const setNowPlayingLayout = useLyricVisualizerStore((s) => s.setNowPlayingLayout);
   const settingsLyricsAlignment = useSettingsStore((s) => s.settings?.lyricsAlignment ?? 'left');
+  const automixEnabled = useSettingsStore((s) => Boolean(s.settings?.['playback.automixEnabled']));
+  const automixMode = useSettingsStore((s) => s.settings?.['playback.automixMode'] ?? 'neural_beat');
+  const updateSettings = useSettingsStore((s) => s.updateSettings);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const chromeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,7 +138,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   const remainingSpanRef = useRef<HTMLSpanElement>(null);
 
   // Granular Zustand selectors - eliminates wide re-renders on playback position ticks
-  const { navigateToArtist, navigateToRelease } = useNavigationStore();
+  const { navigateToArtist, navigateToRelease, setEqualizerOpen } = useNavigationStore();
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const playbackState = usePlayerStore((s) => s.playbackState);
   const durationMs = usePlayerStore((s) => s.durationMs);
@@ -562,15 +567,16 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
   useEffect(() => {
     if (!isOpen) {
       if (isFullBleedVisualizer) setIsFullBleedVisualizer(false);
+      if (isStudioToolsOpen) setIsStudioToolsOpen(false);
       if (vizContextMenu.isOpen) setVizContextMenu((prev) => ({ ...prev, isOpen: false }));
       if (isFullscreen) {
         setIsFullscreen(false);
         exitNativeFullscreen();
       }
     }
-  }, [isOpen, isFullscreen, isFullBleedVisualizer, vizContextMenu.isOpen]);
+  }, [isOpen, isFullscreen, isFullBleedVisualizer, isStudioToolsOpen, vizContextMenu.isOpen]);
 
-  // Capture-phase Escape handler: closes menu -> exits full-bleed -> exits fullscreen -> closes Now Playing
+  // Capture-phase Escape handler: closes menu -> studio tools -> exits full-bleed -> exits fullscreen -> closes Now Playing
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -579,6 +585,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
         e.stopImmediatePropagation();
         if (vizContextMenu.isOpen) {
           setVizContextMenu((prev) => ({ ...prev, isOpen: false }));
+        } else if (isStudioToolsOpen) {
+          setIsStudioToolsOpen(false);
         } else if (isFullBleedVisualizer) {
           setIsFullBleedVisualizer(false);
         } else if (isFullscreen) {
@@ -591,7 +599,19 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
     };
     window.addEventListener('keydown', handleKeyDown, true);
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [isOpen, isFullscreen, isFullBleedVisualizer, vizContextMenu.isOpen, onClose]);
+  }, [isOpen, isFullscreen, isFullBleedVisualizer, isStudioToolsOpen, vizContextMenu.isOpen, onClose]);
+
+  const studioToolsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isStudioToolsOpen) return;
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (studioToolsRef.current && !studioToolsRef.current.contains(event.target as Node)) {
+        setIsStudioToolsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isStudioToolsOpen]);
 
   const toggleFullscreen = () => {
     if (isFullscreen) {
@@ -1153,239 +1173,303 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                 {isVisualizerMode ? <Sparkles size={15} /> : <AlignLeft size={15} />}
               </button>
 
-              {/* Karaoke Vocal Control */}
-              <div className="relative shrink-0">
+              {/* Unified Studio Tools (Karaoke, Practice A-B Loop, Auto-Mix, Autoplay Radio, Equalizer) */}
+              <div ref={studioToolsRef} className="relative shrink-0">
                 <button
                   type="button"
-                  data-testid="now-playing-karaoke-toggle"
+                  data-testid="now-playing-studio-tools-toggle"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setIsKaraokeOpen((prev) => !prev);
+                    setIsStudioToolsOpen((prev) => !prev);
                   }}
-                  className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all cursor-pointer active:scale-95 ${
-                    karaokeEnabled
-                      ? 'bg-[#FA2D48]/30 text-white border border-[#FA2D48]/50'
+                  className={`relative w-8 h-8 rounded-lg flex items-center justify-center transition-all cursor-pointer active:scale-95 ${
+                    isStudioToolsOpen ||
+                    karaokeEnabled ||
+                    abLoop.active ||
+                    Math.abs(playbackRate - 1.0) > 0.01 ||
+                    automixEnabled
+                      ? 'bg-white/20 text-white border border-white/25'
                       : 'bg-white/[0.06] text-white/60 hover:text-white hover:bg-white/12'
                   }`}
-                  title="Karaoke Mode (Vocal Level)"
-                  aria-label="Karaoke Vocal Control"
+                  title="Studio Tools (Karaoke, Practice Loop, Auto-Mix, Radio, EQ)"
+                  aria-label="Studio Tools"
                 >
-                  <Mic2 size={15} />
+                  <SlidersHorizontal size={15} />
+                  {(karaokeEnabled ||
+                    abLoop.active ||
+                    Math.abs(playbackRate - 1.0) > 0.01 ||
+                    automixEnabled) && (
+                    <span
+                      data-testid="studio-tools-active-dot"
+                      className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-[#FA2D48] shadow-[0_0_8px_rgba(250,45,72,0.9)]"
+                    />
+                  )}
                 </button>
 
-                {isKaraokeOpen && (
+                {isStudioToolsOpen && (
                   <div
-                    data-testid="karaoke-popover"
+                    data-testid="studio-tools-popover"
                     onClick={(e) => e.stopPropagation()}
-                    className="absolute bottom-11 left-0 w-64 p-3.5 rounded-2xl bg-[#161822]/90 backdrop-blur-2xl border border-white/15 shadow-2xl text-white z-40 space-y-3"
+                    className="liquid-glass-capsule absolute bottom-11 left-0 w-80 max-h-[70vh] overflow-y-auto p-3.5 rounded-2xl bg-[#141620]/95 backdrop-blur-2xl border border-white/15 shadow-2xl text-white z-40 space-y-3"
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center justify-between border-b border-white/10 pb-2">
                       <div className="flex items-center gap-2">
-                        <Mic2 size={14} className="text-[#FA2D48]" />
-                        <span className="text-xs font-bold">Karaoke Mode</span>
+                        <SlidersHorizontal size={13} className="text-[#FA2D48]" />
+                        <span className="text-xs font-bold tracking-tight">Studio Tools</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setKaraokeEnabled((prev) => !prev)}
-                        className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold transition-colors cursor-pointer ${
-                          karaokeEnabled
-                            ? 'bg-[#FA2D48] text-white'
-                            : 'bg-white/10 text-white/70 hover:bg-white/20'
-                        }`}
-                      >
-                        {karaokeEnabled ? 'On' : 'Off'}
-                      </button>
+                      <span className="text-[10px] text-white/50">Live Audio & Mix</span>
                     </div>
 
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[11px] text-white/75">
-                        <span>Vocal Level</span>
-                        <span className="font-mono">{Math.round(karaokeVocalLevel * 100)}%</span>
-                      </div>
-                      <input
-                        aria-label="Vocal Level"
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.02"
-                        value={karaokeVocalLevel}
-                        onChange={(e) => {
-                          const v = parseFloat(e.target.value);
-                          setKaraokeVocalLevel(v);
-                          if (!karaokeEnabled) setKaraokeEnabled(true);
-                        }}
-                        className="w-full h-1.5 accent-[#FA2D48] bg-white/25 rounded-lg cursor-pointer"
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-0.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextIsolate = !karaokeIsolateVocals;
-                          setKaraokeIsolateVocals(nextIsolate);
-                          if (nextIsolate && karaokeVocalLevel < 0.1) {
-                            setKaraokeVocalLevel(1.0);
-                          } else if (!nextIsolate && karaokeVocalLevel > 0.9) {
-                            setKaraokeVocalLevel(0.0);
-                          }
-                          if (!karaokeEnabled) setKaraokeEnabled(true);
-                        }}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
-                          karaokeIsolateVocals
-                            ? 'bg-white/20 text-white'
-                            : 'bg-white/5 text-white/70 hover:bg-white/15'
-                        }`}
-                      >
-                        {karaokeIsolateVocals ? 'Isolating Vocals' : 'Isolate Vocals'}
-                      </button>
-                      <span className="text-[10px] text-white/55 truncate">
-                        {isSeparatingVocals
-                          ? 'Neural stem…'
-                          : hasNeuralStem
-                          ? 'Neural Stem Ready'
-                          : 'Instant DSP'}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Practice / Bar-Snapped A-B Loop & Speed Control */}
-              <div className="relative shrink-0">
-                <button
-                  type="button"
-                  data-testid="now-playing-practice-toggle"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setIsKaraokeOpen(false);
-                    setIsPracticeOpen((prev) => !prev);
-                  }}
-                  className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all cursor-pointer active:scale-95 ${
-                    abLoop.active || Math.abs(playbackRate - 1.0) > 0.01
-                      ? 'bg-sky-500/30 text-sky-200 border border-sky-400/50'
-                      : 'bg-white/[0.06] text-white/60 hover:text-white hover:bg-white/12'
-                  }`}
-                  title="Practice Controls (A-B Loop & Pitch-Preserving Speed)"
-                  aria-label="Practice Controls"
-                >
-                  <Repeat2 size={15} />
-                </button>
-
-                {isPracticeOpen && (
-                  <div
-                    data-testid="practice-popover"
-                    onClick={(e) => e.stopPropagation()}
-                    className="absolute bottom-11 left-0 w-72 p-3.5 rounded-2xl bg-[#161822]/95 backdrop-blur-2xl border border-white/15 shadow-2xl text-white z-40 space-y-3"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <Repeat2 size={14} className="text-sky-400" />
-                        <span className="text-xs font-bold">Practice & A-B Loop</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={clearAbLoop}
-                        className="px-2 py-0.5 rounded-full bg-white/10 hover:bg-white/20 text-[10px] font-semibold cursor-pointer"
-                      >
-                        Clear
-                      </button>
-                    </div>
-
-                    <div className="flex items-center justify-between text-[11px] font-mono text-sky-200/90 bg-white/5 px-2.5 py-1.5 rounded-lg">
-                      <span>A: {formatLoopClock(abLoop.startMs)}</span>
-                      <span>→</span>
-                      <span>B: {formatLoopClock(abLoop.endMs)}</span>
-                      <button
-                        type="button"
-                        onClick={toggleAbLoop}
-                        disabled={abLoop.startMs === null || abLoop.endMs === null}
-                        className={`px-2 py-0.5 rounded font-sans text-[10px] font-bold cursor-pointer disabled:opacity-40 ${
-                          abLoop.active ? 'bg-sky-500 text-black' : 'bg-white/15 text-white'
-                        }`}
-                      >
-                        {abLoop.active ? 'Loop On' : 'Loop Off'}
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-5 gap-1.5 text-[10px] font-semibold">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const pos =
-                            usePlayerStore.getState().audioEngine?.getCurrentPositionMs() ??
-                            usePlayerStore.getState().positionMs ??
-                            0;
-                          setAbLoopStart(pos);
-                        }}
-                        className="py-1.5 rounded-lg bg-white/10 hover:bg-white/20 cursor-pointer"
-                      >
-                        Set A
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const pos =
-                            usePlayerStore.getState().audioEngine?.getCurrentPositionMs() ??
-                            usePlayerStore.getState().positionMs ??
-                            0;
-                          setAbLoopEnd(pos);
-                        }}
-                        className="py-1.5 rounded-lg bg-white/10 hover:bg-white/20 cursor-pointer"
-                      >
-                        Set B
-                      </button>
-                      {[4, 8, 16].map((bars) => (
+                    {/* 1. Karaoke Vocal Removal */}
+                    <div className="rounded-xl bg-white/[0.04] border border-white/10 p-2.5 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <Mic2 size={13} className="text-[#FA2D48]" />
+                          <span className="text-[11px] font-bold">Karaoke Vocal Removal</span>
+                        </div>
                         <button
-                          key={bars}
                           type="button"
-                          onClick={() => void handleSnapBars(bars)}
-                          className={`py-1.5 rounded-lg cursor-pointer ${
-                            abLoop.barCount === bars && abLoop.active
-                              ? 'bg-sky-500 text-black font-bold'
-                              : 'bg-white/10 hover:bg-white/20 text-white'
+                          onClick={() => setKaraokeEnabled((prev) => !prev)}
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                            karaokeEnabled
+                              ? 'bg-[#FA2D48] text-white'
+                              : 'bg-white/10 text-white/70 hover:bg-white/20'
                           }`}
                         >
-                          {bars} Bars
+                          {karaokeEnabled ? 'On' : 'Off'}
                         </button>
-                      ))}
-                    </div>
+                      </div>
 
-                    <div className="h-[1px] bg-white/10" />
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[10px] text-white/70">
+                          <span>Vocal Level</span>
+                          <span className="font-mono">{Math.round(karaokeVocalLevel * 100)}%</span>
+                        </div>
+                        <input
+                          aria-label="Vocal Level"
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.02"
+                          value={karaokeVocalLevel}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            setKaraokeVocalLevel(v);
+                            if (!karaokeEnabled) setKaraokeEnabled(true);
+                          }}
+                          className="w-full h-1.5 accent-[#FA2D48] bg-white/20 rounded-lg cursor-pointer"
+                        />
+                      </div>
 
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between text-[11px] text-white/80">
-                        <span>Speed (Pitch Preserved)</span>
-                        <span className="font-mono font-bold text-sky-300">
-                          {playbackRate.toFixed(2)}x
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextIsolate = !karaokeIsolateVocals;
+                            setKaraokeIsolateVocals(nextIsolate);
+                            if (nextIsolate && karaokeVocalLevel < 0.1) {
+                              setKaraokeVocalLevel(1.0);
+                            } else if (!nextIsolate && karaokeVocalLevel > 0.9) {
+                              setKaraokeVocalLevel(0.0);
+                            }
+                            if (!karaokeEnabled) setKaraokeEnabled(true);
+                          }}
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-semibold transition-colors cursor-pointer ${
+                            karaokeIsolateVocals
+                              ? 'bg-white/20 text-white'
+                              : 'bg-white/5 text-white/70 hover:bg-white/15'
+                          }`}
+                        >
+                          {karaokeIsolateVocals ? 'Isolating Vocals' : 'Isolate Vocals'}
+                        </button>
+                        <span className="text-[10px] text-white/50 truncate">
+                          {isSeparatingVocals
+                            ? 'Neural stem…'
+                            : hasNeuralStem
+                            ? 'Neural Stem Ready'
+                            : 'Instant DSP'}
                         </span>
                       </div>
-                      <input
-                        aria-label="Practice Playback Speed"
-                        type="range"
-                        min={0.5}
-                        max={1.5}
-                        step={0.05}
-                        value={playbackRate}
-                        onChange={(e) => setPlaybackRate(clampPlaybackRate(parseFloat(e.target.value)))}
-                        className="w-full h-1.5 accent-sky-400 bg-white/25 rounded-lg cursor-pointer"
-                      />
-                      <div className="flex items-center justify-between gap-1 text-[10px] font-mono">
-                        {[0.5, 0.75, 0.85, 1.0, 1.25, 1.5].map((spd) => (
+                    </div>
+
+                    {/* 2. Practice A-B Loop & Speed */}
+                    <div className="rounded-xl bg-white/[0.04] border border-white/10 p-2.5 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <Repeat2 size={13} className="text-sky-400" />
+                          <span className="text-[11px] font-bold">Practice A-B Loop & Speed</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={clearAbLoop}
+                          className="px-2 py-0.5 rounded-full bg-white/10 hover:bg-white/20 text-[10px] font-semibold cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10.5px] font-mono text-sky-200/90 bg-white/5 px-2 py-1 rounded-lg">
+                        <span>A: {formatLoopClock(abLoop.startMs)}</span>
+                        <span>→</span>
+                        <span>B: {formatLoopClock(abLoop.endMs)}</span>
+                        <button
+                          type="button"
+                          onClick={toggleAbLoop}
+                          disabled={abLoop.startMs === null || abLoop.endMs === null}
+                          className={`px-2 py-0.5 rounded font-sans text-[10px] font-bold cursor-pointer disabled:opacity-40 ${
+                            abLoop.active ? 'bg-sky-500 text-black' : 'bg-white/15 text-white'
+                          }`}
+                        >
+                          {abLoop.active ? 'Loop On' : 'Loop Off'}
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-5 gap-1 text-[10px] font-semibold">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const pos =
+                              usePlayerStore.getState().audioEngine?.getCurrentPositionMs() ??
+                              usePlayerStore.getState().positionMs ??
+                              0;
+                            setAbLoopStart(pos);
+                          }}
+                          className="py-1 rounded-md bg-white/10 hover:bg-white/20 cursor-pointer"
+                        >
+                          Set A
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const pos =
+                              usePlayerStore.getState().audioEngine?.getCurrentPositionMs() ??
+                              usePlayerStore.getState().positionMs ??
+                              0;
+                            setAbLoopEnd(pos);
+                          }}
+                          className="py-1 rounded-md bg-white/10 hover:bg-white/20 cursor-pointer"
+                        >
+                          Set B
+                        </button>
+                        {[4, 8, 16].map((bars) => (
                           <button
-                            key={spd}
+                            key={bars}
                             type="button"
-                            onClick={() => setPlaybackRate(spd)}
-                            className={`flex-1 py-1 rounded cursor-pointer ${
-                              Math.abs(playbackRate - spd) < 0.02
+                            onClick={() => void handleSnapBars(bars)}
+                            className={`py-1 rounded-md cursor-pointer ${
+                              abLoop.barCount === bars && abLoop.active
                                 ? 'bg-sky-500 text-black font-bold'
-                                : 'bg-white/10 hover:bg-white/20 text-white/85'
+                                : 'bg-white/10 hover:bg-white/20 text-white'
                             }`}
                           >
-                            {spd}x
+                            {bars} Bars
                           </button>
                         ))}
                       </div>
+
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[10px] text-white/75">
+                          <span>Speed (Pitch Preserved)</span>
+                          <span className="font-mono font-bold text-sky-300">
+                            {playbackRate.toFixed(2)}x
+                          </span>
+                        </div>
+                        <input
+                          aria-label="Practice Playback Speed"
+                          type="range"
+                          min={0.5}
+                          max={1.5}
+                          step={0.05}
+                          value={playbackRate}
+                          onChange={(e) => setPlaybackRate(clampPlaybackRate(parseFloat(e.target.value)))}
+                          className="w-full h-1.5 accent-sky-400 bg-white/20 rounded-lg cursor-pointer"
+                        />
+                        <div className="flex items-center justify-between gap-1 text-[10px] font-mono">
+                          {[0.5, 0.75, 0.85, 1.0, 1.25, 1.5].map((spd) => (
+                            <button
+                              key={spd}
+                              type="button"
+                              onClick={() => setPlaybackRate(spd)}
+                              className={`flex-1 py-0.5 rounded cursor-pointer ${
+                                Math.abs(playbackRate - spd) < 0.02
+                                  ? 'bg-sky-500 text-black font-bold'
+                                  : 'bg-white/10 hover:bg-white/20 text-white/85'
+                              }`}
+                            >
+                              {spd}x
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 3. Auto-Mix Transitions */}
+                    <div className="rounded-xl bg-white/[0.04] border border-white/10 p-2.5 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <Sparkles size={13} className="text-violet-400" />
+                          <span className="text-[11px] font-bold">Auto-Mix Transitions</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void updateSettings({ 'playback.automixEnabled': !automixEnabled })}
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                            automixEnabled
+                              ? 'bg-violet-500 text-white'
+                              : 'bg-white/10 text-white/70 hover:bg-white/20'
+                          }`}
+                        >
+                          {automixEnabled ? 'On' : 'Off'}
+                        </button>
+                      </div>
+                      <select
+                        aria-label="Auto-Mix Mode"
+                        value={automixMode}
+                        onChange={(e) =>
+                          void updateSettings({
+                            'playback.automixMode': e.target.value as 'neural_beat' | 'smooth_crossfade' | 'gapless',
+                          })
+                        }
+                        className="w-full rounded-lg bg-white/10 border border-white/15 px-2 py-1 text-[11px] text-white focus:outline-none cursor-pointer"
+                      >
+                        <option value="neural_beat" className="bg-[#161822]">Neural Beat-Matched</option>
+                        <option value="smooth_crossfade" className="bg-[#161822]">Smooth Crossfade</option>
+                        <option value="gapless" className="bg-[#161822]">Gapless Cut</option>
+                      </select>
+                    </div>
+
+                    {/* 4. Autoplay Radio & 5. Equalizer / AutoEQ */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleAutoplay()}
+                        className={`flex items-center justify-between px-2.5 py-2 rounded-xl border text-[11px] font-semibold cursor-pointer transition-colors ${
+                          autoplayEnabled
+                            ? 'bg-emerald-500/20 border-emerald-400/40 text-emerald-200'
+                            : 'bg-white/[0.04] border-white/10 text-white/75 hover:bg-white/10'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <Radio size={12} />
+                          <span>Autoplay</span>
+                        </span>
+                        <span className="text-[10px]">{autoplayEnabled ? 'On' : 'Off'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsStudioToolsOpen(false);
+                          setEqualizerOpen(true);
+                        }}
+                        className="flex items-center justify-between px-2.5 py-2 rounded-xl bg-white/[0.04] hover:bg-white/10 border border-white/10 text-[11px] font-semibold text-white/85 cursor-pointer transition-colors"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <Sliders size={12} className="text-cyan-300" />
+                          <span>Equalizer</span>
+                        </span>
+                        <span className="text-[10px] text-white/45">AutoEQ</span>
+                      </button>
                     </div>
                   </div>
                 )}

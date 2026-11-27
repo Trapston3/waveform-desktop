@@ -92,6 +92,8 @@ export interface LibraryActions {
   ) => Promise<Playlist>;
   addTracksToPlaylist: (playlistId: string, trackIds: string[]) => Promise<void>;
   removeTrackFromPlaylist: (playlistId: string, trackId: string) => Promise<void>;
+  renamePlaylist: (playlistId: string, newTitle: string) => Promise<Playlist | null>;
+  duplicatePlaylist: (playlistId: string) => Promise<Playlist | null>;
   deletePlaylist: (playlistId: string) => Promise<boolean>;
   toggleFavorite: (song: Song) => Promise<boolean>;
   isFavorite: (videoId: string) => boolean;
@@ -389,6 +391,46 @@ export function selectUnifiedArtists(songs: Song[]): UnifiedArtist[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Pure selector: resolves ordered playable Song[] for a playlist from unified library tracks
+ * or embedded playlist tracks.
+ */
+export function resolvePlaylistSongs(
+  playlist: Playlist | null | undefined,
+  unifiedSongs: Song[]
+): Song[] {
+  if (!playlist) return [];
+  const songById = new Map<string, Song>();
+  for (const s of Array.isArray(unifiedSongs) ? unifiedSongs : []) {
+    if (!s || !s.videoId) continue;
+    songById.set(s.videoId, s);
+  }
+  const embedded: Song[] = Array.isArray((playlist as any).songs) ? (playlist as any).songs : [];
+  for (const s of embedded) {
+    if (s && s.videoId && !songById.has(s.videoId)) {
+      songById.set(s.videoId, s);
+    }
+  }
+  const resolved: Song[] = [];
+  const seen = new Set<string>();
+  for (const id of Array.isArray(playlist.songIds) ? playlist.songIds : []) {
+    const song = songById.get(id);
+    if (song && !seen.has(song.videoId)) {
+      seen.add(song.videoId);
+      resolved.push(song);
+    }
+  }
+  if (resolved.length === 0 && embedded.length > 0) {
+    for (const s of embedded) {
+      if (s && s.videoId && !seen.has(s.videoId)) {
+        seen.add(s.videoId);
+        resolved.push(s);
+      }
+    }
+  }
+  return resolved;
+}
+
 async function persistFoldersSetting(folders: string[], storage?: StorageService | null): Promise<void> {
   try {
     await useSettingsStore.getState().updateSettings({ 'storage.localFolders': folders });
@@ -562,6 +604,69 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
     } catch (err) {
       console.warn('[libraryStore] removeTrackFromPlaylist persistence error:', err);
     }
+  },
+
+  renamePlaylist: async (playlistId: string, rawNewTitle: string): Promise<Playlist | null> => {
+    const sanitizedTitle = (rawNewTitle || '').trim().slice(0, 100);
+    if (!sanitizedTitle) {
+      throw new Error('Playlist title cannot be empty');
+    }
+    const { storageService, playlists } = get();
+    const target = playlists.find((p) => p.id === playlistId);
+    if (!target) return null;
+
+    const updatedPlaylist: Playlist = {
+      ...target,
+      title: sanitizedTitle,
+      updatedAt: new Date().toISOString(),
+    };
+    set({
+      playlists: playlists.map((p) => (p.id === playlistId ? updatedPlaylist : p)),
+    });
+
+    const storage = storageService || globalStorageInstance || new StorageService();
+    try {
+      const persisted = await storage.renamePlaylist(playlistId, sanitizedTitle);
+      if (persisted) {
+        set({
+          playlists: get().playlists.map((p) => (p.id === playlistId ? persisted : p)),
+        });
+        return persisted;
+      }
+    } catch (err) {
+      console.warn('[libraryStore] renamePlaylist persistence error:', err);
+    }
+    return updatedPlaylist;
+  },
+
+  duplicatePlaylist: async (playlistId: string): Promise<Playlist | null> => {
+    const { storageService, playlists } = get();
+    const source = playlists.find((p) => p.id === playlistId);
+    if (!source) return null;
+
+    const storage = storageService || globalStorageInstance || new StorageService();
+    try {
+      const duplicated = await storage.duplicatePlaylist(playlistId);
+      if (duplicated) {
+        set({ playlists: [...get().playlists, duplicated] });
+        return duplicated;
+      }
+    } catch (err) {
+      console.warn('[libraryStore] duplicatePlaylist persistence error:', err);
+    }
+    const nowIso = new Date().toISOString();
+    const copyTitle = `${(source.title || 'Playlist').replace(/\s*\(Copy\)$/i, '').trim()} (Copy)`.slice(0, 100);
+    const fallback: Playlist = {
+      ...source,
+      id: `pl_custom_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: copyTitle,
+      isCustom: true,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      songIds: Array.isArray(source.songIds) ? [...source.songIds] : [],
+    };
+    set({ playlists: [...get().playlists, fallback] });
+    return fallback;
   },
 
   deletePlaylist: async (playlistId: string): Promise<boolean> => {

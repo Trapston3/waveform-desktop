@@ -54,6 +54,7 @@ import {
   type SpotifyPlaylistItem,
 } from '../../services/SpotifyPlaylistService';
 import type { Song } from '../../models/Song';
+import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 
 export type LibrarySubTab =
   | 'Recently Added'
@@ -68,7 +69,7 @@ export type LibrarySubTab =
 
 export interface LibraryScreenProps {
   initialSubTab?: LibrarySubTab | string;
-  onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
+  onOpenContextMenu?: OpenContextMenuFn;
 }
 
 export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
@@ -518,12 +519,16 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                             onClick={(e) => {
                               e.stopPropagation();
                               if (onOpenContextMenu) {
-                                onOpenContextMenu(e, (alb.songs?.[0] || {
-                                  videoId: alb.id,
-                                  title: alb.title,
-                                  artist: alb.artist,
-                                  liked: true,
-                                }) as any);
+                                onOpenContextMenu(e, {
+                                  kind: 'album',
+                                  album: {
+                                    id: alb.id,
+                                    title: alb.title,
+                                    artist: alb.artist,
+                                    coverUrl: alb.coverUrl,
+                                    songs: alb.songs,
+                                  },
+                                });
                               }
                             }}
                             className="w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white/90 border border-white/20 flex items-center justify-center transition-all cursor-pointer"
@@ -575,12 +580,23 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
               </div>
 
               <div className="flex-1 overflow-y-auto space-y-1 max-h-[calc(100vh-280px)] scrollbar-none">
-                {filteredArtists.map((artist) => {
+                  {filteredArtists.map((artist) => {
                   const isSelected = artist.id === currentArtist?.id;
                   return (
                     <button
                       key={artist.id}
                       onClick={() => setSelectedArtistId(artist.id)}
+                      onContextMenu={(e) =>
+                        onOpenContextMenu?.(e, {
+                          kind: 'artist',
+                          artist: {
+                            id: artist.id,
+                            name: artist.name,
+                            avatarUrl: artist.avatarUrl,
+                            songs: currentArtistSongs.length > 0 && isSelected ? currentArtistSongs : undefined,
+                          },
+                        })
+                      }
                       className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all cursor-pointer ${
                         isSelected
                           ? 'bg-white/12 border border-white/20 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25)]'
@@ -772,6 +788,18 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                 <div
                   key={alb.id}
                   onClick={() => handlePlayOrOpenAlbum(alb)}
+                  onContextMenu={(e) =>
+                    onOpenContextMenu?.(e, {
+                      kind: 'album',
+                      album: {
+                        id: alb.id,
+                        title: alb.title,
+                        artist: alb.artist,
+                        coverUrl: alb.coverUrl,
+                        songs: alb.songs,
+                      },
+                    })
+                  }
                   className="acrylic-tile group p-3 rounded-2xl transition-all cursor-pointer"
                 >
                   <div className="artwork-lockup relative aspect-square rounded-xl overflow-hidden mb-2.5 bg-neutral-900">
@@ -799,12 +827,16 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                         onClick={(e) => {
                           e.stopPropagation();
                           if (onOpenContextMenu) {
-                            onOpenContextMenu(e, (alb.songs?.[0] || {
-                              videoId: alb.id,
-                              title: alb.title,
-                              artist: alb.artist,
-                              liked: true,
-                            }) as any);
+                            onOpenContextMenu(e, {
+                              kind: 'album',
+                              album: {
+                                id: alb.id,
+                                title: alb.title,
+                                artist: alb.artist,
+                                coverUrl: alb.coverUrl,
+                                songs: alb.songs,
+                              },
+                            });
                           }
                         }}
                         className="w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white/90 border border-white/20 flex items-center justify-center transition-all cursor-pointer"
@@ -1030,6 +1062,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
               <div
                 key={pl.id}
                 onClick={() => navigateToRelease(pl.id, 'playlist')}
+                onContextMenu={(e) =>
+                  onOpenContextMenu?.(e, { kind: 'playlist', playlist: pl })
+                }
                 className="acrylic-tile group relative p-4 rounded-2xl transition-all cursor-pointer flex flex-col justify-between h-44"
               >
                 <div className="artwork-lockup w-12 h-12 rounded-xl bg-gradient-to-tr from-neutral-800 to-neutral-700 flex items-center justify-center text-neutral-300">

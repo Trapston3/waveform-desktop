@@ -18,6 +18,7 @@ import {
 import { MusicService } from '../../services/MusicService';
 import type { DetailPage } from '../../models/Navigation';
 import type { Song } from '../../models/Song';
+import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useNavigationStore } from '../../state/navigationStore';
@@ -31,7 +32,7 @@ import { ArtistCredits } from '../common/ArtistCredits';
 export interface ReleaseDetailViewProps {
   releaseId: string;
   releaseType?: 'album' | 'playlist';
-  onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
+  onOpenContextMenu?: OpenContextMenuFn;
 }
 
 export const ReleaseDetailView: React.FC<ReleaseDetailViewProps> = memo(({
@@ -53,7 +54,7 @@ export const ReleaseDetailView: React.FC<ReleaseDetailViewProps> = memo(({
   const pinnedIds = useOfflineCacheStore((s) => s.pinnedIds);
   const pinTracks = useOfflineCacheStore((s) => s.pinTracks);
   const unpinTracks = useOfflineCacheStore((s) => s.unpinTracks);
-  const { toggleFavorite, isFavorite } = useLibraryStore();
+  const { playlists, toggleFavorite, isFavorite } = useLibraryStore();
 
   useEffect(() => {
     let isMounted = true;
@@ -286,7 +287,42 @@ export const ReleaseDetailView: React.FC<ReleaseDetailViewProps> = memo(({
       </div>
 
       {/* 2. macOS Apple Music Tabular Tracklist with tracklist-row Virtualization */}
-      <div className="acrylic-tile p-4 rounded-3xl overflow-hidden tracklist-row">
+        <div
+          onContextMenu={(e) => {
+            if (!onOpenContextMenu || !detail) return;
+            if (releaseType === 'playlist') {
+              const pl = playlists.find((p) => p.id === releaseId);
+              onOpenContextMenu(e, {
+                kind: 'playlist',
+                playlist: pl ?? {
+                  id: releaseId,
+                  title: detail.title || 'Playlist',
+                  description: detail.description || '',
+                  thumbnailUrl: artworkUrl || null,
+                  isCustom: false,
+                  createdAt: '',
+                  updatedAt: '',
+                  songIds: songs.map((s) => s.videoId),
+                  songCount: songs.length,
+                  totalDurationSec,
+                },
+                songs,
+              });
+            } else {
+              onOpenContextMenu(e, {
+                kind: 'album',
+                album: {
+                  id: releaseId,
+                  title: detail.title || 'Album',
+                  artist: detail.subtitle || '',
+                  coverUrl: artworkUrl,
+                  songs,
+                },
+              });
+            }
+          }}
+          className="acrylic-tile p-4 rounded-3xl overflow-hidden tracklist-row"
+        >
         <DesktopTrackTable
           songs={songs}
           releaseContext={{

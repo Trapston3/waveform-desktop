@@ -15,7 +15,8 @@ import {
   type ILyricVisualStyle,
   type StyleMeasurementSpec,
 } from '../styleInterface';
-import { getActiveShip3DScene, setShip3DSceneHint, type Ship3DHudTelemetry } from '../ship3dScene';
+import { getActiveShip3DScene, setShip3DSceneHint } from '../ship3dScene';
+import { ArcaneSketchOverlay } from '../arcaneSketchOverlay';
 
 const SEM_FIRE = 1 << 0;
 const SEM_RAINBOW = 1 << 2;
@@ -52,6 +53,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
   // Pre-allocated AABB & back-to-front order scratch for up to 48 projected words (zero GC)
   private readonly drawnWordRects = new Float32Array(192);
   private readonly sortOrder = new Int32Array(48);
+  private readonly arcaneOverlay = new ArcaneSketchOverlay();
 
   getVariationIndex(variationId?: string): 0 | 1 | 2 {
     if (variationId === 'nebula-run') return 1;
@@ -79,6 +81,35 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     this.scrollY = 0;
     this.initialized = false;
     this.lastKnownActiveIdx = -1;
+    this.arcaneOverlay.reset();
+  }
+
+  private renderArcaneOverlay(
+    ctx: CanvasRenderingContext2D,
+    frame: StyleFrameContext,
+    width: number,
+    height: number
+  ): void {
+    const activeScene = getActiveShip3DScene();
+    if (activeScene) {
+      const pending = activeScene.getPendingArcaneEventCount();
+      for (let i = 0; i < pending; i++) {
+        this.arcaneOverlay.enqueueEvent(activeScene.getPendingArcaneEvent(i), frame.reduceMotion);
+      }
+      if (pending > 0) {
+        activeScene.clearPendingArcaneEvents();
+      }
+    }
+    this.arcaneOverlay.updateAndRender(
+      ctx,
+      frame.timeSeconds,
+      frame.deltaSeconds,
+      frame.palette,
+      frame.reduceMotion,
+      frame.fontFamily,
+      width,
+      height
+    );
   }
 
   private drawMinimalInstrumentalIndicator(
@@ -234,9 +265,8 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
 
       const minY = Math.max(44, wordFontPx * 0.65);
       const maxY = Math.max(minY, height - Math.max(52, wordFontPx * 0.75));
-      // Stagger farther upcoming words subtly upward into a descending corridor flight path
-      const depthLift = !gp.consumed && gp.worldZ < -1.5 ? Math.min(180, Math.abs(gp.worldZ + 1.5) * 8.5) : 0;
-      let drawY = Math.max(minY, Math.min(maxY, gp.screenY - depthLift));
+      // Keep every approaching word strictly on its exact flight-plane screenY (zero vertical lift or snap)
+      const drawY = Math.max(minY, Math.min(maxY, gp.screenY));
 
       const glowColor = resolveWordGlowColor(
         gp.semanticMask,
@@ -304,38 +334,37 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       unconsumedCount++;
 
       const pad = 10;
+      const halfW = textW * 0.5 + pad;
       const halfH = wordFontPx * 0.54 + pad;
-      const stepY = Math.max(46, wordFontPx * 0.96 + 14);
-      let bestY = drawY;
-      let bestOverlapPenalty = Infinity;
-
-      // Guaranteed zero-overlap candidate search fanning upward/downward along flight corridor
-      const baseCandidateY = drawY;
-      for (let attempt = 0; attempt < 11; attempt++) {
-        const dir = attempt === 0 ? 0 : attempt <= 6 ? -attempt : attempt - 6;
-        const candY = Math.max(minY, Math.min(maxY, baseCandidateY + dir * stepY));
-        const rx0 = drawX - textW * 0.5 - pad;
-        const ry0 = candY - halfH;
-        const rx1 = drawX + textW * 0.5 + pad;
-        const ry1 = candY + halfH;
-        let penalty = 0;
-        for (let d = 0; d < drawnCount; d++) {
-          const o = d * 4;
-          const ox = Math.max(0, Math.min(rx1, this.drawnWordRects[o + 2]) - Math.max(rx0, this.drawnWordRects[o]));
-          const oy = Math.max(0, Math.min(ry1, this.drawnWordRects[o + 3]) - Math.max(ry0, this.drawnWordRects[o + 1]));
-          penalty += ox * oy;
+      // Keep exact flight-plane screenY; apply gentle horizontal X separation only if tight words overlap
+      let finalX = drawX;
+      for (let d = 0; d < drawnCount; d++) {
+        const o = d * 4;
+        const otherRx0 = this.drawnWordRects[o];
+        const otherRy0 = this.drawnWordRects[o + 1];
+        const otherRx1 = this.drawnWordRects[o + 2];
+        const otherRy1 = this.drawnWordRects[o + 3];
+        const oy = Math.min(drawY + halfH, otherRy1) - Math.max(drawY - halfH, otherRy0);
+        if (oy <= 0) continue;
+        const curRx0 = finalX - halfW;
+        const curRx1 = finalX + halfW;
+        const ox = Math.min(curRx1, otherRx1) - Math.max(curRx0, otherRx0);
+        if (ox > 0) {
+          const otherCx = (otherRx0 + otherRx1) * 0.5;
+          const dir = finalX >= otherCx ? 1 : -1;
+          const shift = Math.min(halfW * 1.4, ox + 10);
+          const shifted = Math.max(minX, Math.min(maxX, finalX + dir * shift));
+          if (Math.abs(shifted - finalX) > 1) {
+            finalX = shifted;
+          } else {
+            finalX = Math.max(minX, Math.min(maxX, finalX - dir * shift));
+          }
         }
-        if (penalty < bestOverlapPenalty) {
-          bestOverlapPenalty = penalty;
-          bestY = candY;
-        }
-        if (penalty === 0) break;
       }
 
-      drawY = bestY;
-      const rx0 = drawX - textW * 0.5 - pad;
+      const rx0 = finalX - halfW;
       const ry0 = drawY - halfH;
-      const rx1 = drawX + textW * 0.5 + pad;
+      const rx1 = finalX + halfW;
       const ry1 = drawY + halfH;
 
       const o = drawnCount * 4;
@@ -358,12 +387,12 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       ctx.lineWidth = Math.max(4, wordFontPx * 0.16);
       ctx.shadowColor = 'rgba(2, 6, 18, 0.94)';
       ctx.shadowBlur = 10;
-      ctx.strokeText(gp.text, drawX, drawY);
+      ctx.strokeText(gp.text, finalX, drawY);
 
       ctx.shadowColor = glowColor;
       ctx.shadowBlur = gp.isActive ? 24 : 14;
       ctx.fillStyle = gp.isActive ? '#ffffff' : frame.palette.textActive;
-      ctx.fillText(gp.text, drawX, drawY);
+      ctx.fillText(gp.text, finalX, drawY);
       ctx.restore();
     }
 
@@ -397,12 +426,14 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       if (focal.left > 0) ctx.translate(focal.left, 0);
       this.drawMinimalInstrumentalIndicator(ctx, frame, focalWidth * 0.5, height * 0.34, Math.min(focalWidth * 0.86, 860));
       ctx.restore();
+      this.renderArcaneOverlay(ctx, frame, width, height);
       return;
     }
 
     // ONE unified lyric stream: render 3D-projected corridor words & nose splashes during playback
     if (!isBrowsing) {
       this.drawProjectedWords(ctx, frame, focal.left, focalWidth, height);
+      this.renderArcaneOverlay(ctx, frame, width, height);
       return;
     }
 

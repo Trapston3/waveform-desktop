@@ -6,6 +6,11 @@
 
 import * as THREE from 'three';
 import type { AudioFrameMetrics, LyricPalette, Lyrics } from '../core/models';
+import {
+  classifyArcaneSemanticKind,
+  type ArcaneFxEvent,
+  type ArcaneFxEventKind,
+} from './arcaneSketchOverlay';
 import { detectMagicWordEffect, type MagicWordKind } from './lyricSemantics';
 import { parseColorToRgbInto } from './webGlEffectLayer';
 
@@ -20,15 +25,20 @@ const ASTEROID_VARIANTS = 7;
 
 const DEBRIS_COUNT = 220;
 const TRAIL_SEGMENTS = 36;
-const SHOCKWAVE_POOL = 6;
+const SHOCKWAVE_POOL = 8;
 const SPLASH_DROPLET_POOL = 192;
 const WORD_FLASH_POOL = 48;
 const GATE_POOL = 48;
 const STAGGER_QUEUE_SIZE = 16;
 const SPARK_POOL = 72;
-const LASER_POOL = 8;
-const SHARD_POOL = 28;
+const LASER_POOL = 12;
+const SHARD_POOL = 48;
 const LIGHTNING_SEGMENTS = 18;
+const ARCANE_EVENT_RING_CAP = 16;
+const REVEAL_HISTORY_CAP = 64;
+const CAMERA_SHAKE_COOLDOWN_SEC = 0.24;
+const MAX_CAMERA_SHAKE_AMP = 0.14;
+const SHIP_HULL_RATTLE_SEC = 0.11;
 
 const SHIP_WIDTH = 1.45;
 const SHIP_HALF_SPAN = SHIP_WIDTH * 0.5;
@@ -137,6 +147,28 @@ interface PrecomputedWordGate {
   readonly text: string;
   readonly magicKind: MagicWordKind | null;
   readonly semanticMask: number;
+  readonly isRevealWord: boolean;
+  readonly arcaneKind: ArcaneFxEventKind | null;
+  readonly arcaneBroken: boolean;
+}
+
+const SHARD_VERTS = new Float32Array([
+  0.0, 1.0, 0.0,
+  0.92, -0.42, 0.68,
+  -0.88, -0.45, 0.64,
+  0.04, -0.38, -0.96,
+]);
+
+function quinticEase(t: number): number {
+  return t * t * t * (t * (6 * t - 15) + 10);
+}
+
+function shouldWordHaveRevealAsteroid(key: number, wordIndex: number, text: string): boolean {
+  let h = Math.imul((key + 0x9e3779b9) | 0, 2654435761) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 2246822519) >>> 0;
+  const pct = ((h ^ (h >>> 13)) >>> 0) % 100;
+  const isMajor = wordIndex === 0 || text.length >= 5;
+  return isMajor ? pct < 48 : pct < 28;
 }
 
 // ---------------------------------------------------------------------------
@@ -749,24 +781,21 @@ interface ThreeSceneState {
   trailInitialized: boolean;
   shockwaveMeshes: THREE.Mesh[];
   shockwaveMats: THREE.MeshBasicMaterial[];
-  shockwaveState: Float32Array; // [active, progress, x, y, z, colorMode] per slot
   splashPositions: Float32Array;
   splashColors: Float32Array;
   splashSizes: Float32Array;
   splashGeom: THREE.BufferGeometry;
   splashMat: THREE.ShaderMaterial;
   sparkPositions: Float32Array;
-  sparkVelocities: Float32Array;
   sparkColors: Float32Array;
-  sparkLife: Float32Array; // remaining life 0..1
   sparkGeom: THREE.BufferGeometry;
   sparkMat: THREE.PointsMaterial;
   laserMeshes: THREE.Mesh[];
   laserMats: THREE.MeshBasicMaterial[];
-  laserState: Float32Array; // [active, x, y, z, targetIdx] per slot
   shardMeshes: THREE.Mesh[];
+  shardWireMeshes: THREE.LineSegments[];
   shardMats: THREE.MeshBasicMaterial[];
-  shardState: Float32Array; // [active, x, y, z, vx, vy, vz, life] per slot
+  shardWireMats: THREE.LineBasicMaterial[];
   lightningPositions: Float32Array;
   lightningGeom: THREE.BufferGeometry;
   lightningMat: THREE.LineBasicMaterial;
@@ -865,12 +894,45 @@ export class Ship3DScene {
   private readonly staggerDelays = new Float32Array(STAGGER_QUEUE_SIZE);
   private staggerCount = 0;
 
-  // Software fallback spark / laser pools (zero allocations)
-  private readonly swSparks = new Float32Array(SPARK_POOL * 6); // x, y, z, vx, vy, life
-  private readonly swLasers = new Float32Array(LASER_POOL * 4); // active, x, y, z
+  // Unified simulation pools shared by Three.js WebGL and Canvas2D software fallback (zero GC)
+  private readonly shockwaveData = new Float32Array(SHOCKWAVE_POOL * 6); // active, progress, x, y, z, colorMode
+  private readonly sparkData = new Float32Array(SPARK_POOL * 10); // x, y, z, vx, vy, vz, life, r, g, b
+  private readonly laserData = new Float32Array(LASER_POOL * 6); // active, x, y, z, targetAstIdx, isReveal
+  // active, x, y, z, vx, vy, vz, life, rx, ry, rz, spinX, spinY, spinZ, size
+  private readonly shardData = new Float32Array(SHARD_POOL * 15);
+  private readonly shardProjX = new Float32Array(4);
+  private readonly shardProjY = new Float32Array(4);
   private sparkCursor = 0;
   private laserCursor = 0;
   private shardCursor = 0;
+
+  // Asteroid-Reveal binding & history ring buffers (zero GC)
+  private readonly asteroidRevealWordKey = new Int32Array(ASTEROID_COUNT).fill(-1);
+  private readonly asteroidRevealSeen = new Uint8Array(ASTEROID_COUNT);
+  private readonly revealBlastedKeys = new Int32Array(REVEAL_HISTORY_CAP).fill(-1);
+  private revealBlastedCursor = 0;
+  private readonly revealFiredKeys = new Int32Array(REVEAL_HISTORY_CAP).fill(-1);
+  private revealFiredCursor = 0;
+
+  // Pre-allocated Arcane / Jinx screen-space FX event ring buffer (zero GC)
+  private readonly arcaneEventRing: ArcaneFxEvent[] = Array.from(
+    { length: ARCANE_EVENT_RING_CAP },
+    () => ({
+      kind: 'word_collect',
+      screenX: 0,
+      screenY: 0,
+      shipScreenX: 0,
+      shipScreenY: 0,
+      shipRoll: 0,
+      shipScale: 72,
+      seed: 1,
+      timeSeconds: 0,
+      brokenVariant: false,
+    })
+  );
+  private arcaneEventCount = 0;
+  private arcaneEventSeedCounter = 1;
+  private readonly tmpScreenXY = new Float32Array(2);
 
   // Pre-allocated scratch buffers (zero per-frame heap allocations)
   private readonly tmpRgbA = new Float32Array(3);
@@ -942,7 +1004,15 @@ export class Ship3DScene {
   private wordPop = 0;
   private collectFlash = 0;
   private collectLunge = 0;
+  private shipHullRattle = 0;
   private cameraTrauma = 0;
+  private cameraShakeCooldown = 0;
+  private maxCameraShakeAmplitude = 0;
+  private currentShakeX = 0;
+  private currentShakeY = 0;
+  private currentShakeRoll = 0;
+  private revealBlastsTriggered = 0;
+  private totalShatteredAsteroids = 0;
   private chromaticPulse = 0;
   private rainbowTimer = 0;
   private iceTimer = 0;
@@ -1156,6 +1226,30 @@ export class Ship3DScene {
     return this.totalLaserSalvosFired;
   }
 
+  getMaxCameraShakeAmplitude(): number {
+    return this.maxCameraShakeAmplitude;
+  }
+
+  getRevealBlastsTriggered(): number {
+    return this.revealBlastsTriggered;
+  }
+
+  getTotalShatteredAsteroids(): number {
+    return this.totalShatteredAsteroids;
+  }
+
+  getPendingArcaneEventCount(): number {
+    return this.arcaneEventCount;
+  }
+
+  getPendingArcaneEvent(index: number): Readonly<ArcaneFxEvent> {
+    return this.arcaneEventRing[index];
+  }
+
+  clearPendingArcaneEvents(): void {
+    this.arcaneEventCount = 0;
+  }
+
   /**
    * Returns the minimum surface-to-surface clearance (worldDist - (rA + rB)) across all active asteroids.
    * Used by unit tests to verify zero asteroid-to-asteroid clipping.
@@ -1195,6 +1289,7 @@ export class Ship3DScene {
     for (let i = 0; i < ASTEROID_COUNT; i++) {
       const idx = i * ASTEROID_STRIDE;
       if (this.asteroids[idx + 11] < 0.5) continue;
+      if (this.asteroidRevealWordKey[i] >= 0) continue;
       const astWX = this.asteroids[idx] * 5.2;
       const astWY = -0.25 + this.asteroids[idx + 1] * 3.4;
       const astWZ = 5.0 - this.asteroids[idx + 2] * 6.2;
@@ -1222,6 +1317,7 @@ export class Ship3DScene {
     for (let i = 0; i < ASTEROID_COUNT; i++) {
       const idx = i * ASTEROID_STRIDE;
       if (this.asteroids[idx + 11] < 0.5) continue;
+      if (this.asteroidRevealWordKey[i] >= 0) continue;
       const astWX = this.asteroids[idx] * 5.2;
       const astWY = -0.25 + this.asteroids[idx + 1] * 3.4;
       const astWZ = 5.0 - this.asteroids[idx + 2] * 6.2;
@@ -1273,6 +1369,10 @@ export class Ship3DScene {
       this.laserSalvoCooldown = 0;
       this.wordFlashKeys.fill(-1);
       this.wordFlashValues.fill(0);
+      this.asteroidRevealWordKey.fill(-1);
+      this.revealBlastedKeys.fill(-1);
+      this.revealFiredKeys.fill(-1);
+      this.arcaneEventCount = 0;
 
       if (lyrics && Array.isArray(lyrics.lines)) {
         for (let li = 0; li < lyrics.lines.length; li++) {
@@ -1285,9 +1385,11 @@ export class Ship3DScene {
             if (!text) continue;
             const magicKind = detectMagicWordEffect(text);
             const semanticMask = classifyWordSemantics(text, magicKind);
+            const key = li * 10000 + wi;
+            const arcaneSem = classifyArcaneSemanticKind(text);
 
             this.precomputedWords.push({
-              key: li * 10000 + wi,
+              key,
               lineIndex: li,
               wordIndex: wi,
               startSeconds: w.startSeconds,
@@ -1295,6 +1397,9 @@ export class Ship3DScene {
               text,
               magicKind,
               semanticMask,
+              isRevealWord: shouldWordHaveRevealAsteroid(key, wi, text),
+              arcaneKind: arcaneSem.kind,
+              arcaneBroken: arcaneSem.brokenVariant,
             });
           }
         }
@@ -1310,6 +1415,8 @@ export class Ship3DScene {
       this.wordPop = 0;
       this.collectFlash = 0;
       this.collectLunge = 0;
+      this.shipHullRattle = 0;
+      this.cameraShakeCooldown = 0;
       this.cameraSpringPos = 0;
       this.cameraSpringVel = 0;
       this.maneuverKind = 0;
@@ -1327,13 +1434,14 @@ export class Ship3DScene {
       this.wordFlashKeys.fill(-1);
       this.wordFlashValues.fill(0);
       this.splashDroplets.fill(0);
-      if (this.threeState) {
-        this.threeState.sparkLife.fill(0);
-        this.threeState.laserState.fill(0);
-        this.threeState.shardState.fill(0);
-      }
-      this.swSparks.fill(0);
-      this.swLasers.fill(0);
+      this.shockwaveData.fill(0);
+      this.sparkData.fill(0);
+      this.laserData.fill(0);
+      this.shardData.fill(0);
+      this.asteroidRevealWordKey.fill(-1);
+      this.revealBlastedKeys.fill(-1);
+      this.revealFiredKeys.fill(-1);
+      this.arcaneEventCount = 0;
     }
   }
 
@@ -1389,6 +1497,8 @@ export class Ship3DScene {
   private enforceCorridorExclusion(slotIdx: number, timeSeconds: number): void {
     const idx = slotIdx * ASTEROID_STRIDE;
     if (this.asteroids[idx + 11] < 0.5) return;
+    // Exempt intact reveal-bound asteroids so they physically shield their target word until blasted
+    if (this.asteroidRevealWordKey[slotIdx] >= 0) return;
 
     let astWX = this.asteroids[idx] * 5.2;
     let astWY = -0.25 + this.asteroids[idx + 1] * 3.4;
@@ -1642,6 +1752,7 @@ export class Ship3DScene {
     this.asteroids[idx + 9] = 0; // vx drift
     this.asteroids[idx + 10] = 0; // vy drift
     this.asteroids[idx + 11] = 1; // alive
+    this.asteroidRevealWordKey[index] = -1;
 
     this.enforceCorridorExclusion(index, this.currentSceneTime);
   }
@@ -1654,11 +1765,13 @@ export class Ship3DScene {
       const idxA = i * ASTEROID_STRIDE;
       if (this.asteroids[idxA + 11] < 0.5) continue;
       const rA = this.asteroids[idxA + 6] * 3.2;
+      const revA = this.asteroidRevealWordKey[i] >= 0;
 
       for (let j = i + 1; j < ASTEROID_COUNT; j++) {
         const idxB = j * ASTEROID_STRIDE;
         if (this.asteroids[idxB + 11] < 0.5) continue;
         const rB = this.asteroids[idxB + 6] * 3.2;
+        const revB = this.asteroidRevealWordKey[j] >= 0;
 
         const wxA = this.asteroids[idxA] * 5.2;
         const wyA = -0.25 + this.asteroids[idxA + 1] * 3.4;
@@ -1676,21 +1789,35 @@ export class Ship3DScene {
 
         if (distSq < minDist * minDist) {
           const dist = Math.sqrt(distSq) || 0.001;
-          const overlap = (minDist - dist) * 0.65;
           const nx = dist > 0.01 ? dx / dist : (i % 2 === 0 ? 1 : -1);
           const ny = dist > 0.01 ? dy / dist : 0.2;
           const nz = dist > 0.01 ? dz / dist : 0;
 
-          this.asteroids[idxA] -= (nx * overlap) / 5.2;
-          this.asteroids[idxA + 1] -= (ny * overlap) / 3.4;
-          this.asteroids[idxA + 2] += (nz * overlap) / 6.2;
+          if (revA && !revB) {
+            const push = (minDist - dist) * 1.12;
+            this.asteroids[idxB] += (nx * push) / 5.2;
+            this.asteroids[idxB + 1] += (ny * push) / 3.4;
+            this.asteroids[idxB + 2] -= (nz * push) / 6.2;
+            this.asteroids[idxB + 9] += nx * dt * 0.55;
+          } else if (revB && !revA) {
+            const push = (minDist - dist) * 1.12;
+            this.asteroids[idxA] -= (nx * push) / 5.2;
+            this.asteroids[idxA + 1] -= (ny * push) / 3.4;
+            this.asteroids[idxA + 2] += (nz * push) / 6.2;
+            this.asteroids[idxA + 9] -= nx * dt * 0.55;
+          } else {
+            const overlap = (minDist - dist) * 0.65;
+            this.asteroids[idxA] -= (nx * overlap) / 5.2;
+            this.asteroids[idxA + 1] -= (ny * overlap) / 3.4;
+            this.asteroids[idxA + 2] += (nz * overlap) / 6.2;
 
-          this.asteroids[idxB] += (nx * overlap) / 5.2;
-          this.asteroids[idxB + 1] += (ny * overlap) / 3.4;
-          this.asteroids[idxB + 2] -= (nz * overlap) / 6.2;
+            this.asteroids[idxB] += (nx * overlap) / 5.2;
+            this.asteroids[idxB + 1] += (ny * overlap) / 3.4;
+            this.asteroids[idxB + 2] -= (nz * overlap) / 6.2;
 
-          this.asteroids[idxA + 9] -= nx * dt * 0.35;
-          this.asteroids[idxB + 9] += nx * dt * 0.35;
+            this.asteroids[idxA + 9] -= nx * dt * 0.35;
+            this.asteroids[idxB + 9] += nx * dt * 0.35;
+          }
         }
       }
     }
@@ -1728,6 +1855,7 @@ export class Ship3DScene {
         alpha: true,
         antialias: true,
         powerPreference: 'high-performance',
+        preserveDrawingBuffer: true,
       });
     } catch {
       this.threeActive = false;
@@ -2154,7 +2282,6 @@ export class Ship3DScene {
     const shockGeom = new THREE.RingGeometry(0.955, 1.0, 48);
     const shockwaveMeshes: THREE.Mesh[] = [];
     const shockwaveMats: THREE.MeshBasicMaterial[] = [];
-    const shockwaveState = new Float32Array(SHOCKWAVE_POOL * 6);
     for (let i = 0; i < SHOCKWAVE_POOL; i++) {
       const smat = new THREE.MeshBasicMaterial({
         color: 0x5eead4,
@@ -2175,7 +2302,7 @@ export class Ship3DScene {
     }
     disposables.push(shockGeom);
 
-    // Pooled Liquid-Starlight Splash Droplet Bursts (SPLASH_DROPLET_POOL = 96)
+    // Pooled Liquid-Starlight Splash Droplet Bursts (SPLASH_DROPLET_POOL = 192)
     const splashPositions = new Float32Array(SPLASH_DROPLET_POOL * 3);
     const splashColors = new Float32Array(SPLASH_DROPLET_POOL * 3);
     const splashSizes = new Float32Array(SPLASH_DROPLET_POOL);
@@ -2193,17 +2320,15 @@ export class Ship3DScene {
     // Nebula Run Volumetric Translucent Additive Clouds (and soft circular sprite texture)
     const nebulaTex = createNebulaCloudTexture();
 
-    // Pooled Absorption / Frost / Starlight Sparks (Points)
+    // Pooled Absorption / Frost / Ember Sparks (Points)
     const sparkPositions = new Float32Array(SPARK_POOL * 3);
-    const sparkVelocities = new Float32Array(SPARK_POOL * 3);
     const sparkColors = new Float32Array(SPARK_POOL * 3);
-    const sparkLife = new Float32Array(SPARK_POOL);
     const sparkGeom = new THREE.BufferGeometry();
     sparkGeom.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
     sparkGeom.setAttribute('color', new THREE.BufferAttribute(sparkColors, 3));
     const sparkMat = new THREE.PointsMaterial({
       map: nebulaTex,
-      size: 0.18,
+      size: 0.19,
       vertexColors: true,
       transparent: true,
       opacity: 0.95,
@@ -2220,7 +2345,6 @@ export class Ship3DScene {
     laserGeom.rotateX(Math.PI / 2);
     const laserMeshes: THREE.Mesh[] = [];
     const laserMats: THREE.MeshBasicMaterial[] = [];
-    const laserState = new Float32Array(LASER_POOL * 5); // active, x, y, z, targetAstIdx
     for (let l = 0; l < LASER_POOL; l++) {
       const lmat = new THREE.MeshBasicMaterial({
         color: 0xff5a36,
@@ -2240,26 +2364,40 @@ export class Ship3DScene {
     }
     disposables.push(laserGeom);
 
-    // Pooled Molten Asteroid Shatter Shards
-    const shardGeom = new THREE.TetrahedronGeometry(0.18, 0);
+    // Pooled Multi-Piece 3D Asteroid Fracture Shards (SHARD_POOL = 48) with Molten Wireframe Edges
+    const shardGeom = new THREE.DodecahedronGeometry(0.24, 0);
+    const shardEdgeGeom = new THREE.EdgesGeometry(shardGeom, 12);
     const shardMeshes: THREE.Mesh[] = [];
+    const shardWireMeshes: THREE.LineSegments[] = [];
     const shardMats: THREE.MeshBasicMaterial[] = [];
-    const shardState = new Float32Array(SHARD_POOL * 8); // active, x, y, z, vx, vy, vz, life
+    const shardWireMats: THREE.LineBasicMaterial[] = [];
     for (let s = 0; s < SHARD_POOL; s++) {
       const smat = new THREE.MeshBasicMaterial({
-        color: 0xff7b29,
+        color: 0x3b1d14,
         transparent: true,
-        opacity: 0.95,
+        opacity: 0.9,
+      });
+      const wmat = new THREE.LineBasicMaterial({
+        color: 0xff8a2b,
+        transparent: true,
+        opacity: 0.98,
         blending: THREE.AdditiveBlending,
+        depthWrite: false,
       });
       const smesh = new THREE.Mesh(shardGeom, smat);
+      const wmesh = new THREE.LineSegments(shardEdgeGeom, wmat);
+      smesh.add(wmesh);
       smesh.visible = false;
+      smesh.frustumCulled = false;
+      smesh.renderOrder = 21;
       scene.add(smesh);
       shardMeshes.push(smesh);
+      shardWireMeshes.push(wmesh);
       shardMats.push(smat);
-      disposables.push(smat);
+      shardWireMats.push(wmat);
+      disposables.push(smat, wmat);
     }
-    disposables.push(shardGeom);
+    disposables.push(shardGeom, shardEdgeGeom);
 
     // Pooled Procedural Jagged Lightning Arcs (LineSegments)
     const lightningPositions = new Float32Array(LIGHTNING_SEGMENTS * 2 * 3);
@@ -2480,24 +2618,21 @@ export class Ship3DScene {
       trailInitialized: false,
       shockwaveMeshes,
       shockwaveMats,
-      shockwaveState,
       splashPositions,
       splashColors,
       splashSizes,
       splashGeom,
       splashMat,
       sparkPositions,
-      sparkVelocities,
       sparkColors,
-      sparkLife,
       sparkGeom,
       sparkMat,
       laserMeshes,
       laserMats,
-      laserState,
       shardMeshes,
+      shardWireMeshes,
       shardMats,
-      shardState,
+      shardWireMats,
       lightningPositions,
       lightningGeom,
       lightningMat,
@@ -2589,7 +2724,15 @@ export class Ship3DScene {
     this.wordPop = 0;
     this.collectFlash = 0;
     this.collectLunge = 0;
+    this.shipHullRattle = 0;
     this.cameraTrauma = 0;
+    this.cameraShakeCooldown = 0;
+    this.maxCameraShakeAmplitude = 0;
+    this.currentShakeX = 0;
+    this.currentShakeY = 0;
+    this.currentShakeRoll = 0;
+    this.revealBlastsTriggered = 0;
+    this.totalShatteredAsteroids = 0;
     this.chromaticPulse = 0;
     this.rainbowTimer = 0;
     this.iceTimer = 0;
@@ -2602,15 +2745,17 @@ export class Ship3DScene {
     this.wordFlashKeys.fill(-1);
     this.wordFlashValues.fill(0);
     this.splashDroplets.fill(0);
+    this.shockwaveData.fill(0);
+    this.sparkData.fill(0);
+    this.laserData.fill(0);
+    this.shardData.fill(0);
+    this.asteroidRevealWordKey.fill(-1);
+    this.revealBlastedKeys.fill(-1);
+    this.revealFiredKeys.fill(-1);
+    this.arcaneEventCount = 0;
     if (this.threeState) {
       this.threeState.trailInitialized = false;
-      this.threeState.shockwaveState.fill(0);
-      this.threeState.sparkLife.fill(0);
-      this.threeState.laserState.fill(0);
-      this.threeState.shardState.fill(0);
     }
-    this.swSparks.fill(0);
-    this.swLasers.fill(0);
     this.initScene();
   }
 
@@ -2669,6 +2814,128 @@ export class Ship3DScene {
     }
   }
 
+  private projectWorldToScreen(wx: number, wy: number, wz: number, outXY: Float32Array): void {
+    if (this.threeState && this.threeActive) {
+      this.tmpVecC.set(wx, wy, wz).project(this.threeState.camera);
+      outXY[0] = (this.tmpVecC.x * 0.5 + 0.5) * this.width;
+      outXY[1] = (-this.tmpVecC.y * 0.5 + 0.5) * this.height;
+      return;
+    }
+    const invZ = 1.0 / Math.max(0.4, 6.2 - wz);
+    outXY[0] = this.frameCx + (wx - this.shipX * 0.12) * this.frameFocal * invZ;
+    outXY[1] = this.frameCy - (wy + 0.14) * this.frameFocal * invZ;
+  }
+
+  private pushArcaneEvent(
+    kind: ArcaneFxEventKind,
+    wx: number,
+    wy: number,
+    wz: number,
+    brokenVariant = false
+  ): void {
+    if (this.currentReduceMotion) return;
+    if (this.arcaneEventCount >= ARCANE_EVENT_RING_CAP) return;
+
+    this.projectWorldToScreen(wx, wy, wz, this.tmpScreenXY);
+    const ev = this.arcaneEventRing[this.arcaneEventCount++];
+    ev.kind = kind;
+    ev.screenX = this.tmpScreenXY[0];
+    ev.screenY = this.tmpScreenXY[1];
+
+    const shipWz = SHIP_WORLD_Z - this.warpSurge * 0.28 - this.collectLunge * 0.14;
+    this.projectWorldToScreen(this.shipX, this.shipY, shipWz, this.tmpScreenXY);
+    ev.shipScreenX = this.tmpScreenXY[0];
+    ev.shipScreenY = this.tmpScreenXY[1];
+    ev.shipRoll = this.rollAngle;
+    ev.shipScale = this.shipScale;
+    ev.seed = (this.arcaneEventSeedCounter = (this.arcaneEventSeedCounter + 1) | 0);
+    ev.timeSeconds = this.currentSceneTime;
+    ev.brokenVariant = brokenVariant;
+  }
+
+  private addCameraShakeTrauma(amount: number, reduceMotion: boolean): void {
+    if (reduceMotion || !this.currentBeatCameraThump) return;
+    if (this.cameraShakeCooldown > 0) return;
+    this.cameraShakeCooldown = CAMERA_SHAKE_COOLDOWN_SEC;
+    this.cameraTrauma = Math.min(0.65, this.cameraTrauma + amount * this.currentMotionScale);
+  }
+
+  private hasRevealHistoryKey(buf: Int32Array, key: number): boolean {
+    for (let i = 0; i < REVEAL_HISTORY_CAP; i++) {
+      if (buf[i] === key) return true;
+    }
+    return false;
+  }
+
+  private recordRevealHistoryKey(buf: Int32Array, key: number, isBlasted: boolean): void {
+    if (this.hasRevealHistoryKey(buf, key)) return;
+    if (isBlasted) {
+      buf[this.revealBlastedCursor] = key;
+      this.revealBlastedCursor = (this.revealBlastedCursor + 1) % REVEAL_HISTORY_CAP;
+    } else {
+      buf[this.revealFiredCursor] = key;
+      this.revealFiredCursor = (this.revealFiredCursor + 1) % REVEAL_HISTORY_CAP;
+    }
+  }
+
+  private findOrBindRevealAsteroid(
+    wordKey: number,
+    wordZ: number,
+    anchorX: number,
+    anchorY: number
+  ): number {
+    if (this.hasRevealHistoryKey(this.revealBlastedKeys, wordKey)) return -1;
+
+    // Check if an asteroid slot is already bound to this word key
+    for (let a = 0; a < ASTEROID_COUNT; a++) {
+      if (this.asteroidRevealWordKey[a] === wordKey && this.asteroids[a * ASTEROID_STRIDE + 11] > 0.5) {
+        return a;
+      }
+    }
+
+    const astWZ = Math.min(SHIP_NOSE_Z - 1.0, wordZ + 1.6);
+    const myScale = 0.145 + (Math.abs(wordKey) % 3) * 0.014;
+    const myRad = myScale * 3.2;
+
+    // Avoid binding a second reveal asteroid overlapping an already-bound reveal asteroid
+    for (let a = 0; a < ASTEROID_COUNT; a++) {
+      if (this.asteroidRevealWordKey[a] < 0) continue;
+      const idx = a * ASTEROID_STRIDE;
+      if (this.asteroids[idx + 11] < 0.5) continue;
+      const ox = this.asteroids[idx] * 5.2;
+      const oy = -0.25 + this.asteroids[idx + 1] * 3.4;
+      const oz = 5.0 - this.asteroids[idx + 2] * 6.2;
+      const oRad = this.asteroids[idx + 6] * 3.2;
+      if (Math.hypot(anchorX - ox, anchorY - oy, astWZ - oz) < myRad + oRad + 1.45) {
+        return -1;
+      }
+    }
+
+    // Pick the farthest non-reveal asteroid slot so we never visibly yank a foreground rock
+    let bestSlot = -1;
+    let bestAz = -1;
+    for (let a = 0; a < ASTEROID_COUNT; a++) {
+      if (this.asteroidRevealWordKey[a] >= 0) continue;
+      const az = this.asteroids[a * ASTEROID_STRIDE + 2];
+      if (az > bestAz) {
+        bestAz = az;
+        bestSlot = a;
+      }
+    }
+    if (bestSlot < 0) return -1;
+
+    const idx = bestSlot * ASTEROID_STRIDE;
+    this.asteroidRevealWordKey[bestSlot] = wordKey;
+    this.asteroids[idx] = anchorX / 5.2;
+    this.asteroids[idx + 1] = (anchorY + 0.25) / 3.4;
+    this.asteroids[idx + 2] = (5.0 - astWZ) / 6.2;
+    this.asteroids[idx + 6] = myScale;
+    this.asteroids[idx + 9] = 0;
+    this.asteroids[idx + 10] = 0;
+    this.asteroids[idx + 11] = 1;
+    return bestSlot;
+  }
+
   private startChoreographedManeuver(
     kind: 1 | 2 | 3,
     duration: number,
@@ -2692,19 +2959,20 @@ export class Ship3DScene {
       this.barrelRollActive = true;
       this.barrelRollPhase = 0;
     }
+    if (this.nextRand() < 0.45) {
+      this.pushArcaneEvent('whoosh_boost', this.shipX, this.shipY, SHIP_WORLD_Z);
+    }
   }
 
-  private emitShockwave(x: number, y: number, z: number): void {
-    if (this.threeState && this.threeActive) {
-      const base = this.shockwaveCursor * 6;
-      this.shockwaveCursor = (this.shockwaveCursor + 1) % SHOCKWAVE_POOL;
-      this.threeState.shockwaveState[base] = 1;
-      this.threeState.shockwaveState[base + 1] = 0.02;
-      this.threeState.shockwaveState[base + 2] = x;
-      this.threeState.shockwaveState[base + 3] = y;
-      this.threeState.shockwaveState[base + 4] = z;
-      this.threeState.shockwaveState[base + 5] = 0;
-    }
+  private emitShockwave(x: number, y: number, z: number, colorMode = 0): void {
+    const base = this.shockwaveCursor * 6;
+    this.shockwaveCursor = (this.shockwaveCursor + 1) % SHOCKWAVE_POOL;
+    this.shockwaveData[base] = 1;
+    this.shockwaveData[base + 1] = 0.02;
+    this.shockwaveData[base + 2] = x;
+    this.shockwaveData[base + 3] = y;
+    this.shockwaveData[base + 4] = z;
+    this.shockwaveData[base + 5] = colorMode;
   }
 
   private emitSparks(
@@ -2725,92 +2993,122 @@ export class Ship3DScene {
       const vy = Math.sin(angle) * speed * 0.75;
       const vz = 3.2 + this.nextRand() * 5.0;
 
-      if (this.threeState) {
-        const o = slot * 3;
-        this.threeState.sparkPositions[o] = wx;
-        this.threeState.sparkPositions[o + 1] = wy;
-        this.threeState.sparkPositions[o + 2] = wz;
-        this.threeState.sparkVelocities[o] = vx;
-        this.threeState.sparkVelocities[o + 1] = vy;
-        this.threeState.sparkVelocities[o + 2] = vz;
-        this.threeState.sparkColors[o] = r;
-        this.threeState.sparkColors[o + 1] = g;
-        this.threeState.sparkColors[o + 2] = b;
-        this.threeState.sparkLife[slot] = 1.0;
-      }
-
-      const swo = slot * 6;
-      this.swSparks[swo] = wx;
-      this.swSparks[swo + 1] = wy;
-      this.swSparks[swo + 2] = wz;
-      this.swSparks[swo + 3] = vx;
-      this.swSparks[swo + 4] = vy;
-      this.swSparks[swo + 5] = 1.0;
+      const o = slot * 10;
+      this.sparkData[o] = wx;
+      this.sparkData[o + 1] = wy;
+      this.sparkData[o + 2] = wz;
+      this.sparkData[o + 3] = vx;
+      this.sparkData[o + 4] = vy;
+      this.sparkData[o + 5] = vz;
+      this.sparkData[o + 6] = 1.0;
+      this.sparkData[o + 7] = r;
+      this.sparkData[o + 8] = g;
+      this.sparkData[o + 9] = b;
     }
   }
 
-  private fireTwinLasers(shipWorldX: number, shipWorldY: number): void {
+  private fireTwinLasers(
+    shipWorldX: number,
+    shipWorldY: number,
+    forcedTargetAst = -1,
+    isRevealLock = false
+  ): void {
     this.totalLaserSalvosFired += 1;
-    // Find nearest forward asteroid in firing corridor to target & shatter
-    let targetAst = -1;
-    let bestZ = 99;
-    for (let a = 0; a < ASTEROID_COUNT; a++) {
-      const idx = a * ASTEROID_STRIDE;
-      if (this.asteroids[idx + 11] < 0.5) continue;
-      const az = this.asteroids[idx + 2];
-      if (az > 0.7 && az < 6.5 && az < bestZ) {
-        bestZ = az;
-        targetAst = a;
+    let targetAst = forcedTargetAst;
+
+    if (targetAst < 0 || targetAst >= ASTEROID_COUNT || this.asteroids[targetAst * ASTEROID_STRIDE + 11] < 0.5) {
+      // Find nearest forward non-reveal asteroid in firing corridor to target & shatter
+      targetAst = -1;
+      let bestZ = 99;
+      for (let a = 0; a < ASTEROID_COUNT; a++) {
+        if (this.asteroidRevealWordKey[a] >= 0) continue;
+        const idx = a * ASTEROID_STRIDE;
+        if (this.asteroids[idx + 11] < 0.5) continue;
+        const az = this.asteroids[idx + 2];
+        if (az > 0.7 && az < 6.5 && az < bestZ) {
+          bestZ = az;
+          targetAst = a;
+        }
       }
     }
 
-    for (const side of [-1, 1] as const) {
+    for (let sIdx = 0; sIdx < 2; sIdx++) {
+      const side = sIdx === 0 ? -1 : 1;
       const slot = this.laserCursor;
       this.laserCursor = (this.laserCursor + 1) % LASER_POOL;
       const lx = shipWorldX + side * 1.15;
       const ly = shipWorldY;
       const lz = SHIP_WORLD_Z - 1.2;
 
-      if (this.threeState) {
-        const base = slot * 5;
-        this.threeState.laserState[base] = 1;
-        this.threeState.laserState[base + 1] = lx;
-        this.threeState.laserState[base + 2] = ly;
-        this.threeState.laserState[base + 3] = lz;
-        this.threeState.laserState[base + 4] = targetAst;
-      }
+      const base = slot * 6;
+      this.laserData[base] = 1;
+      this.laserData[base + 1] = lx;
+      this.laserData[base + 2] = ly;
+      this.laserData[base + 3] = lz;
+      this.laserData[base + 4] = targetAst;
+      this.laserData[base + 5] = isRevealLock ? 1 : 0;
+    }
 
-      const swb = slot * 4;
-      this.swLasers[swb] = 1;
-      this.swLasers[swb + 1] = lx;
-      this.swLasers[swb + 2] = ly;
-      this.swLasers[swb + 3] = lz;
+    if (this.nextRand() < 0.40) {
+      this.pushArcaneEvent('laser_salvo', shipWorldX, shipWorldY, SHIP_WORLD_Z - 1.2);
     }
   }
 
   private shatterAsteroid(astIndex: number): void {
     const idx = astIndex * ASTEROID_STRIDE;
+    if (this.asteroids[idx + 11] < 0.5) return;
+
     const wx = this.asteroids[idx] * 5.2;
     const wy = -0.25 + this.asteroids[idx + 1] * 3.4;
     const wz = 5.0 - this.asteroids[idx + 2] * 6.2;
+    const astRad = this.asteroids[idx + 6] * 3.2;
 
-    if (this.threeState) {
-      for (let k = 0; k < 10; k++) {
-        const slot = this.shardCursor;
-        this.shardCursor = (this.shardCursor + 1) % SHARD_POOL;
-        const base = slot * 8;
-        this.threeState.shardState[base] = 1;
-        this.threeState.shardState[base + 1] = wx;
-        this.threeState.shardState[base + 2] = wy;
-        this.threeState.shardState[base + 3] = wz;
-        this.threeState.shardState[base + 4] = (this.nextRand() - 0.5) * 9.5;
-        this.threeState.shardState[base + 5] = (this.nextRand() - 0.5) * 9.5;
-        this.threeState.shardState[base + 6] = (this.nextRand() - 0.3) * 8.0;
-        this.threeState.shardState[base + 7] = 1.0;
-      }
+    this.totalShatteredAsteroids += 1;
+
+    const boundKey = this.asteroidRevealWordKey[astIndex];
+    if (boundKey >= 0) {
+      this.recordRevealHistoryKey(this.revealBlastedKeys, boundKey, true);
+      this.asteroidRevealWordKey[astIndex] = -1;
     }
-    this.emitSparks(wx, wy, wz, 14, 1.0, 0.45, 0.12);
-    this.emitShockwave(wx, wy, wz);
+
+    // Multi-piece 3D fracture: split into 6-10 rotating molten/wireframe fragments flying outward
+    const pieceCount = 7 + (this.totalShatteredAsteroids % 4); // 7..10 fragments
+    for (let k = 0; k < pieceCount; k++) {
+      const slot = this.shardCursor;
+      this.shardCursor = (this.shardCursor + 1) % SHARD_POOL;
+      const base = slot * 15;
+      const phi = (k / pieceCount) * Math.PI * 2 + (this.nextRand() - 0.5) * 0.45;
+      const elev = (this.nextRand() - 0.5) * 1.4;
+      const speed = 3.2 + this.nextRand() * 5.6;
+      const dirX = Math.cos(phi) * Math.cos(elev);
+      const dirY = Math.sin(elev);
+      const dirZ = Math.sin(phi) * Math.cos(elev);
+
+      this.shardData[base] = 1;
+      this.shardData[base + 1] = wx + dirX * astRad * 0.45;
+      this.shardData[base + 2] = wy + dirY * astRad * 0.45;
+      this.shardData[base + 3] = wz + dirZ * astRad * 0.45;
+      this.shardData[base + 4] = dirX * speed;
+      this.shardData[base + 5] = dirY * speed;
+      this.shardData[base + 6] = dirZ * speed * 0.7 + 1.8;
+      this.shardData[base + 7] = 1.0; // life
+      this.shardData[base + 8] = this.nextRand() * Math.PI * 2;
+      this.shardData[base + 9] = this.nextRand() * Math.PI * 2;
+      this.shardData[base + 10] = this.nextRand() * Math.PI * 2;
+      this.shardData[base + 11] = (this.nextRand() - 0.5) * 14.0;
+      this.shardData[base + 12] = (this.nextRand() - 0.5) * 14.0;
+      this.shardData[base + 13] = (this.nextRand() - 0.5) * 12.0;
+      this.shardData[base + 14] = Math.max(0.55, astRad * (0.95 + this.nextRand() * 0.75));
+    }
+
+    this.emitSparks(wx, wy, wz, 16, 1.0, 0.52, 0.14);
+    this.emitShockwave(wx, wy, wz, 1);
+    this.addCameraShakeTrauma(0.24, this.currentReduceMotion);
+
+    if (this.nextRand() < 0.55) {
+      this.pushArcaneEvent('asteroid_split', wx, wy, wz);
+    }
+
     this.spawnAsteroid(astIndex, 7.6 + this.nextRand() * 1.4);
   }
 
@@ -2826,19 +3124,22 @@ export class Ship3DScene {
     this.wordPop = 1.0;
     this.collectFlash = 1.0;
     this.collectLunge = reduceMotion ? 0 : 1.0;
-    if (!reduceMotion && this.currentBeatCameraThump) {
-      this.cameraSpringVel += 1.35 * this.currentMotionScale;
-    }
-    this.cameraTrauma = Math.min(
-      reduceMotion || !this.currentBeatCameraThump ? 0.08 : 1.0,
-      this.cameraTrauma + (reduceMotion || !this.currentBeatCameraThump ? 0.02 : 0.11 * this.currentMotionScale)
-    );
+    // Per-word tactile punch lives on local shipHullRattle (~110ms 2-3px rattle + beacon flash),
+    // never adding camera shake trauma on routine word collections!
+    this.shipHullRattle = reduceMotion ? 0 : 1.0;
 
     this.recordWordMergeFlash(wordGate.key);
 
     const pos = this.getFlightPosition(wordGate.startSeconds, this.tmpFlightPos);
     const gateWorldX = pos.x;
     const gateWorldY = pos.y;
+
+    // Arcane / Jinx hand-drawn scribble trigger: semantic lyrics take priority, else ~22% ship outline
+    if (wordGate.arcaneKind !== null) {
+      this.pushArcaneEvent(wordGate.arcaneKind, gateWorldX, gateWorldY, wordZ, wordGate.arcaneBroken);
+    } else if (this.nextRand() < 0.22) {
+      this.pushArcaneEvent('word_collect', gateWorldX, gateWorldY, wordZ);
+    }
 
     parseColorToRgbInto(palette.accentPrimary, this.tmpRgbA);
     parseColorToRgbInto(palette.accentSecondary, this.tmpRgbB);
@@ -2869,7 +3170,7 @@ export class Ship3DScene {
     this.emitSplashDroplets(gateWorldX, gateWorldY, wordZ, 24, splashR, splashG, splashB);
     this.emitSparks(gateWorldX, gateWorldY, wordZ, 16, splashR, splashG, splashB);
     if (!reduceMotion) {
-      this.emitShockwave(gateWorldX, gateWorldY, wordZ);
+      this.emitShockwave(gateWorldX, gateWorldY, wordZ, 0);
     }
 
     const shipWorldX = this.shipX;
@@ -2898,7 +3199,7 @@ export class Ship3DScene {
 
     if ((mask & SEM_FIRE) !== 0 && !reduceMotion) {
       this.fireTwinLasers(shipWorldX, shipWorldY);
-      this.cameraTrauma = Math.min(1.0, this.cameraTrauma + 0.36);
+      this.addCameraShakeTrauma(0.28, reduceMotion);
       this.thrustPulse = Math.max(this.thrustPulse, 1.15);
       this.toastText = 'PLASMA STRIKE!';
       this.toastAlpha = 1.15;
@@ -2907,8 +3208,11 @@ export class Ship3DScene {
     if ((mask & SEM_BOOST) !== 0 && !reduceMotion) {
       this.warpSurge = 1.25;
       this.startChoreographedManeuver(1, 1.12, this.shipVx >= 0 ? 1 : -1);
+      if (this.nextRand() < 0.45) {
+        this.pushArcaneEvent('whoosh_boost', shipWorldX, shipWorldY, SHIP_WORLD_Z);
+      }
       this.chromaticPulse = 0.85;
-      this.cameraSpringVel += 1.4;
+      this.cameraSpringVel += 0.9;
       this.toastText = 'HYPER WARP!';
       this.toastAlpha = 1.15;
       this.toastColorKind = 'accent';
@@ -2928,7 +3232,7 @@ export class Ship3DScene {
     }
     if ((mask & SEM_ELECTRIC) !== 0 && !reduceMotion) {
       this.electricTimer = 1.35;
-      this.cameraTrauma = Math.min(1.0, this.cameraTrauma + 0.22);
+      this.addCameraShakeTrauma(0.2, reduceMotion);
       this.toastText = 'ARC DISCHARGE';
       this.toastAlpha = 1.1;
       this.toastColorKind = 'ice';
@@ -3004,18 +3308,16 @@ export class Ship3DScene {
       st.camera.clearViewOffset();
     }
 
-    // Trauma-based camera shake (quadratic trauma^2) + bullet-time orbital arc + FOV warp kick
-    const traumaEff = reduceMotion ? Math.min(0.15, this.cameraTrauma) : this.cameraTrauma;
-    const shake = traumaEff * traumaEff;
-    const shakeX = shake * Math.sin(timeSeconds * 47.0) * 0.24;
-    const shakeY = shake * Math.cos(timeSeconds * 53.0) * 0.18;
-    const shakeRoll = shake * Math.sin(timeSeconds * 37.0) * 0.045;
+    // Tamed damped camera shake (clamped <= 0.14 world units in render()) + bullet-time orbital arc + FOV warp kick
+    const shakeX = this.currentShakeX;
+    const shakeY = this.currentShakeY;
+    const shakeRoll = this.currentShakeRoll;
 
     const bulletArc =
       this.bulletTimeTimer > 0 && !reduceMotion
         ? Math.sin((1.0 - this.bulletTimeTimer) * Math.PI) * 1.45
         : 0;
-    const lungeZ = this.collectLunge * 0.16 + this.cameraSpringPos * 0.42;
+    const lungeZ = this.collectLunge * 0.14 + this.cameraSpringPos * 0.32;
 
     st.camera.position.set(this.shipX * 0.16 + shakeX + bulletArc, 0.65 + shakeY, 6.2 - lungeZ);
     st.camera.lookAt(this.shipX * 0.12, -0.14, -5.0);
@@ -3065,19 +3367,32 @@ export class Ship3DScene {
       st.asteroidWireMeshes[i].visible = isWire;
     }
 
-    // Blinking wingtip red / cyan beacons
+    // Blinking wingtip red / cyan beacons + local per-word hull-rattle beacon flash
+    const beaconFlash = reduceMotion ? 0 : this.shipHullRattle * 0.88;
     const navPulse = reduceMotion ? 0.85 : 0.45 + 0.55 * (Math.sin(timeSeconds * 6.4) > 0 ? 1 : 0.25);
-    st.portBeaconMat.color.setRGB(1.0 * navPulse, 0.23 * navPulse, 0.36 * navPulse);
+    st.portBeaconMat.color.setRGB(
+      Math.min(1, 1.0 * navPulse + beaconFlash),
+      Math.min(1, 0.23 * navPulse + beaconFlash * 0.72),
+      Math.min(1, 0.36 * navPulse + beaconFlash * 0.72)
+    );
     const stbdPulse = reduceMotion ? 0.85 : 0.45 + 0.55 * (Math.sin(timeSeconds * 6.4 + Math.PI * 0.5) > 0 ? 1 : 0.25);
-    st.stbdBeaconMat.color.setRGB(0.13 * stbdPulse, 0.83 * stbdPulse, 0.93 * stbdPulse);
+    st.stbdBeaconMat.color.setRGB(
+      Math.min(1, 0.13 * stbdPulse + beaconFlash * 0.85),
+      Math.min(1, 0.83 * stbdPulse + beaconFlash),
+      Math.min(1, 0.93 * stbdPulse + beaconFlash)
+    );
 
-    // Position & orient Starfighter smoothly in flight corridor
+    // Position & orient Starfighter smoothly in flight corridor + ~110ms local hull micro-rattle on word collection
+    const rattleEnv = reduceMotion ? 0 : this.shipHullRattle * this.shipHullRattle;
+    const rattleX = rattleEnv * Math.sin(timeSeconds * 96.0) * 0.028;
+    const rattleY = rattleEnv * Math.cos(timeSeconds * 114.0) * 0.022;
+    const rattleZ = rattleEnv * 0.035;
     const worldShipX = this.shipX;
     const worldShipY = this.shipY;
     st.shipGroup.position.set(
-      worldShipX,
-      worldShipY,
-      SHIP_WORLD_Z - this.warpSurge * 0.28 - this.collectLunge * 0.14
+      worldShipX + rattleX,
+      worldShipY + rattleY,
+      SHIP_WORLD_Z - this.warpSurge * 0.28 - this.collectLunge * 0.14 + rattleZ
     );
     st.shipGroup.rotation.set(this.pitchAngle * 0.85, this.yawAngle, -this.rollAngle);
     st.shipGroup.updateMatrixWorld(true);
@@ -3268,103 +3583,88 @@ export class Ship3DScene {
     (st.splashGeom.attributes.color as THREE.BufferAttribute).needsUpdate = true;
     (st.splashGeom.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
 
-    // Update Expanding Additive Shockwave Rings
+    // Sync Expanding Additive Shockwave Rings from unified shockwaveData
     for (let i = 0; i < SHOCKWAVE_POOL; i++) {
       const base = i * 6;
       const mesh = st.shockwaveMeshes[i];
       const mat = st.shockwaveMats[i];
-      if (st.shockwaveState[base] > 0.5 && !reduceMotion) {
-        st.shockwaveState[base + 1] += dt * 3.4;
-        const p = st.shockwaveState[base + 1];
-        if (p >= 1.0) {
-          st.shockwaveState[base] = 0;
-          mesh.visible = false;
+      if (this.shockwaveData[base] > 0.5 && !reduceMotion) {
+        const p = this.shockwaveData[base + 1];
+        const isBlast = this.shockwaveData[base + 5] > 0.5;
+        mesh.visible = true;
+        const sc = (isBlast ? 0.32 : 0.22) + p * (isBlast ? 1.85 : 1.05);
+        mesh.position.set(
+          this.shockwaveData[base + 2],
+          this.shockwaveData[base + 3],
+          this.shockwaveData[base + 4] + p * 1.4
+        );
+        mesh.scale.set(sc, sc, 1);
+        mesh.rotation.set(0.12, 0, -this.rollAngle * 0.45);
+        if (isBlast) {
+          mat.color.setRGB(1.0, 0.58, 0.22);
         } else {
-          mesh.visible = true;
-          const sc = 0.22 + p * 1.05;
-          mesh.position.set(
-            st.shockwaveState[base + 2],
-            st.shockwaveState[base + 3],
-            st.shockwaveState[base + 4] + p * 1.4
-          );
-          mesh.scale.set(sc, sc, 1);
-          mesh.rotation.set(0.12, 0, -this.rollAngle * 0.45);
           mat.color.copy(this.tmpColorA);
-          mat.opacity = (1 - p) * (1 - p) * (isOverlayMode ? 0.2 : 0.28);
         }
+        mat.opacity = (1 - p) * (1 - p) * (isOverlayMode ? 0.24 : isBlast ? 0.45 : 0.28);
       } else {
         mesh.visible = false;
       }
     }
 
-    // Update Pooled Absorption Sparks
+    // Sync Pooled Absorption & Asteroid Ember Sparks from unified sparkData
     for (let i = 0; i < SPARK_POOL; i++) {
-      const life = st.sparkLife[i];
+      const so = i * 10;
       const o = i * 3;
+      const life = this.sparkData[so + 6];
       if (life > 0) {
-        st.sparkLife[i] = Math.max(0, life - dt * 2.2);
-        st.sparkPositions[o] += st.sparkVelocities[o] * dt;
-        st.sparkPositions[o + 1] += st.sparkVelocities[o + 1] * dt;
-        st.sparkPositions[o + 2] += st.sparkVelocities[o + 2] * dt;
+        st.sparkPositions[o] = this.sparkData[so];
+        st.sparkPositions[o + 1] = this.sparkData[so + 1];
+        st.sparkPositions[o + 2] = this.sparkData[so + 2];
+        st.sparkColors[o] = this.sparkData[so + 7] * life;
+        st.sparkColors[o + 1] = this.sparkData[so + 8] * life;
+        st.sparkColors[o + 2] = this.sparkData[so + 9] * life;
       } else {
         st.sparkPositions[o + 2] = 999; // hide off-screen behind camera
       }
     }
     (st.sparkGeom.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    (st.sparkGeom.attributes.color as THREE.BufferAttribute).needsUpdate = true;
 
-    // Update Pooled Plasma Lasers & Asteroid Shatter
+    // Sync Pooled Twin Plasma Lasers from unified laserData
     for (let l = 0; l < LASER_POOL; l++) {
-      const base = l * 5;
+      const base = l * 6;
       const mesh = st.laserMeshes[l];
-      if (st.laserState[base] > 0.5) {
-        st.laserState[base + 3] -= dt * 44.0;
-        const lz = st.laserState[base + 3];
-        const targetIdx = st.laserState[base + 4] | 0;
-        if (targetIdx >= 0 && targetIdx < ASTEROID_COUNT && this.asteroids[targetIdx * ASTEROID_STRIDE + 11] > 0.5) {
-          const astZ = 5.0 - this.asteroids[targetIdx * ASTEROID_STRIDE + 2] * 6.2;
-          const astX = this.asteroids[targetIdx * ASTEROID_STRIDE] * 5.2;
-          const astY = -0.25 + this.asteroids[targetIdx * ASTEROID_STRIDE + 1] * 3.4;
-          st.laserState[base + 1] += (astX - st.laserState[base + 1]) * Math.min(1, dt * 14);
-          st.laserState[base + 2] += (astY - st.laserState[base + 2]) * Math.min(1, dt * 14);
-          if (lz <= astZ + 1.1) {
-            this.shatterAsteroid(targetIdx);
-            st.laserState[base] = 0;
-            mesh.visible = false;
-            continue;
-          }
-        }
-        if (lz < -48) {
-          st.laserState[base] = 0;
-          mesh.visible = false;
+      if (this.laserData[base] > 0.5) {
+        mesh.visible = true;
+        mesh.position.set(this.laserData[base + 1], this.laserData[base + 2], this.laserData[base + 3]);
+        if (this.laserData[base + 5] > 0.5) {
+          st.laserMats[l].color.copy(this.tmpColorA);
         } else {
-          mesh.visible = true;
-          mesh.position.set(st.laserState[base + 1], st.laserState[base + 2], lz);
+          st.laserMats[l].color.setHex(0xff5a36);
         }
       } else {
         mesh.visible = false;
       }
     }
 
-    // Update Molten Rock Shards
+    // Sync Multi-Piece 3D Rotating Glowing Wireframe / Molten-Edge Shards from unified shardData
     for (let s = 0; s < SHARD_POOL; s++) {
-      const base = s * 8;
+      const base = s * 15;
       const mesh = st.shardMeshes[s];
-      if (st.shardState[base] > 0.5) {
-        st.shardState[base + 7] -= dt * 1.4;
-        if (st.shardState[base + 7] <= 0) {
-          st.shardState[base] = 0;
-          mesh.visible = false;
-        } else {
-          mesh.visible = true;
-          st.shardState[base + 1] += st.shardState[base + 4] * dt;
-          st.shardState[base + 2] += st.shardState[base + 5] * dt;
-          st.shardState[base + 3] += st.shardState[base + 6] * dt;
-          mesh.position.set(st.shardState[base + 1], st.shardState[base + 2], st.shardState[base + 3]);
-          mesh.rotation.x += dt * 7;
-          mesh.rotation.y += dt * 9;
-          mesh.scale.setScalar(st.shardState[base + 7]);
-          st.shardMats[s].opacity = st.shardState[base + 7];
-        }
+      if (this.shardData[base] > 0.5 && this.shardData[base + 7] > 0) {
+        const life = this.shardData[base + 7];
+        const sz = this.shardData[base + 14] * (0.42 + 0.58 * life);
+        mesh.visible = true;
+        mesh.position.set(this.shardData[base + 1], this.shardData[base + 2], this.shardData[base + 3]);
+        mesh.rotation.set(this.shardData[base + 8], this.shardData[base + 9], this.shardData[base + 10]);
+        mesh.scale.setScalar(sz);
+        st.shardMats[s].opacity = life * (isWire ? 0.45 : 0.85);
+        st.shardWireMats[s].color.setRGB(
+          Math.min(1, 0.92 + life * 0.08),
+          Math.min(1, 0.35 + life * 0.42),
+          Math.min(1, 0.08 + (1 - life) * 0.35)
+        );
+        st.shardWireMats[s].opacity = Math.min(1, life * 1.15);
       } else {
         mesh.visible = false;
       }
@@ -3734,11 +4034,13 @@ export class Ship3DScene {
     const bpm = audio.estimatedBpm && audio.estimatedBpm > 30 ? audio.estimatedBpm : 120;
     this.currentBpmFactor = Math.max(0.72, Math.min(1.38, bpm / 120));
 
-    // Decay gameplay, word mergeFlash, damped camera spring, & splash droplets
+    // Decay gameplay, word mergeFlash, damped camera spring, local hull rattle & splash droplets
     this.wordPop = Math.max(0, this.wordPop - rawDt * 7.5);
     this.collectFlash = Math.max(0, this.collectFlash - rawDt * 5.2);
     this.collectLunge = Math.max(0, this.collectLunge - rawDt * 9.5);
-    this.cameraTrauma = Math.max(0, this.cameraTrauma - rawDt * (this.cameraTrauma > 0.35 ? 1.8 : 4.2));
+    this.shipHullRattle = Math.max(0, this.shipHullRattle - rawDt / SHIP_HULL_RATTLE_SEC);
+    this.cameraShakeCooldown = Math.max(0, this.cameraShakeCooldown - rawDt);
+    this.cameraTrauma = Math.max(0, this.cameraTrauma - rawDt * 4.8);
     this.chromaticPulse = Math.max(0, this.chromaticPulse - rawDt * 3.4);
     this.rainbowTimer = Math.max(0, this.rainbowTimer - rawDt);
     this.iceTimer = Math.max(0, this.iceTimer - rawDt);
@@ -3790,6 +4092,16 @@ export class Ship3DScene {
     const stageSpan = Math.max(220, Math.min(width, Math.min(cx, width - cx) * 2));
     const fallbackFocal = Math.min(stageSpan * 0.68, height * 1.02) * (1.0 - this.warpSurge * 0.04);
 
+    // Cache projection scalars early so screen-space FX events emitted during this frame project accurately
+    this.frameWidth = width;
+    this.frameHeight = height;
+    this.frameCx = cx;
+    this.frameCy = cy;
+    this.frameFocal = fallbackFocal;
+    this.frameVarIdx = varIdx;
+    this.frameIsOverlay = isOverlayMode;
+    this.shipScale = Math.min(stageSpan, height) * 0.13;
+
     // Update Ship Position & Attitude directly from C-infinity analytical flight spline
     const curPos = this.getFlightPosition(timeSeconds, this.tmpFlightPos);
     const curVel = this.getFlightVelocity(timeSeconds, this.tmpFlightVel);
@@ -3799,37 +4111,43 @@ export class Ship3DScene {
     this.shipVx = curVel.x;
     this.shipVy = curVel.y;
 
-    // Strong-beat warp surge, choreographed S-bank / barrel-roll & persistent beat-locked laser salvos
+    // Strong-beat warp surge, choreographed S-bank / barrel-roll & frequent beat-locked laser salvos (~every 2 beats)
     this.surgeCooldown = Math.max(0, this.surgeCooldown - rawDt);
     this.laserSalvoCooldown = Math.max(0, this.laserSalvoCooldown - rawDt);
     const beatStrength = audio.beatStrength ?? (audio.beatDetected ? 1.0 : audio.bassEnergy);
-    const strongBeat = !reduceMotion && (audio.beatDetected || beatStrength > 0.72 || Boolean((audio as any).isDownbeat));
+    const isDownbeat = Boolean(audio.isDownbeat);
+    const strongBeat = !reduceMotion && (audio.beatDetected || beatStrength > 0.72 || isDownbeat);
     if (strongBeat && this.surgeCooldown <= 0) {
       this.warpSurge = 1.0;
       this.shockwaveProgress = 0.02;
       this.surgeCooldown = 0.24;
       this.laserBeatCounter += 1;
       if (this.currentBeatCameraThump) {
-        const kick = (beatStrength > 0.86 ? 0.58 : 0.34) * this.currentMotionScale;
-        this.cameraTrauma = Math.min(1.0, this.cameraTrauma + kick);
-        this.cameraSpringVel += 1.25 * this.currentMotionScale;
+        const kick = beatStrength > 0.86 ? 0.34 : 0.22;
+        this.addCameraShakeTrauma(kick, reduceMotion);
+        this.cameraSpringVel += 0.75 * this.currentMotionScale;
       }
-      this.chromaticPulse = Math.max(this.chromaticPulse, beatStrength > 0.85 ? 0.75 : 0.35);
+      this.chromaticPulse = Math.max(this.chromaticPulse, beatStrength > 0.85 ? 0.65 : 0.3);
 
-      if (((audio as any).isDownbeat || beatStrength > 0.88) && this.maneuverKind === 0 && this.maneuverCooldown <= 0) {
+      let startedManeuver = false;
+      if ((isDownbeat || beatStrength > 0.88) && this.maneuverKind === 0 && this.maneuverCooldown <= 0) {
         const dir = this.shipVx >= 0 ? 1 : -1;
         this.startChoreographedManeuver(beatStrength > 0.92 ? 1 : 2, 1.15, dir);
+        startedManeuver = true;
+      }
+      if (!startedManeuver && (isDownbeat || beatStrength > 0.88) && this.nextRand() < 0.45) {
+        this.pushArcaneEvent('whoosh_boost', this.shipX, this.shipY, SHIP_WORLD_Z);
       }
 
-      // Consistent beat-locked twin plasma laser salvos across the ENTIRE song (every 4 beats or downbeat cadence)
+      // Consistent frequent plasma cannon cadence (~0.85s cooldown, firing every ~2 beats across the track)
       const fireOnCadence =
-        (Boolean((audio as any).isDownbeat) && this.laserBeatCounter >= 2) ||
-        this.laserBeatCounter >= 4 ||
-        (this.isInstrumental && beatStrength > 0.72);
+        isDownbeat ||
+        this.laserBeatCounter >= 2 ||
+        (this.isInstrumental && beatStrength > 0.65);
       if (fireOnCadence && this.laserSalvoCooldown <= 0) {
         this.laserBeatCounter = 0;
-        this.laserSalvoCooldown = 1.5;
-        this.fireTwinLasers(this.shipX, this.shipY);
+        this.laserSalvoCooldown = 0.85;
+        this.fireTwinLasers(this.shipX, this.shipY, -1, false);
       }
     } else {
       this.warpSurge = Math.max(0, this.warpSurge - rawDt * 2.8);
@@ -3864,18 +4182,17 @@ export class Ship3DScene {
           const elapsed = Math.max(0, Math.min(this.maneuverDuration, this.maneuverProgress * this.maneuverDuration));
           const rollDur = Math.max(0.4, this.maneuverDuration - MANEUVER_ANTICIPATION_SEC - MANEUVER_SETTLE_SEC);
           const rollEnd = MANEUVER_ANTICIPATION_SEC + rollDur;
-          const quintic = (t: number) => t * t * t * (t * (6 * t - 15) + 10);
 
           if (elapsed < MANEUVER_ANTICIPATION_SEC) {
             // Phase 1: 160ms counter-bank anticipation (-12 deg)
-            const q = quintic(elapsed / MANEUVER_ANTICIPATION_SEC);
+            const q = quinticEase(elapsed / MANEUVER_ANTICIPATION_SEC);
             this.barrelRollPhase = -MANEUVER_ANTICIPATION_RAD * q;
             maneuverRoll = this.barrelRollPhase * this.maneuverDir;
             maneuverYaw = -0.06 * q * this.maneuverDir;
           } else if (elapsed < rollEnd) {
             // Phase 2: Silky quintic ease-in-out 360-deg barrel roll (1.05s - 1.25s)
             const u = (elapsed - MANEUVER_ANTICIPATION_SEC) / rollDur;
-            const q = quintic(u);
+            const q = quinticEase(u);
             this.barrelRollPhase = -MANEUVER_ANTICIPATION_RAD + (2 * Math.PI + MANEUVER_ANTICIPATION_RAD) * q;
             maneuverRoll = this.barrelRollPhase * this.maneuverDir;
             if (this.maneuverKind === 2) {
@@ -3938,6 +4255,7 @@ export class Ship3DScene {
       let lastProjStart = -1;
       let lastProjZ = 0;
       let fastAltIdx = 0;
+      this.asteroidRevealSeen.fill(0);
 
       for (let i = 0; i < this.precomputedWords.length; i++) {
         const w = this.precomputedWords[i];
@@ -3991,14 +4309,57 @@ export class Ship3DScene {
           const gp = this.gateProjections[this.gateProjectionCount++];
           const anchor = this.getFlightPosition(w.startSeconds, this.tmpFlightPos);
           const fastXOff = isTightCluster && !isConsumed ? ((fastAltIdx & 1) === 0 ? 1 : -1) * 0.28 : 0;
-          const fastYOff = isTightCluster && !isConsumed ? (fastAltIdx % 2) * 0.22 : 0;
+
+          // Signature Asteroid-Reveal Mechanic: bind an asteroid strictly between ship & word
+          // (wordZ < astWZ < SHIP_NOSE_Z), then lock-on and blast it at ~0.55s before impact (dtToWord in [0.30, 0.62])!
+          let shieldedByRevealAsteroid = false;
+          if (!reduceMotion && w.isRevealWord && !isConsumed && dtToWord > 0.14) {
+            let revSlot = -1;
+            if (dtToWord > 0.24) {
+              revSlot = this.findOrBindRevealAsteroid(w.key, wordZ, anchor.x, anchor.y);
+            } else {
+              for (let a = 0; a < ASTEROID_COUNT; a++) {
+                if (this.asteroidRevealWordKey[a] === w.key && this.asteroids[a * ASTEROID_STRIDE + 11] > 0.5) {
+                  revSlot = a;
+                  break;
+                }
+              }
+            }
+            if (revSlot >= 0) {
+              const rIdx = revSlot * ASTEROID_STRIDE;
+              const astWZ = Math.min(SHIP_NOSE_Z - 1.0, wordZ + 1.6);
+              this.asteroids[rIdx] = anchor.x / 5.2;
+              this.asteroids[rIdx + 1] = (anchor.y + 0.25) / 3.4;
+              this.asteroids[rIdx + 2] = (5.0 - astWZ) / 6.2;
+              this.asteroids[rIdx + 9] = 0;
+              this.asteroids[rIdx + 10] = 0;
+              this.asteroidRevealSeen[revSlot] = 1;
+              shieldedByRevealAsteroid = true;
+
+              if (dtToWord >= 0.30 && dtToWord <= 0.62 && !this.hasRevealHistoryKey(this.revealFiredKeys, w.key)) {
+                this.recordRevealHistoryKey(this.revealFiredKeys, w.key, false);
+                this.revealBlastsTriggered += 1;
+                this.fireTwinLasers(this.shipX, this.shipY, revSlot, true);
+              } else if (dtToWord <= 0.24) {
+                // Safety reveal shatter if coarse frame delta skipped laser travel window
+                if (!this.hasRevealHistoryKey(this.revealFiredKeys, w.key)) {
+                  this.recordRevealHistoryKey(this.revealFiredKeys, w.key, false);
+                  this.revealBlastsTriggered += 1;
+                  this.fireTwinLasers(this.shipX, this.shipY, revSlot, true);
+                }
+                this.shatterAsteroid(revSlot);
+                this.asteroidRevealSeen[revSlot] = 0;
+                shieldedByRevealAsteroid = false;
+              }
+            }
+          }
 
           gp.text = w.text;
           gp.key = w.key;
           gp.consumed = isConsumed;
-          // Deterministic world position from frame 0 (ZERO lower-spawn elevLift Y-snap!)
+          // Same-altitude deterministic world position from frame 0 (strictly on flight spline altitude)
           gp.worldX = isConsumed ? this.shipX : anchor.x + fastXOff;
-          gp.worldY = isConsumed ? this.shipY : anchor.y + fastYOff;
+          gp.worldY = isConsumed ? this.shipY : anchor.y;
           gp.worldZ = wordZ;
           gp.lineIndex = w.lineIndex;
           gp.wordIndex = w.wordIndex;
@@ -4008,13 +4369,29 @@ export class Ship3DScene {
           if (isConsumed) {
             gp.alpha = Math.max(0, Math.min(1, mergeFlash));
           } else {
-            // Strictly monotonic opacity fade-in over first 0.25s, then locked 1.0 until nose impact
-            gp.alpha = Math.max(0.08, Math.min(1.0, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.25));
+            // Strictly monotonic opacity fade-in over first 0.25s; subtly dimmed behind intact reveal asteroid until blasted
+            const baseAlpha = Math.max(0.08, Math.min(1.0, (GATE_LOOKAHEAD_SEC - dtToWord) / 0.25));
+            gp.alpha = shieldedByRevealAsteroid ? baseAlpha * 0.35 : baseAlpha;
           }
           const invZ = 1.0 / Math.max(0.4, 6.2 - gp.worldZ);
           gp.screenX = cx + (gp.worldX - this.shipX * 0.12) * fallbackFocal * invZ;
           gp.screenY = cy - (gp.worldY + 0.14) * fallbackFocal * invZ;
           gp.scale = Math.max(0.55, Math.min(1.6, 7.2 * invZ));
+        }
+      }
+
+      // Release any stale reveal-bound asteroid slots whose word is no longer in upcoming lookahead
+      for (let a = 0; a < ASTEROID_COUNT; a++) {
+        if (this.asteroidRevealWordKey[a] >= 0 && this.asteroidRevealSeen[a] === 0) {
+          this.asteroidRevealWordKey[a] = -1;
+          this.spawnAsteroid(a, 6.4 + this.nextRand() * 2.2);
+        }
+      }
+    } else {
+      for (let a = 0; a < ASTEROID_COUNT; a++) {
+        if (this.asteroidRevealWordKey[a] >= 0) {
+          this.asteroidRevealWordKey[a] = -1;
+          this.spawnAsteroid(a, 6.4 + this.nextRand() * 2.2);
         }
       }
     }
@@ -4042,6 +4419,15 @@ export class Ship3DScene {
 
     for (let a = 0; a < ASTEROID_COUNT; a++) {
       const idx = a * ASTEROID_STRIDE;
+      if (this.asteroidRevealWordKey[a] >= 0) {
+        if (!reduceMotion) {
+          this.asteroids[idx + 3] += this.asteroids[idx + 5] * dt;
+          this.asteroids[idx + 4] += this.asteroids[idx + 5] * 0.7 * dt;
+        }
+        this.astOrder[a] = a;
+        continue;
+      }
+
       let az = this.asteroids[idx + 2] - astSpeed * dt;
       if (az <= 0.18) {
         this.spawnAsteroid(a);
@@ -4082,7 +4468,7 @@ export class Ship3DScene {
           this.nearMissCooldown = 0.9;
           this.nearMissCount += 1;
           this.score += 250;
-          this.cameraTrauma = Math.min(1.0, this.cameraTrauma + 0.25);
+          this.addCameraShakeTrauma(0.22, reduceMotion);
           this.toastText = 'NEAR MISS +250';
           this.toastAlpha = 1.15;
           this.toastColorKind = 'gold';
@@ -4092,8 +4478,101 @@ export class Ship3DScene {
       this.astOrder[a] = a;
     }
 
+    // Unified physics update for twin plasma lasers, asteroid fracture hits, shards, sparks & shockwaves
+    // (runs identically in WebGL Three.js AND Canvas2D software fallback!)
+    for (let l = 0; l < LASER_POOL; l++) {
+      const base = l * 6;
+      if (this.laserData[base] > 0.5) {
+        this.laserData[base + 3] -= dt * 48.0;
+        const lz = this.laserData[base + 3];
+        const targetIdx = this.laserData[base + 4] | 0;
+        if (
+          targetIdx >= 0 &&
+          targetIdx < ASTEROID_COUNT &&
+          this.asteroids[targetIdx * ASTEROID_STRIDE + 11] > 0.5
+        ) {
+          const astZ = 5.0 - this.asteroids[targetIdx * ASTEROID_STRIDE + 2] * 6.2;
+          const astX = this.asteroids[targetIdx * ASTEROID_STRIDE] * 5.2;
+          const astY = -0.25 + this.asteroids[targetIdx * ASTEROID_STRIDE + 1] * 3.4;
+          const homingRate = Math.min(1, dt * 18);
+          this.laserData[base + 1] += (astX - this.laserData[base + 1]) * homingRate;
+          this.laserData[base + 2] += (astY - this.laserData[base + 2]) * homingRate;
+          if (lz <= astZ + 1.25) {
+            this.shatterAsteroid(targetIdx);
+            this.laserData[base] = 0;
+            continue;
+          }
+        }
+        if (lz < -48) {
+          this.laserData[base] = 0;
+        }
+      }
+    }
+
+    for (let s = 0; s < SHARD_POOL; s++) {
+      const base = s * 15;
+      if (this.shardData[base] > 0.5) {
+        this.shardData[base + 7] -= rawDt * 1.15;
+        if (this.shardData[base + 7] <= 0) {
+          this.shardData[base] = 0;
+          this.shardData[base + 7] = 0;
+        } else {
+          this.shardData[base + 1] += this.shardData[base + 4] * dt;
+          this.shardData[base + 2] += this.shardData[base + 5] * dt;
+          this.shardData[base + 3] += this.shardData[base + 6] * dt;
+          this.shardData[base + 4] *= 0.985;
+          this.shardData[base + 5] *= 0.985;
+          this.shardData[base + 8] += this.shardData[base + 11] * dt;
+          this.shardData[base + 9] += this.shardData[base + 12] * dt;
+          this.shardData[base + 10] += this.shardData[base + 13] * dt;
+        }
+      }
+    }
+
+    for (let i = 0; i < SPARK_POOL; i++) {
+      const so = i * 10;
+      const life = this.sparkData[so + 6];
+      if (life > 0) {
+        this.sparkData[so + 6] = Math.max(0, life - rawDt * 2.1);
+        this.sparkData[so] += this.sparkData[so + 3] * dt;
+        this.sparkData[so + 1] += this.sparkData[so + 4] * dt;
+        this.sparkData[so + 2] += this.sparkData[so + 5] * dt;
+      }
+    }
+
+    for (let i = 0; i < SHOCKWAVE_POOL; i++) {
+      const base = i * 6;
+      if (this.shockwaveData[base] > 0.5 && !reduceMotion) {
+        this.shockwaveData[base + 1] += rawDt * 3.4;
+        if (this.shockwaveData[base + 1] >= 1.0) {
+          this.shockwaveData[base] = 0;
+        }
+      } else {
+        this.shockwaveData[base] = 0;
+      }
+    }
+
+    // Compute heavily damped camera shake clamped strictly <= 0.14 world units
+    const traumaEff = reduceMotion ? 0 : Math.min(0.65, this.cameraTrauma);
+    const shakeSq = traumaEff * traumaEff;
+    let shakeX = shakeSq * Math.sin(timeSeconds * 41.0) * 0.12;
+    let shakeY = shakeSq * Math.cos(timeSeconds * 47.0) * 0.085;
+    const shakeAmp = Math.hypot(shakeX, shakeY);
+    if (shakeAmp > MAX_CAMERA_SHAKE_AMP) {
+      const clampScale = MAX_CAMERA_SHAKE_AMP / shakeAmp;
+      shakeX *= clampScale;
+      shakeY *= clampScale;
+    }
+    this.currentShakeX = shakeX;
+    this.currentShakeY = shakeY;
+    this.currentShakeRoll = shakeSq * Math.sin(timeSeconds * 33.0) * 0.018;
+    const clampedAmp = Math.hypot(shakeX, shakeY);
+    if (clampedAmp > this.maxCameraShakeAmplitude) {
+      this.maxCameraShakeAmplitude = clampedAmp;
+    }
+
     // Guaranteed zero asteroid-to-asteroid clipping & zero corridor/lyric collisions
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; pass < 3; pass++) {
       this.separateAsteroids(dt);
       for (let a = 0; a < ASTEROID_COUNT; a++) {
         this.enforceCorridorExclusion(a, timeSeconds);
@@ -4275,6 +4754,117 @@ export class Ship3DScene {
       ctx.arc(dx, dy, r, 0, Math.PI * 2);
       ctx.fill();
     }
+
+    // Software fallback ember & impact sparks
+    for (let i = 0; i < SPARK_POOL; i++) {
+      const so = i * 10;
+      const life = this.sparkData[so + 6];
+      if (life <= 0) continue;
+      const dz = Math.max(0.5, 6.2 - this.sparkData[so + 2]);
+      const invZ = 1.0 / dz;
+      const sx = cx + this.sparkData[so] * focal * invZ;
+      const sy = cy - (this.sparkData[so + 1] + 0.14) * focal * invZ;
+      if (sx < -20 || sx > width + 20 || sy < -20 || sy > height + 20) continue;
+      const r = Math.max(1.1, (1.2 + life * 2.4) * invZ * 4.0);
+      const cr = Math.min(255, Math.round(this.sparkData[so + 7] * 255));
+      const cg = Math.min(255, Math.round(this.sparkData[so + 8] * 255));
+      const cb = Math.min(255, Math.round(this.sparkData[so + 9] * 255));
+      ctx.fillStyle = `rgb(${cr}, ${cg}, ${cb})`;
+      ctx.globalAlpha = life * (isOverlayMode ? 0.65 : 0.92);
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Software fallback shockwave rings (asteroid blast + word merge)
+    if (!reduceMotion) {
+      for (let i = 0; i < SHOCKWAVE_POOL; i++) {
+        const base = i * 6;
+        if (this.shockwaveData[base] < 0.5) continue;
+        const p = this.shockwaveData[base + 1];
+        const isBlast = this.shockwaveData[base + 5] > 0.5;
+        const dz = Math.max(0.5, 6.2 - this.shockwaveData[base + 4]);
+        const invZ = 1.0 / dz;
+        const rx = cx + this.shockwaveData[base + 2] * focal * invZ;
+        const ry = cy - (this.shockwaveData[base + 3] + 0.14) * focal * invZ;
+        const radius = Math.max(4, ((isBlast ? 0.45 : 0.25) + p * (isBlast ? 2.2 : 1.3)) * focal * invZ);
+        ctx.strokeStyle = isBlast ? '#ff8a2b' : palette.accentPrimary;
+        ctx.lineWidth = Math.max(1.2, (isBlast ? 3.4 : 2.2) * (1 - p));
+        ctx.globalAlpha = (1 - p) * (1 - p) * (isOverlayMode ? 0.45 : 0.78);
+        ctx.beginPath();
+        ctx.arc(rx, ry, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    // Software fallback twin plasma laser bolts
+    for (let l = 0; l < LASER_POOL; l++) {
+      const base = l * 6;
+      if (this.laserData[base] < 0.5) continue;
+      const lx = this.laserData[base + 1];
+      const ly = this.laserData[base + 2];
+      const lz = this.laserData[base + 3];
+      const invZ0 = 1.0 / Math.max(0.5, 6.2 - lz);
+      const invZ1 = 1.0 / Math.max(0.5, 6.2 - (lz - 2.2));
+      const x0 = cx + lx * focal * invZ0;
+      const y0 = cy - (ly + 0.14) * focal * invZ0;
+      const x1 = cx + lx * focal * invZ1;
+      const y1 = cy - (ly + 0.14) * focal * invZ1;
+      ctx.strokeStyle = this.laserData[base + 5] > 0.5 ? palette.accentPrimary : '#ff5a36';
+      ctx.lineWidth = Math.max(2.0, 5.2 * invZ0);
+      ctx.globalAlpha = isOverlayMode ? 0.78 : 0.96;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+
+    // Software fallback multi-piece 3D rotating glowing wireframe/molten-edge fracture shards
+    for (let s = 0; s < SHARD_POOL; s++) {
+      const base = s * 15;
+      const life = this.shardData[base + 7];
+      if (this.shardData[base] < 0.5 || life <= 0) continue;
+      const sxW = this.shardData[base + 1];
+      const syW = this.shardData[base + 2];
+      const szW = this.shardData[base + 3];
+      const dz = Math.max(0.5, 6.2 - szW);
+      const invZ = 1.0 / dz;
+      const rx = this.shardData[base + 8];
+      const ry = this.shardData[base + 9];
+      const cRx = Math.cos(rx);
+      const sRx = Math.sin(rx);
+      const cRy = Math.cos(ry);
+      const sRy = Math.sin(ry);
+      const rad = this.shardData[base + 14] * (0.42 + 0.58 * life) * 0.28;
+
+      for (let v = 0; v < 4; v++) {
+        const vx = SHARD_VERTS[v * 3] * rad;
+        const vy = SHARD_VERTS[v * 3 + 1] * rad;
+        const vz = SHARD_VERTS[v * 3 + 2] * rad;
+        const y1 = vy * cRx - vz * sRx;
+        const z1 = vy * sRx + vz * cRx;
+        const x2 = vx * cRy + z1 * sRy;
+        this.shardProjX[v] = cx + (sxW + x2) * focal * invZ;
+        this.shardProjY[v] = cy - (syW + y1 + 0.14) * focal * invZ;
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(this.shardProjX[0], this.shardProjY[0]);
+      ctx.lineTo(this.shardProjX[1], this.shardProjY[1]);
+      ctx.lineTo(this.shardProjX[2], this.shardProjY[2]);
+      ctx.closePath();
+      ctx.moveTo(this.shardProjX[0], this.shardProjY[0]);
+      ctx.lineTo(this.shardProjX[2], this.shardProjY[2]);
+      ctx.lineTo(this.shardProjX[3], this.shardProjY[3]);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(58, 28, 20, 0.85)';
+      ctx.globalAlpha = life * (isOverlayMode ? 0.6 : 0.85);
+      ctx.fill();
+      ctx.strokeStyle = life > 0.5 ? '#ff9d3b' : palette.accentPrimary;
+      ctx.lineWidth = Math.max(1.1, 2.2 * life);
+      ctx.globalAlpha = Math.min(1, life * 1.1) * (isOverlayMode ? 0.72 : 0.96);
+      ctx.stroke();
+    }
     ctx.restore();
 
     // Sort asteroids back-to-front by Z
@@ -4291,10 +4881,13 @@ export class Ship3DScene {
 
     this.renderAsteroidsInRange(ctx, palette, 1.25, 99);
 
+    const swRattleEnv = reduceMotion ? 0 : this.shipHullRattle * this.shipHullRattle;
+    const swRattleX = swRattleEnv * Math.sin(timeSeconds * 96.0) * 2.6;
+    const swRattleY = swRattleEnv * Math.cos(timeSeconds * 114.0) * 2.2;
     const shipWorldZ = SHIP_WORLD_Z - this.warpSurge * 0.28 - this.collectLunge * 0.14;
     const shipInvZ = 1.0 / Math.max(0.5, 5.95 - shipWorldZ);
-    this.shipCenterX = cx + this.shipX * focal * shipInvZ;
-    this.shipCenterY = cy - (this.shipY - 0.24) * focal * shipInvZ;
+    this.shipCenterX = cx + this.shipX * focal * shipInvZ + swRattleX;
+    this.shipCenterY = cy - (this.shipY - 0.24) * focal * shipInvZ + swRattleY;
     this.shipScale = Math.min(stageSpan, height) * 0.13;
 
     this.cosR = Math.cos(this.rollAngle);
@@ -4391,15 +4984,15 @@ export class Ship3DScene {
       }
     }
 
-    const navPulse = 0.7 + 0.3 * Math.sin(timeSeconds * 6.0);
-    const navRadius = Math.max(2.2, this.shipScale * 0.055);
-    ctx.fillStyle = '#ff3b5c';
+    const navPulse = Math.min(1, 0.7 + 0.3 * Math.sin(timeSeconds * 6.0) + this.shipHullRattle * 0.45);
+    const navRadius = Math.max(2.2, this.shipScale * 0.055 * (1 + this.shipHullRattle * 0.5));
+    ctx.fillStyle = this.shipHullRattle > 0.35 ? '#ffd6de' : '#ff3b5c';
     ctx.globalAlpha = navPulse;
     ctx.beginPath();
     ctx.arc(this.projX[4], this.projY[4], navRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = '#22d3ee';
+    ctx.fillStyle = this.shipHullRattle > 0.35 ? '#d8fbff' : '#22d3ee';
     ctx.globalAlpha = navPulse;
     ctx.beginPath();
     ctx.arc(this.projX[5], this.projY[5], navRadius, 0, Math.PI * 2);

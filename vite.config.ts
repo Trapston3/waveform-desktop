@@ -241,9 +241,15 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  optimizeDeps: {
+    entries: ['index.html'],
+  },
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      ignored: ['**/release/**'],
+    },
   },
   base: './',
 });

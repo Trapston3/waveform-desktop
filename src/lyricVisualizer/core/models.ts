@@ -171,12 +171,13 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
     id: 'IosTextingMotion',
     label: 'iOS Native Design',
     category: 'native',
-    description: 'Flagship dark-mode iOS Messages, Group Chat with avatar PFPs & 2.5D Apple Maps driving mode.',
+    description: 'Flagship dark-mode iOS Messages, Liquid Glass, Group Chat with avatar PFPs & 2.5D Apple Maps.',
     usesWebGl: false,
     uses3D: true,
     defaultVariationId: 'messages',
     variations: [
       { id: 'messages', label: 'Messages', description: 'Kinetic pop-up or classic dark iMessage thread with blur-spring reveal & tapbacks' },
+      { id: 'liquid-glass', label: 'Liquid Glass', description: 'Frosted translucent iOS liquid-glass bubbles with specular rim highlights & refraction' },
       { id: 'group-chat', label: 'Group Chat', description: 'Multi-speaker dark iMessage thread with colorful gradient user avatar PFPs' },
       { id: 'navigation-map', label: '2.5D Navigation Map', description: 'Genre-aware Three.js 2.5D Apple Maps driving mode with CarPlay hero banner' },
     ],
@@ -277,7 +278,8 @@ export function resolveStyleVariationId(
     if (rawCandidate === 'international-grid' || rawCandidate === 'editorial-bold') return 'swiss-minimal';
   }
   if (def.id === 'IosTextingMotion' && rawCandidate) {
-    if (rawCandidate === 'city-walk-map') return 'navigation-map';
+    if (rawCandidate === 'city-walk-map' || rawCandidate === 'navigation-map') return 'navigation-map';
+    if (rawCandidate === 'liquid-glass') return 'liquid-glass';
     if (rawCandidate === 'group-chat') return 'group-chat';
     return 'messages';
   }

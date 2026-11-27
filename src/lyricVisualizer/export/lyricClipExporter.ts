@@ -52,6 +52,9 @@ export interface LyricClipExporterOptions {
   readonly durationSec?: ClipDurationSec | number;
   readonly audioStream?: MediaStream | null;
   readonly registerSyncCompositeHook?: (cb: (() => void) | null) => void;
+  readonly getContentInsetLeft?: () => number;
+  readonly trackTitle?: string;
+  readonly trackArtist?: string;
   readonly fps?: number;
   readonly onProgress?: (elapsedSec: number, totalSec: number, percent: number) => void;
 }
@@ -86,7 +89,7 @@ const VALID_STYLE_VARIATIONS: Readonly<Record<VisualStyleId, readonly string[]>>
   Spatial3DDepth: ['depth-rings', 'glass-planes', 'horizon-grid'],
   CRTScanline: ['p31-green', 'p3-amber', 'trinitron-rgb'],
   StarfieldShip3D: ['deep-space', 'nebula-run', 'retro-wireframe'],
-  IosTextingMotion: ['messages', 'group-chat', 'navigation-map'],
+  IosTextingMotion: ['messages', 'liquid-glass', 'group-chat', 'navigation-map'],
   CodeEditorKinetic: [
     'ide-macro',
     'led-stage-matrix',
@@ -147,6 +150,80 @@ function sanitizeVariationByStyle(raw: unknown): Partial<Record<VisualStyleId, s
     }
   }
   return clean;
+}
+
+export interface ClipCompositeLayout {
+  readonly backdropCrop: ClipCropRect;
+  readonly contentSrc: { readonly sx: number; readonly sy: number; readonly sw: number; readonly sh: number };
+  readonly contentDest: { readonly dx: number; readonly dy: number; readonly dw: number; readonly dh: number };
+  readonly outW: number;
+  readonly outH: number;
+}
+
+/**
+ * Computes full-bleed ambient backdrop crop + uncut stage content framing.
+ * For 9:16 portrait exports, frames 100% of the active content region (respecting Split View
+ * contentInsetPx) centered inside 720x1280 over the ambient backdrop instead of center-cropping
+ * off the left and right edges of lyric bubbles, DAW lanes, or 3D scenes.
+ */
+export function computeClipCompositeLayout(
+  srcW: number,
+  srcH: number,
+  aspect: ClipAspectRatio,
+  contentInsetPx = 0
+): ClipCompositeLayout {
+  const outW = aspect === '9:16' ? 720 : 1280;
+  const outH = aspect === '9:16' ? 1280 : 720;
+
+  const safeW = Math.max(1, Number.isFinite(srcW) && srcW > 0 ? srcW : outW);
+  const safeH = Math.max(1, Number.isFinite(srcH) && srcH > 0 ? srcH : outH);
+  const clampedInset =
+    Number.isFinite(contentInsetPx) && contentInsetPx > 0
+      ? Math.min(Math.round(safeW * 0.65), Math.round(contentInsetPx))
+      : 0;
+
+  const contentSx = clampedInset;
+  const contentSw = Math.max(1, safeW - contentSx);
+  const contentSh = safeH;
+  const backdropCrop = computeClipCropRect(safeW, safeH, aspect);
+
+  if (aspect === '9:16') {
+    const contentAspect = contentSw / contentSh;
+    const outAspect = outW / outH;
+    let dw = outW;
+    let dh = outH;
+    if (contentAspect >= outAspect) {
+      dw = outW;
+      dh = Math.max(1, Math.min(outH, Math.round(outW / contentAspect)));
+    } else {
+      dh = outH;
+      dw = Math.max(1, Math.min(outW, Math.round(outH * contentAspect)));
+    }
+    const dx = Math.round((outW - dw) * 0.5);
+    const dy = Math.round((outH - dh) * 0.5);
+    return {
+      backdropCrop,
+      contentSrc: { sx: contentSx, sy: 0, sw: contentSw, sh: contentSh },
+      contentDest: { dx, dy, dw, dh },
+      outW,
+      outH,
+    };
+  }
+
+  // 16:9 widescreen: cover-crop strictly within the active region [contentSx .. safeW]
+  const activeCrop = computeClipCropRect(contentSw, contentSh, '16:9');
+  return {
+    backdropCrop,
+    contentSrc: {
+      sx: contentSx + activeCrop.sx,
+      sy: activeCrop.sy,
+      sw: activeCrop.sw,
+      sh: activeCrop.sh,
+    },
+    contentDest: { dx: 0, dy: 0, dw: outW, dh: outH },
+    outW,
+    outH,
+  };
 }
 
 /**
@@ -400,34 +477,103 @@ export class LyricClipExporter {
 
     const sources = this.options.getStageCanvases();
     const { webGlCanvas, shipCanvas, canvas2d } = sources;
+    const insetPx = Math.max(0, this.options.getContentInsetLeft?.() ?? 0);
 
     const ctx = this.captureCtx;
     ctx.save();
     ctx.fillStyle = '#06070c';
     ctx.fillRect(0, 0, this.outW, this.outH);
 
-    // Draw layers in strict stage Z-order: WebGL backdrop -> 3D Ship -> Canvas2D lyrics
+    // Pick primary reference dimensions so WebGL + Ship3D + Canvas2D align identically
+    const refLayer = canvas2d || shipCanvas || webGlCanvas;
+    const refW = refLayer && refLayer.width > 0 ? refLayer.width : this.outW;
+    const refH = refLayer && refLayer.height > 0 ? refLayer.height : this.outH;
+    const layout = computeClipCompositeLayout(refW, refH, this.options.aspectRatio, insetPx);
+
+    // 1. For 9:16 portrait frames, paint a full-bleed ambient canvas backdrop behind the uncut stage
+    if (this.options.aspectRatio === '9:16') {
+      const bgLayer = webGlCanvas && webGlCanvas.width > 0 ? webGlCanvas : canvas2d;
+      if (bgLayer && bgLayer.width > 0 && bgLayer.height > 0) {
+        const bgLayout = computeClipCompositeLayout(bgLayer.width, bgLayer.height, '9:16', 0);
+        try {
+          ctx.save();
+          if ('filter' in ctx) {
+            ctx.filter = 'blur(26px) saturate(1.25)';
+          }
+          ctx.globalAlpha = 0.52;
+          ctx.drawImage(
+            bgLayer,
+            bgLayout.backdropCrop.sx,
+            bgLayout.backdropCrop.sy,
+            bgLayout.backdropCrop.sw,
+            bgLayout.backdropCrop.sh,
+            -24,
+            -24,
+            this.outW + 48,
+            this.outH + 48
+          );
+          ctx.restore();
+        } catch {
+          // Ignore transient unready canvas frames
+        }
+      }
+      ctx.fillStyle = 'rgba(5, 7, 13, 0.46)';
+      ctx.fillRect(0, 0, this.outW, this.outH);
+    }
+
+    // 2. Draw stage layers in strict Z-order without horizontal cropping in 9:16
     const layers: (HTMLCanvasElement | null | undefined)[] = [webGlCanvas, shipCanvas, canvas2d];
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
       if (!layer || layer.width <= 0 || layer.height <= 0) continue;
-      const crop = computeClipCropRect(layer.width, layer.height, this.options.aspectRatio);
+      const layerLayout =
+        layer.width === refW && layer.height === refH
+          ? layout
+          : computeClipCompositeLayout(
+              layer.width,
+              layer.height,
+              this.options.aspectRatio,
+              Math.round((insetPx * layer.width) / Math.max(1, refW))
+            );
       try {
         ctx.drawImage(
           layer,
-          crop.sx,
-          crop.sy,
-          crop.sw,
-          crop.sh,
-          0,
-          0,
-          this.outW,
-          this.outH
+          layerLayout.contentSrc.sx,
+          layerLayout.contentSrc.sy,
+          layerLayout.contentSrc.sw,
+          layerLayout.contentSrc.sh,
+          layerLayout.contentDest.dx,
+          layerLayout.contentDest.dy,
+          layerLayout.contentDest.dw,
+          layerLayout.contentDest.dh
         );
       } catch {
         // Ignore transient unready canvas frames cleanly
       }
     }
+
+    // 3. Subtle framed track credit watermark in lower portrait margin when space permits
+    if (
+      this.options.aspectRatio === '9:16' &&
+      this.options.trackTitle &&
+      this.outH - (layout.contentDest.dy + layout.contentDest.dh) >= 90
+    ) {
+      const bottomBandTop = layout.contentDest.dy + layout.contentDest.dh;
+      const centerY = bottomBandTop + (this.outH - bottomBandTop) * 0.48;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '700 22px "SF Pro Display", Inter, sans-serif';
+      ctx.fillStyle = 'rgba(248, 250, 252, 0.92)';
+      ctx.fillText(this.options.trackTitle, this.outW * 0.5, centerY - 12, this.outW - 80);
+      if (this.options.trackArtist) {
+        ctx.font = '500 15px "SF Pro Display", Inter, sans-serif';
+        ctx.fillStyle = 'rgba(203, 213, 225, 0.72)';
+        ctx.fillText(this.options.trackArtist, this.outW * 0.5, centerY + 14, this.outW - 80);
+      }
+      ctx.restore();
+    }
+
     ctx.restore();
   };
 

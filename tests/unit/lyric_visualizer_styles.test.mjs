@@ -60,6 +60,7 @@ const {
 } = await import('../../src/lyricVisualizer/rendering/index.ts');
 const {
   computeClipCropRect,
+  computeClipCompositeLayout,
   exportStylePresetJson,
   parseStylePresetJson,
 } = await import('../../src/lyricVisualizer/export/lyricClipExporter.ts');
@@ -808,7 +809,7 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     renderer.resize(900, 620, 1);
     renderer.setLyrics(SYNCED_LYRICS);
     renderer.setSyncState({ timeSeconds: 2.0, activeLineIndex: 0, activeWordIndex: 1, wordProgress: 0.5 });
-    for (const variationId of ['messages', 'group-chat', 'navigation-map']) {
+    for (const variationId of ['messages', 'liquid-glass', 'group-chat', 'navigation-map']) {
       canvas.ctx2d.ops.length = 0;
       renderer.setVariation(variationId);
       assert.equal(renderer.renderFrame(1000), true);
@@ -1846,6 +1847,7 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
       ['MotionGeometry', 'web'],
       ['CodeEditorKinetic', 'codestyle-visual'],
       ['IosTextingMotion', 'messages'],
+      ['IosTextingMotion', 'liquid-glass'],
       ['IosTextingMotion', 'group-chat'],
       ['IosTextingMotion', 'navigation-map'],
       ['SolariSplitFlap', 'departure-matte'],
@@ -1922,10 +1924,10 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     scene.dispose();
   });
 
-  test('v1.3.4 Pass 1: Global Beat Camera Thump, 3 flagship iOS variations, 2.5D Maps biome resolver, Creator Studio exporter/presets, Arcane Scribble & Spaceship reveal asteroids', async () => {
+  test('v1.3.4 Pass 1: Global Beat Camera Thump overscan, 4 flagship iOS variations (incl. Liquid Glass), 2.5D Maps biome resolver, Creator Studio 9:16 portrait fit/presets, Arcane Scribble & Spaceship reveal asteroids', async () => {
     const iosDef = VISUAL_STYLE_DEFINITIONS.find((s) => s.id === 'IosTextingMotion');
     assert.ok(iosDef, 'Expected IosTextingMotion style definition');
-    const expectedIosVars = ['messages', 'group-chat', 'navigation-map'];
+    const expectedIosVars = ['messages', 'liquid-glass', 'group-chat', 'navigation-map'];
     assert.deepEqual(iosDef.variations.map((v) => v.id), expectedIosVars);
     for (const vid of expectedIosVars) {
       assert.equal(resolveStyleVariationId('IosTextingMotion', { IosTextingMotion: vid }), vid);
@@ -2039,13 +2041,18 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     const groupArcs = canvas.ctx2d.ops.filter((op) => op === 'arc').length;
     assert.ok(groupArcs >= 2, `group-chat must render circular user avatar PFPs (got ${groupArcs} arcs)`);
 
-    // 4. Creator Studio crop rects & preset round-trip
+    // 4. Creator Studio crop rects, 9:16 uncut portrait composite layout & preset round-trip
     const crop9x16 = computeClipCropRect(1920, 1080, '9:16');
     assert.equal(crop9x16.outW, 720);
     assert.equal(crop9x16.outH, 1280);
     const crop16x9 = computeClipCropRect(1920, 1080, '16:9');
     assert.equal(crop16x9.outW, 1280);
     assert.equal(crop16x9.outH, 720);
+    const layout9x16Split = computeClipCompositeLayout(1920, 1080, '9:16', 480);
+    assert.equal(layout9x16Split.contentSrc.sx, 480);
+    assert.equal(layout9x16Split.contentSrc.sw, 1440);
+    assert.equal(layout9x16Split.contentDest.dw, 720);
+    assert.ok(layout9x16Split.contentDest.dh === 540 && layout9x16Split.contentDest.dy === 370);
 
     const presetStr = exportStylePresetJson({
       ...DEFAULT_LYRIC_VISUALIZER_CONFIG,

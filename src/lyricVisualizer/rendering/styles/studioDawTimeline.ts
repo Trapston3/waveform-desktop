@@ -25,6 +25,7 @@ import {
   resolveWordIcon,
   type WordIconId,
 } from '../wordIconDictionary';
+import { parseColorToRgbInto } from '../webGlEffectLayer';
 
 const RING_SIZE = 128;
 const TRACK_LANE_COUNT = 3;
@@ -66,6 +67,9 @@ export class StudioDawTimelineStyle implements ILyricVisualStyle {
   private beatGlow = 0;
   private lastBpmInt = -1;
   private cachedBpmLabel = '120 BPM';
+  private readonly tmpRgbA = new Float32Array(3);
+  private readonly tmpRgbB = new Float32Array(3);
+  private readonly tmpRgbC = new Float32Array(3);
 
   getVariationIndex(variationId?: string): 0 | 1 {
     return variationId === 'logic-glass' ? 1 : 0;
@@ -247,23 +251,63 @@ export class StudioDawTimelineStyle implements ILyricVisualStyle {
       this.pushRingSample(frame, dt);
     }
 
-    const accentA = isLogicGlass ? '#38bdf8' : frame.palette.accentPrimary || '#f97316';
-    const accentB = isLogicGlass ? '#a855f7' : frame.palette.accentSecondary || '#22d3ee';
-    const accentC = isLogicGlass ? '#34d399' : '#10b981';
+    const hasAlbumPalette = !frame.palette.isFallback;
+    const accentA = hasAlbumPalette
+      ? frame.palette.accentPrimary || (isLogicGlass ? '#38bdf8' : '#f97316')
+      : isLogicGlass
+      ? '#38bdf8'
+      : '#f97316';
+    const accentB = hasAlbumPalette
+      ? frame.palette.accentSecondary || (isLogicGlass ? '#a855f7' : '#22d3ee')
+      : isLogicGlass
+      ? '#a855f7'
+      : '#22d3ee';
+    const accentC = hasAlbumPalette
+      ? frame.palette.meshColors?.[2] || frame.palette.accentSecondary || '#34d399'
+      : isLogicGlass
+      ? '#34d399'
+      : '#10b981';
 
-    // 1. Backdrop
+    parseColorToRgbInto(accentA, this.tmpRgbA);
+    parseColorToRgbInto(accentB, this.tmpRgbB);
+    parseColorToRgbInto(accentC, this.tmpRgbC);
+    const rA = Math.round(this.tmpRgbA[0] * 255);
+    const gA = Math.round(this.tmpRgbA[1] * 255);
+    const bA = Math.round(this.tmpRgbA[2] * 255);
+    const rB = Math.round(this.tmpRgbB[0] * 255);
+    const gB = Math.round(this.tmpRgbB[1] * 255);
+    const bB = Math.round(this.tmpRgbB[2] * 255);
+
+    // 1. Backdrop (adaptive OKLCH album-art tint + zero top-edge hairline)
     if (!isTransparent) {
       ctx.save();
       ctx.globalAlpha = bgAlpha;
-      ctx.fillStyle = isLogicGlass ? '#080b14' : '#0c0d11';
+      ctx.fillStyle = hasAlbumPalette
+        ? frame.palette.bgDeep || (isLogicGlass ? '#080b14' : '#0c0d11')
+        : isLogicGlass
+        ? '#080b14'
+        : '#0c0d11';
       ctx.fillRect(0, 0, width, height);
 
-      if (isLogicGlass) {
-        const aurora = ctx.createLinearGradient(focal.left, 0, focal.left + focal.width, height);
-        aurora.addColorStop(0, 'rgba(56, 189, 248, 0.08)');
-        aurora.addColorStop(0.5, 'rgba(168, 85, 247, 0.06)');
-        aurora.addColorStop(1, 'rgba(15, 23, 42, 0.14)');
-        ctx.fillStyle = aurora;
+      const aurora = ctx.createLinearGradient(focal.left, 0, focal.left + focal.width, height);
+      aurora.addColorStop(0, `rgba(${rA}, ${gA}, ${bA}, ${isLogicGlass ? 0.14 : 0.08})`);
+      aurora.addColorStop(0.5, `rgba(${rB}, ${gB}, ${bB}, ${isLogicGlass ? 0.10 : 0.05})`);
+      aurora.addColorStop(1, 'rgba(10, 14, 24, 0.18)');
+      ctx.fillStyle = aurora;
+      ctx.fillRect(0, 0, width, height);
+
+      if (hasAlbumPalette) {
+        const rad = ctx.createRadialGradient(
+          focal.centerX,
+          height * 0.45,
+          24,
+          focal.centerX,
+          height * 0.5,
+          Math.max(focal.width, height) * 0.72
+        );
+        rad.addColorStop(0, `rgba(${rA}, ${gA}, ${bA}, 0.12)`);
+        rad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = rad;
         ctx.fillRect(0, 0, width, height);
       }
       ctx.restore();

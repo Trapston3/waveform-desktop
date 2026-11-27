@@ -810,6 +810,11 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
           registerSyncCompositeHook={(cb) => {
             rendererRef.current?.setPostRenderHook(cb);
           }}
+          getContentInsetLeft={() => {
+            const c = canvas2dRef.current;
+            const dpr = c && c.clientWidth > 0 ? c.width / c.clientWidth : 1;
+            return Math.round(contentInsetLeft * dpr);
+          }}
           getAudioStream={() =>
             usePlayerStore.getState().audioEngine?.getCaptureMediaStream?.() ?? null
           }

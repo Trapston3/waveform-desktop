@@ -1109,9 +1109,11 @@ export class LyricStageRenderer {
           beatStrength > 0.68);
 
       if (triggerThump) {
-        const isCinemaEdit =
-          this.styleId === 'IosTextingMotion' && this.frameContext.variationId === 'cinema-edit';
-        const basePeak = isCinemaEdit ? 0.055 : 0.032;
+        const isKineticBoost =
+          this.styleId === 'IosTextingMotion' &&
+          this.frameContext.variationId !== 'navigation-map' &&
+          Boolean(this.frameContext.iosKineticPopup);
+        const basePeak = isKineticBoost ? 0.055 : 0.032;
         const downbeatFactor = this.audioMetrics.isDownbeat ? 1.15 : 0.88;
         const peak = basePeak * intensityMult * downbeatFactor;
         this.beatThumpVel += peak * 24;
@@ -1129,11 +1131,21 @@ export class LyricStageRenderer {
       }
     }
 
-    // 5. Reset hit-rect pool and render active visual style
+    // 5. Reset hit-rect pool, paint full untransformed dark base (preventing top-edge hairline),
+    // and apply strict overscan + viewport clip around Beat Camera Thump
     this.hitRectCount = 0;
+    if (!isTransparent && !this.frameContext.hasWebGlBackdrop) {
+      this.ctx.fillStyle = this.frameContext.palette.bgDeep || '#05060a';
+      this.ctx.fillRect(0, 0, this.width, this.height);
+    }
     this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(0, 0, this.width, this.height);
+    this.ctx.clip();
     if (this.beatThumpScale > 0.0004 || this.beatThumpRecoilY > 0.15) {
-      const thumpScale = 1 + this.beatThumpScale;
+      const minSafeScale =
+        this.height > 0 ? 1.0 + (Math.abs(this.beatThumpRecoilY) * 2 + 4) / this.height : 1.0;
+      const thumpScale = Math.max(1 + this.beatThumpScale, minSafeScale);
       const anchorY = this.height * 0.5;
       this.ctx.translate(focalCenterX, anchorY + this.beatThumpRecoilY);
       this.ctx.scale(thumpScale, thumpScale);

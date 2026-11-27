@@ -30,6 +30,7 @@ import {
 import { drawAppleEmoji, preloadAppleEmojis } from '../iosEmojiRenderer';
 import { drawWordIcon, resolveWordIcon, type WordIconId } from '../wordIconDictionary';
 import { Maps3DScene } from '../maps3dScene';
+import { parseColorToRgbInto } from '../webGlEffectLayer';
 import {
   chooseSmartTapback,
   detectLyricEmbedCard,
@@ -272,6 +273,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
   private readonly heroWordY = new Float32Array(MAX_HERO_WORDS);
   private readonly heroWordW = new Float32Array(MAX_HERO_WORDS);
   private readonly heroWordHasIcon = new Uint8Array(MAX_HERO_WORDS);
+  private readonly tmpRgbA = new Float32Array(3);
+  private readonly tmpRgbB = new Float32Array(3);
 
   private scrollY = 0;
   private scrollVel = 0;
@@ -282,14 +285,16 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
   private initialized = false;
 
   /**
-   * Maps strictly 3 flagship variations, safely migrating all legacy variation IDs:
-   * - 0: 'messages' (default — unifies kinetic-messages, cinema-edit, ios-dark, liquid-glass, classic-sms)
-   * - 1: 'group-chat'
-   * - 2: 'navigation-map' (also accepts legacy 'city-walk-map')
+   * Maps 4 flagship variations, safely migrating all legacy variation IDs:
+   * - 0: 'messages' (default — migrates kinetic-messages, cinema-edit, ios-dark, classic-sms, wallet, lock-screen)
+   * - 1: 'liquid-glass'
+   * - 2: 'group-chat'
+   * - 3: 'navigation-map' (also accepts legacy 'city-walk-map')
    */
   getVariationIndex(variationId: string): number {
-    if (variationId === 'group-chat') return 1;
-    if (variationId === 'navigation-map' || variationId === 'city-walk-map') return 2;
+    if (variationId === 'liquid-glass') return 1;
+    if (variationId === 'group-chat') return 2;
+    if (variationId === 'navigation-map' || variationId === 'city-walk-map') return 3;
     return 0; // 'messages' (and legacy migrations)
   }
 
@@ -1839,7 +1844,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     }
 
     // Variation 3: 2.5D Apple Maps Navigation Mode
-    if (variationIdx === 2) {
+    if (variationIdx === 3) {
       this.renderNavigationMap(
         ctx,
         frame,
@@ -1855,16 +1860,63 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       return;
     }
 
-    // Backdrop for Messages & Group Chat
+    const isLiquidGlass = variationIdx === 1;
+    const isGroupChat = variationIdx === 2;
+
+    // Backdrop for Messages, Liquid Glass & Group Chat
     if (!isTransparent) {
       ctx.save();
       ctx.globalAlpha = bgOpacity;
-      const bg = ctx.createLinearGradient(0, 0, 0, height);
-      bg.addColorStop(0, '#09090d');
-      bg.addColorStop(0.55, '#111218');
-      bg.addColorStop(1, '#08090d');
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, width, height);
+      if (isLiquidGlass) {
+        parseColorToRgbInto(frame.palette.accentPrimary || '#38bdf8', this.tmpRgbA);
+        parseColorToRgbInto(frame.palette.accentSecondary || '#a855f7', this.tmpRgbB);
+        const rA = Math.round(this.tmpRgbA[0] * 255);
+        const gA = Math.round(this.tmpRgbA[1] * 255);
+        const bA = Math.round(this.tmpRgbA[2] * 255);
+        const rB = Math.round(this.tmpRgbB[0] * 255);
+        const gB = Math.round(this.tmpRgbB[1] * 255);
+        const bB = Math.round(this.tmpRgbB[2] * 255);
+
+        const baseGrad = ctx.createLinearGradient(0, 0, 0, height);
+        baseGrad.addColorStop(0, frame.palette.bgDeep || '#060913');
+        baseGrad.addColorStop(0.55, frame.palette.bgMid || '#0f1628');
+        baseGrad.addColorStop(1, '#05070e');
+        ctx.fillStyle = baseGrad;
+        ctx.fillRect(0, 0, width, height);
+
+        const glowA = ctx.createRadialGradient(
+          focal.left + focalWidth * 0.28,
+          height * 0.34,
+          12,
+          focal.left + focalWidth * 0.28,
+          height * 0.34,
+          Math.max(focalWidth, height) * 0.65
+        );
+        glowA.addColorStop(0, `rgba(${rA}, ${gA}, ${bA}, 0.26)`);
+        glowA.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = glowA;
+        ctx.fillRect(0, 0, width, height);
+
+        const glowB = ctx.createRadialGradient(
+          focal.left + focalWidth * 0.74,
+          height * 0.68,
+          12,
+          focal.left + focalWidth * 0.74,
+          height * 0.68,
+          Math.max(focalWidth, height) * 0.62
+        );
+        glowB.addColorStop(0, `rgba(${rB}, ${gB}, ${bB}, 0.22)`);
+        glowB.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = glowB;
+        ctx.fillRect(0, 0, width, height);
+      } else {
+        const bg = ctx.createLinearGradient(0, 0, 0, height);
+        bg.addColorStop(0, '#09090d');
+        bg.addColorStop(0.55, '#111218');
+        bg.addColorStop(1, '#08090d');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, width, height);
+      }
       ctx.restore();
     }
 
@@ -2023,8 +2075,8 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       Math.min(this.totalThreadHeight + height * 0.35, this.scrollY + manualOffset)
     );
 
-    const isGroupChat = variationIdx === 1;
-    const isKineticPopup = !isGroupChat && frame.iosKineticPopup !== false;
+    const isKineticPopup =
+      typeof frame.iosKineticPopup === 'boolean' ? frame.iosKineticPopup : !isGroupChat;
     const isBrowsing = frame.isFollowingPlayback === false || Math.abs(manualOffset) > 3;
     const rawKineticZoom =
       typeof frame.iosKineticZoom === 'number' && Number.isFinite(frame.iosKineticZoom)
@@ -2066,7 +2118,11 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       ctx.font = `600 13px ${IOS_FONT_STACK}`;
       ctx.fillStyle = '#f8fafc';
       ctx.fillText(
-        isGroupChat ? 'Group Chat · 4 People' : 'Messages · Synced Thread',
+        isGroupChat
+          ? 'Group Chat · 4 People'
+          : isLiquidGlass
+          ? 'Messages · Liquid Glass'
+          : 'Messages · Synced Thread',
         focalWidth * 0.5,
         24
       );
@@ -2190,7 +2246,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         : isHovered
         ? 0.94
         : isPast
-        ? Math.max(0.42, 0.82 - dist * 0.14)
+        ? isKineticPopup
+          ? Math.max(0.32, 0.64 - dist * 0.14)
+          : Math.max(0.42, 0.82 - dist * 0.14)
         : Math.max(0.18, 0.34 - dist * 0.06);
 
       // Group Chat: Colored contact name above cluster + unique circular iOS-gradient user avatar PFP beside left bubbles
@@ -2288,23 +2346,68 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
 
       drawBubbleWithTail(ctx, bx, by, drawBubbleW, drawBubbleH, 18, b.side, b.showTail);
-      ctx.fillStyle = b.side === 'right' ? IMSG_BLUE : IMSG_CHARCOAL;
+      if (isLiquidGlass) {
+        parseColorToRgbInto(frame.palette.accentPrimary || '#38bdf8', this.tmpRgbA);
+        const ar = Math.round(this.tmpRgbA[0] * 255);
+        const ag = Math.round(this.tmpRgbA[1] * 255);
+        const ab = Math.round(this.tmpRgbA[2] * 255);
+        const glassFill = ctx.createLinearGradient(bx, by, bx, by + drawBubbleH);
+        if (b.side === 'right') {
+          glassFill.addColorStop(0, `rgba(${ar}, ${ag}, ${ab}, ${isActive ? 0.52 : 0.34})`);
+          glassFill.addColorStop(1, `rgba(${ar}, ${ag}, ${ab}, ${isActive ? 0.24 : 0.14})`);
+        } else {
+          glassFill.addColorStop(0, isActive ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.13)');
+          glassFill.addColorStop(1, isActive ? 'rgba(255, 255, 255, 0.09)' : 'rgba(255, 255, 255, 0.04)');
+        }
+        ctx.fillStyle = glassFill;
+      } else {
+        ctx.fillStyle = b.side === 'right' ? IMSG_BLUE : IMSG_CHARCOAL;
+      }
 
       if (isActive || isHovered) {
-        ctx.shadowColor =
-          b.side === 'right' ? 'rgba(10, 132, 255, 0.45)' : 'rgba(255, 255, 255, 0.16)';
-        ctx.shadowBlur = isActive ? 18 : 12;
+        ctx.shadowColor = isLiquidGlass
+          ? b.side === 'right'
+            ? frame.palette.accentPrimary || 'rgba(56, 189, 248, 0.72)'
+            : 'rgba(255, 255, 255, 0.42)'
+          : b.side === 'right'
+          ? 'rgba(56, 189, 248, 0.72)'
+          : 'rgba(255, 255, 255, 0.34)';
+        ctx.shadowBlur = isActive ? (isKineticPopup ? 28 : 20) : 12;
       }
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      if (isHovered || (isKineticPopup && isActive)) {
+      // Liquid Glass internal top specular refraction sheen
+      if (isLiquidGlass) {
+        ctx.save();
+        ctx.clip();
+        const specGrad = ctx.createLinearGradient(bx, by, bx, by + drawBubbleH * 0.42);
+        specGrad.addColorStop(0, isActive ? 'rgba(255, 255, 255, 0.36)' : 'rgba(255, 255, 255, 0.20)');
+        specGrad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+        ctx.fillStyle = specGrad;
+        ctx.fillRect(bx - 12, by, drawBubbleW + 24, drawBubbleH * 0.42);
+        ctx.restore();
+        // Rebuild bubble path for specular rim stroke
+        drawBubbleWithTail(ctx, bx, by, drawBubbleW, drawBubbleH, 18, b.side, b.showTail);
+      }
+
+      if (isLiquidGlass || isHovered || isActive) {
         ctx.strokeStyle = isHovered
-          ? 'rgba(255, 255, 255, 0.48)'
-          : b.side === 'right'
-          ? 'rgba(147, 197, 253, 0.85)'
-          : 'rgba(226, 232, 240, 0.45)';
-        ctx.lineWidth = 1.5;
+          ? 'rgba(255, 255, 255, 0.62)'
+          : isLiquidGlass
+          ? isActive
+            ? 'rgba(255, 255, 255, 0.84)'
+            : 'rgba(255, 255, 255, 0.28)'
+          : isActive && isKineticPopup
+          ? b.side === 'right'
+            ? 'rgba(186, 230, 253, 0.94)'
+            : 'rgba(255, 255, 255, 0.56)'
+          : isActive
+          ? b.side === 'right'
+            ? 'rgba(147, 197, 253, 0.58)'
+            : 'rgba(255, 255, 255, 0.24)'
+          : 'rgba(255, 255, 255, 0.14)';
+        ctx.lineWidth = isActive ? 1.75 : 1.05;
         ctx.stroke();
       }
 
@@ -2371,9 +2474,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
               ctx.fillStyle = '#ffffff';
               ctx.globalAlpha = 1.0;
               ctx.shadowColor = isKineticPopup
-                ? 'rgba(0, 0, 0, 0.28)'
+                ? 'rgba(255, 255, 255, 0.85)'
                 : 'rgba(255, 255, 255, 0.65)';
-              ctx.shadowBlur = isKineticPopup ? 4 : 8;
+              ctx.shadowBlur = isKineticPopup ? 12 : 8;
               ctx.fillText(word.text, wx, wy + blurSpringY);
               ctx.shadowBlur = 0;
             }

@@ -1510,6 +1510,7 @@ ipcMain.handle('get-artwork-pixels', async (_e, url: string) => {
 });
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
+  console.log('[WaveForm] Another WaveForm instance is already running; focusing existing window and exiting.');
   app.quit();
 } else {
   app.on('second-instance', () => {

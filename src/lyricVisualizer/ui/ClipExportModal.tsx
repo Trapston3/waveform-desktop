@@ -30,6 +30,7 @@ export interface ClipExportModalProps {
   onClose: () => void;
   getStageCanvases: () => StageCanvasSources;
   registerSyncCompositeHook?: (cb: (() => void) | null) => void;
+  getContentInsetLeft?: () => number;
   getAudioStream?: () => MediaStream | null;
   currentTimeSec: number;
   durationSec: number;
@@ -63,6 +64,7 @@ export const ClipExportModal: React.FC<ClipExportModalProps> = ({
   onClose,
   getStageCanvases,
   registerSyncCompositeHook,
+  getContentInsetLeft,
   getAudioStream,
   currentTimeSec,
   durationSec,
@@ -171,6 +173,9 @@ export const ClipExportModal: React.FC<ClipExportModalProps> = ({
       durationSec: clipDuration,
       audioStream: getAudioStream ? getAudioStream() : null,
       registerSyncCompositeHook,
+      getContentInsetLeft,
+      trackTitle,
+      trackArtist,
       fps: 60,
       onProgress: (elapsed, _total, percent) => {
         setProgressElapsed(elapsed);

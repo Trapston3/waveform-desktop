@@ -27,6 +27,7 @@ import {
   resolveWordIcon,
   type WordIconId,
 } from '../wordIconDictionary';
+import { parseColorToRgbInto } from '../webGlEffectLayer';
 
 const GRID_ROWS = 4;
 const GRID_COLS = 26;
@@ -96,6 +97,7 @@ export class SolariSplitFlapStyle implements ILyricVisualStyle {
   private lastKnownActiveIdx = -1;
   private lastAnchorLineIdx = -1;
   private beatPulse = 0;
+  private readonly tmpRgbA = new Float32Array(3);
 
   // Cached header labels so render() never builds strings unless metadata/BPM changes
   private lastTrackKey = '';
@@ -653,21 +655,37 @@ export class SolariSplitFlapStyle implements ILyricVisualStyle {
       this.beatPulse *= Math.exp(-dt * 7.5);
     }
 
-    const accentPrimary = isAmber
-      ? '#f59e0b'
-      : frame.palette.accentPrimary || '#22d3ee';
-    const accentSecondary = isAmber
-      ? '#fde047'
-      : frame.palette.accentSecondary || '#34d399';
+    const hasAlbumPalette = !frame.palette.isFallback;
+    const accentPrimary =
+      hasAlbumPalette && frame.palette.accentPrimary
+        ? frame.palette.accentPrimary
+        : isAmber
+        ? '#f59e0b'
+        : '#22d3ee';
+    const accentSecondary =
+      hasAlbumPalette && frame.palette.accentSecondary
+        ? frame.palette.accentSecondary
+        : isAmber
+        ? '#fde047'
+        : '#34d399';
+    parseColorToRgbInto(accentPrimary, this.tmpRgbA);
+    const sheenR = Math.round(this.tmpRgbA[0] * 255);
+    const sheenG = Math.round(this.tmpRgbA[1] * 255);
+    const sheenB = Math.round(this.tmpRgbA[2] * 255);
 
     // 1. Backdrop
     if (!isTransparent) {
       ctx.save();
       ctx.globalAlpha = bgAlpha;
-      ctx.fillStyle = isAmber ? '#0b0805' : '#06070b';
+      ctx.fillStyle =
+        hasAlbumPalette && !isAmber && frame.palette.bgDeep
+          ? frame.palette.bgDeep
+          : isAmber
+          ? '#0b0805'
+          : '#06070b';
       ctx.fillRect(0, 0, width, height);
 
-      // Subtle mechanical chassis radial sheen
+      // Subtle mechanical chassis radial sheen tinted to active album palette
       const rad = ctx.createRadialGradient(
         focal.centerX,
         height * 0.45,
@@ -676,7 +694,7 @@ export class SolariSplitFlapStyle implements ILyricVisualStyle {
         height * 0.5,
         Math.max(focal.width, height) * 0.72
       );
-      rad.addColorStop(0, isAmber ? 'rgba(245, 158, 11, 0.11)' : 'rgba(56, 189, 248, 0.08)');
+      rad.addColorStop(0, `rgba(${sheenR}, ${sheenG}, ${sheenB}, ${hasAlbumPalette ? 0.14 : 0.09})`);
       rad.addColorStop(1, 'rgba(0, 0, 0, 0)');
       ctx.fillStyle = rad;
       ctx.fillRect(0, 0, width, height);

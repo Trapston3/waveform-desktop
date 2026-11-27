@@ -630,8 +630,8 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
               </>
             )}
 
-            {/* iOS Messages Kinetic Pop-up Mode & Zoom Slider */}
-            {config.styleId === 'IosTextingMotion' && activeVariationId === 'messages' && (
+            {/* iOS Kinetic Pop-up Mode & Zoom Slider (Messages, Liquid Glass & Group Chat) */}
+            {config.styleId === 'IosTextingMotion' && activeVariationId !== 'navigation-map' && (
               <>
                 <div className="space-y-1.5 px-1">
                   <button

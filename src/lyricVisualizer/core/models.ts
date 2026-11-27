@@ -165,6 +165,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
       { id: 'deep-space', label: 'Deep Space', description: 'Tactical interceptor weaving through asteroid corridor' },
       { id: 'nebula-run', label: 'Nebula Run', description: 'Album-tinted cosmic nebula clouds and plasma exhaust' },
       { id: 'retro-wireframe', label: 'Retro Wireframe', description: 'Vector arcade wireframe starfighter and faceted asteroids' },
+      { id: 'vaporwave', label: 'Vaporwave', description: 'Outrun neon horizon sun, infinite synthwave grid, wireframe mountains & cyan-magenta lyrics' },
     ],
   },
   {
@@ -179,7 +180,7 @@ export const VISUAL_STYLE_DEFINITIONS: readonly VisualStyleDefinition[] = [
       { id: 'messages', label: 'Messages', description: 'Kinetic pop-up or classic dark iMessage thread with blur-spring reveal & tapbacks' },
       { id: 'liquid-glass', label: 'Liquid Glass', description: 'Frosted translucent iOS liquid-glass bubbles with specular rim highlights & refraction' },
       { id: 'group-chat', label: 'Group Chat', description: 'Multi-speaker dark iMessage thread with colorful gradient user avatar PFPs' },
-      { id: 'navigation-map', label: '2.5D Navigation Map', description: 'Genre-aware Three.js 2.5D Apple Maps driving mode with CarPlay hero banner' },
+      { id: 'navigation-map', label: '2.5D Navigation Map', description: '1:1 Apple Maps 2.5D driving mode (Cityscape, Highway & Countryside) with real turns & CarPlay HUD' },
     ],
   },
   {

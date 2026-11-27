@@ -44,7 +44,9 @@ const {
   LyricStageRenderer,
   CRTScanlineStyle,
   LiquidMetalStyle,
+  Spatial3DDepthStyle,
   Ship3DScene,
+  Maps3DScene,
   resolveMapEnvironment,
   ArcaneSketchOverlay,
   resolveWordIcon,
@@ -2012,25 +2014,85 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     renderer.renderFrame(1032);
     assert.equal(renderer.getBeatThumpScale(), 1.0, 'beatCameraThump=false must bypass compositor scale thump');
 
-    // 3. 2.5D Navigation Map biome & time resolution + Split View inset
-    const cityEnv = resolveMapEnvironment({ id: '1', title: 'Neon Downtown', artist: 'City', album: 'Subway' }, longLineLyrics, 108, SAMPLE_PALETTE, 'auto', 'auto');
+    // 3. 2.5D Navigation Map deterministic biome (cityscape/highway/countryside) & time-of-day (night/sunset/day) resolution + explicit overrides + CarPlay HUD
+    const nightPalette = { ...SAMPLE_PALETTE, oklchL: 0.32, oklchH: 220 };
+    const sunsetPalette = { ...SAMPLE_PALETTE, oklchL: 0.54, oklchH: 34 };
+    const dayPalette = { ...SAMPLE_PALETTE, oklchL: 0.76, oklchH: 145 };
+
+    const cityEnv = resolveMapEnvironment(
+      { id: '1', title: 'Neon Midnight Downtown', artist: 'City', album: 'Subway' },
+      longLineLyrics,
+      108,
+      nightPalette,
+      'auto',
+      'auto'
+    );
     assert.equal(cityEnv.biome, 'cityscape');
-    const hwyEnv = resolveMapEnvironment({ id: '2', title: 'Midnight Highway', artist: 'Driver', album: 'Interstate' }, longLineLyrics, 132, SAMPLE_PALETTE, 'auto', 'auto');
+    assert.equal(cityEnv.timeOfDay, 'night');
+    assert.deepEqual(
+      resolveMapEnvironment(
+        { id: '1', title: 'Neon Midnight Downtown', artist: 'City', album: 'Subway' },
+        longLineLyrics,
+        108,
+        nightPalette,
+        'auto',
+        'auto'
+      ),
+      cityEnv,
+      'resolveMapEnvironment must be deterministic for identical inputs'
+    );
+
+    const hwyEnv = resolveMapEnvironment(
+      { id: '2', title: 'Golden Sunset Highway', artist: 'Driver', album: 'Interstate' },
+      longLineLyrics,
+      132,
+      sunsetPalette,
+      'auto',
+      'auto'
+    );
     assert.equal(hwyEnv.biome, 'highway');
-    const countryEnv = resolveMapEnvironment({ id: '3', title: 'Country Meadow Sunset', artist: 'Folk', album: 'Valley' }, longLineLyrics, 78, SAMPLE_PALETTE, 'auto', 'auto');
+    assert.equal(hwyEnv.timeOfDay, 'sunset');
+
+    const countryEnv = resolveMapEnvironment(
+      { id: '3', title: 'Sunny Morning Meadow', artist: 'Folk', album: 'Valley' },
+      longLineLyrics,
+      78,
+      dayPalette,
+      'auto',
+      'auto'
+    );
     assert.equal(countryEnv.biome, 'countryside');
-    const forcedEnv = resolveMapEnvironment({ id: '4', title: 'X', artist: 'Y', album: 'Z' }, longLineLyrics, 108, SAMPLE_PALETTE, 'highway', 'day');
-    assert.equal(forcedEnv.biome, 'highway');
-    assert.equal(forcedEnv.timeOfDay, 'day');
+    assert.equal(countryEnv.timeOfDay, 'day');
+
+    // Explicit scenePref & timePref overrides must always be respected
+    const forcedHwySunset = resolveMapEnvironment({ id: '4', title: 'X', artist: 'Y', album: 'Z' }, longLineLyrics, 108, nightPalette, 'highway', 'sunset');
+    assert.equal(forcedHwySunset.biome, 'highway');
+    assert.equal(forcedHwySunset.timeOfDay, 'sunset');
+    const forcedCountryDay = resolveMapEnvironment({ id: '5', title: 'Neon City', artist: 'Metro', album: 'Subway' }, longLineLyrics, 108, nightPalette, 'countryside', 'day');
+    assert.equal(forcedCountryDay.biome, 'countryside');
+    assert.equal(forcedCountryDay.timeOfDay, 'day');
+    const forcedCityNight = resolveMapEnvironment({ id: '6', title: 'Sunny Meadow', artist: 'Folk', album: 'Daylight' }, longLineLyrics, 78, dayPalette, 'cityscape', 'night');
+    assert.equal(forcedCityNight.biome, 'cityscape');
+    assert.equal(forcedCityNight.timeOfDay, 'night');
 
     renderer.setModes({ beatCameraThump: true });
     renderer.setStyle('IosTextingMotion');
     renderer.setVariation('navigation-map');
     renderer.setContentInsetLeft(320);
-    canvas.ctx2d.ops.length = 0;
-    renderer.renderFrame(1096);
-    const mapTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
-    assert.ok(mapTexts.some((t) => t.startsWith('↳ Next:')), 'navigation-map CarPlay HUD should render compact Next-turn sub-bar');
+    for (const [biome, timeOfDay, expectedSpeed] of [
+      ['cityscape', 'night', '35'],
+      ['highway', 'sunset', '65'],
+      ['countryside', 'day', '45'],
+    ]) {
+      renderer.setVisualSettings({ mapScene: biome, mapTimeOfDay: timeOfDay });
+      canvas.ctx2d.ops.length = 0;
+      renderer.renderFrame(1096);
+      const mapTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText').map((op) => String(op[1]));
+      assert.ok(mapTexts.some((t) => t.includes('Next:')), `navigation-map (${biome}/${timeOfDay}) CarPlay HUD should render compact Next-turn sub-bar`);
+      assert.ok(mapTexts.includes('left') && mapTexts.includes('BPM') && mapTexts.includes('duration'), `navigation-map (${biome}/${timeOfDay}) CarPlay HUD should render 3-column bottom-left telemetry pill`);
+      assert.ok(mapTexts.includes(expectedSpeed), `navigation-map (${biome}/${timeOfDay}) should render biome speed limit ${expectedSpeed}`);
+    }
+    renderer.setVisualSettings({ mapScene: 'auto', mapTimeOfDay: 'auto' });
     // Group Chat mode renders colorful user avatars & active/past conversation bubbles cleanly
     renderer.setContentInsetLeft(0);
     renderer.setVariation('group-chat');
@@ -2158,6 +2220,184 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     assert.ok(ship.getLaserSalvoCount() >= 8, `Expected persistent beat-locked laser salvos over 60s vocal track, got ${ship.getLaserSalvoCount()}`);
 
     ship.dispose();
+    renderer.dispose();
+  });
+
+  test('v1.3.5 Pass 1: Zero Split-View vertical seam, Cityscape 2D turns & CarPlay HUD, Spatial 3D 1.5x typography + Z-punch, and Vaporwave Starfighter', async () => {
+    // 1. Split-View vertical seam removal invariants
+    const npSrc = readFileSync(path.join(rootDir, 'src/ui/player/NowPlayingScreen.tsx'), 'utf8');
+    assert.ok(
+      npSrc.includes('rgba(0,0,0,0.82) 0%, rgba(0,0,0,0.62) 20%, rgba(0,0,0,0.22) 36%, rgba(0,0,0,0) 52%'),
+      'NowPlayingScreen must use wide feathered horizontal scrim over full-bleed visualizer'
+    );
+    const iosSrc = readFileSync(path.join(rootDir, 'src/lyricVisualizer/rendering/styles/iosTextingMotion.ts'), 'utf8');
+    assert.equal(/ctx\.rect\(0,\s*topClipY,\s*focalWidth/.test(iosSrc), false, 'IosTextingMotion must not hard-clip horizontally at focalLeft');
+    const starSrc = readFileSync(path.join(rootDir, 'src/lyricVisualizer/rendering/styles/starfieldShip3d.ts'), 'utf8');
+    assert.equal(/ctx\.rect\(focalLeft,\s*0,\s*focalWidth,\s*height\)/.test(starSrc), false, 'StarfieldShip3D must not hard-clip horizontally at focalLeft');
+    const motionSrc = readFileSync(path.join(rootDir, 'src/lyricVisualizer/rendering/styles/motionGeometry.ts'), 'utf8');
+    assert.equal(/ctx\.rect\(focal\.left,\s*0,\s*focalWidth,\s*height\)/.test(motionSrc), false, 'MotionGeometry must not hard-clip horizontally at focal.left');
+
+    // 2. 2.5D Navigation Map real turning paths across all 3 biomes & 3 times of day (Night / Sunset / Day)
+    const mapsScene = new Maps3DScene();
+    const mapCtx = createMockCanvas2DContext();
+    const biomeCases = [
+      { biome: 'cityscape', shield: 'I-5 N', times: ['night', 'sunset', 'day'] },
+      { biome: 'highway', shield: 'I-280 N', times: ['sunset', 'night', 'day'] },
+      { biome: 'countryside', shield: 'SR-1 N', times: ['day', 'sunset', 'night'] },
+    ];
+    for (const bc of biomeCases) {
+      const headings = new Set();
+      for (let step = 0; step < 90; step++) {
+        const t = step * 0.05;
+        const tod = bc.times[step % bc.times.length];
+        const env = mapsScene.render(
+          mapCtx,
+          1280,
+          720,
+          420,
+          860,
+          t,
+          0.05,
+          { rmsLevel: 0.6, bassEnergy: 0.7, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: step % 3 === 0, isDownbeat: step % 6 === 0, estimatedBpm: 112 },
+          SAMPLE_PALETTE,
+          { id: `map-${bc.biome}`, title: 'De Anza Drive', artist: 'WaveForm', album: 'Pass 1' },
+          SYNCED_LYRICS,
+          bc.biome,
+          tod,
+          false,
+          step === 0
+        );
+        assert.equal(env.biome, bc.biome);
+        assert.equal(env.timeOfDay, tod);
+        assert.equal(env.routeShieldLabel, bc.shield);
+        headings.add(Math.round(mapsScene.getCarPose().heading * 10));
+      }
+      assert.ok(
+        headings.size >= 3,
+        `${bc.biome} 2D route must smoothly turn along its spline (saw ${headings.size} distinct headings)`
+      );
+    }
+    mapsScene.dispose();
+
+    // 3. Spatial 3D Depth enlarged default typography (~1.5x) & kinetic Z-depth beat camera punch
+    const spatialStyle = new Spatial3DDepthStyle();
+    const spec = spatialStyle.getMeasurementSpec();
+    assert.ok(spec.fontSizeMultiplier >= 1.45, `Spatial3DDepth fontSizeMultiplier must be >= 1.45, got ${spec.fontSizeMultiplier}`);
+
+    const canvas = createMockCanvas(1280, 720);
+    const renderer = new LyricStageRenderer({
+      canvas,
+      styleId: 'Spatial3DDepth',
+      beatCameraThump: true,
+    });
+    renderer.resize(1280, 720, 1);
+    renderer.setLyrics(SYNCED_LYRICS);
+    renderer.setSyncState({ timeSeconds: 4.5, activeLineIndex: 1, activeWordIndex: 1, wordProgress: 0.5, didSeekThisFrame: true });
+    renderer.setAudioMetrics({ rmsLevel: 0.8, bassEnergy: 0.92, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: true, isDownbeat: true, beatStrength: 0.96 });
+    renderer.renderFrame(1000);
+    renderer.renderFrame(1016);
+    assert.equal(renderer.getBeatThumpScale() < 1.03, true, 'Spatial3DDepth uses native Z-axis punch without excessive flat 2D zoom');
+
+    const measurer = new LyricsMeasurer();
+    const layout = measurer.measure(canvas.ctx2d, SYNCED_LYRICS, 860, 720, 'SF Pro Display', 1.0, undefined, spec, 'auto', 'Spatial3DDepth');
+    spatialStyle.render(canvas.ctx2d, {
+      lyrics: SYNCED_LYRICS,
+      layout,
+      timeSeconds: 4.5,
+      deltaSeconds: 0.016,
+      activeLineIndex: 1,
+      activeWordIndex: 1,
+      wordProgress: 0.5,
+      lineFadeAlpha: 1,
+      palette: SAMPLE_PALETTE,
+      audio: { rmsLevel: 0.85, bassEnergy: 0.95, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: true, isDownbeat: true, beatStrength: 0.98 },
+      fontFamily: 'SF Pro Display',
+      fontSizeScale: 1.0,
+      dpiScale: 1,
+      reduceMotion: false,
+      isAmbientMode: false,
+      beatCameraThump: true,
+      didSeekThisFrame: false,
+      variationId: 'depth-rings',
+      manualScrollY: 0,
+      isFollowingPlayback: true,
+      hoveredLineIndex: -1,
+      backgroundOpacity: 0.95,
+      vignetteStrength: 0.55,
+      textAlign: 'center',
+      trackMetadata: null,
+      recordHitRect: () => {},
+    }, 1280, 720);
+    assert.ok(spatialStyle.getLastZPunch() > 1, `Spatial3DDepth must apply positive 3D Z-punch on beat when beatCameraThump=true, got ${spatialStyle.getLastZPunch()}`);
+
+    spatialStyle.render(canvas.ctx2d, {
+      lyrics: SYNCED_LYRICS,
+      layout,
+      timeSeconds: 4.52,
+      deltaSeconds: 0.016,
+      activeLineIndex: 1,
+      activeWordIndex: 1,
+      wordProgress: 0.5,
+      lineFadeAlpha: 1,
+      palette: SAMPLE_PALETTE,
+      audio: { rmsLevel: 0.85, bassEnergy: 0.95, midEnergy: 0.5, trebleEnergy: 0.4, beatDetected: true, isDownbeat: true, beatStrength: 0.98 },
+      fontFamily: 'SF Pro Display',
+      fontSizeScale: 1.0,
+      dpiScale: 1,
+      reduceMotion: false,
+      isAmbientMode: false,
+      beatCameraThump: false,
+      didSeekThisFrame: false,
+      variationId: 'depth-rings',
+      manualScrollY: 0,
+      isFollowingPlayback: true,
+      hoveredLineIndex: -1,
+      backgroundOpacity: 0.95,
+      vignetteStrength: 0.55,
+      textAlign: 'center',
+      trackMetadata: null,
+      recordHitRect: () => {},
+    }, 1280, 720);
+    assert.equal(spatialStyle.getLastZPunch(), 0, 'Spatial3DDepth Z-punch must reset to 0 when beatCameraThump=false');
+
+    // 4. StarfieldShip3D all 4 variations (deep-space, nebula-run, retro-wireframe, vaporwave) + WebGL StrictMode safety
+    const shipDef = VISUAL_STYLE_DEFINITIONS.find((s) => s.id === 'StarfieldShip3D');
+    const expectedShipVars = ['deep-space', 'nebula-run', 'retro-wireframe', 'vaporwave'];
+    assert.deepEqual(
+      shipDef?.variations.map((v) => v.id),
+      expectedShipVars,
+      'StarfieldShip3D must register all 4 variations'
+    );
+    renderer.setStyle('StarfieldShip3D');
+    renderer.setContentInsetLeft(400);
+    let shipFrameNow = 1100;
+    for (const variationId of expectedShipVars) {
+      renderer.setVariation(variationId);
+      renderer.setSyncState({ timeSeconds: 4.2, activeLineIndex: 1, activeWordIndex: 0, wordProgress: 0.4, didSeekThisFrame: true });
+      canvas.ctx2d.ops.length = 0;
+      shipFrameNow += 32;
+      assert.equal(
+        renderer.renderFrame(shipFrameNow),
+        true,
+        `StarfieldShip3D ${variationId} variation must render cleanly in Split View`
+      );
+      const drawnTexts = canvas.ctx2d.ops.filter((op) => Array.isArray(op) && op[0] === 'fillText');
+      assert.ok(drawnTexts.length > 0, `StarfieldShip3D ${variationId} must draw projected lyric words`);
+    }
+
+    // Regression guards for Electron/Chromium WebGL StrictMode remounts & Vaporwave shaders
+    const webglLayerSrc = readFileSync(path.join(rootDir, 'src/lyricVisualizer/rendering/webGlEffectLayer.ts'), 'utf8');
+    const webglLayerCodeOnly = webglLayerSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    assert.equal(
+      /\.loseContext\s*\(/.test(webglLayerCodeOnly),
+      false,
+      'WebGlEffectLayer.dispose() must not call loseContext() (poisons shared canvas on React StrictMode remount)'
+    );
+    const shipSceneSrc = readFileSync(path.join(rootDir, 'src/lyricVisualizer/rendering/ship3dScene.ts'), 'utf8');
+    assert.ok(shipSceneSrc.includes('UNPACK_FLIP_Y_WEBGL'), 'Ship3DScene must reset UNPACK_FLIP_Y_WEBGL before Three.js init/dispose');
+    assert.ok(shipSceneSrc.includes('shipWireAccentMat'), 'Ship3DScene Vaporwave must use dual-tone wireframe accent material');
+    assert.ok(shipSceneSrc.includes('uDualTone'), 'Ship3DScene horizon grid shader must support Vaporwave dual-tone grid');
+
     renderer.dispose();
   });
 });

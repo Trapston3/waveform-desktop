@@ -1113,7 +1113,8 @@ export class LyricStageRenderer {
           this.styleId === 'IosTextingMotion' &&
           this.frameContext.variationId !== 'navigation-map' &&
           Boolean(this.frameContext.iosKineticPopup);
-        const basePeak = isKineticBoost ? 0.055 : 0.032;
+        const isNativeZDepth = this.styleId === 'Spatial3DDepth';
+        const basePeak = isKineticBoost ? 0.055 : isNativeZDepth ? 0.01 : 0.032;
         const downbeatFactor = this.audioMetrics.isDownbeat ? 1.15 : 0.88;
         const peak = basePeak * intensityMult * downbeatFactor;
         this.beatThumpVel += peak * 24;

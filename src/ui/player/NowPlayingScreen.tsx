@@ -846,7 +846,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
             {!isArtworkHidden && (
               <div
                 style={{
-                  background: 'linear-gradient(to right, rgba(0,0,0,0.42) 0%, rgba(0,0,0,0.18) 24%, rgba(0,0,0,0.04) 38%, transparent 45%)',
+                  background: 'linear-gradient(90deg, rgba(0,0,0,0.82) 0%, rgba(0,0,0,0.62) 20%, rgba(0,0,0,0.22) 36%, rgba(0,0,0,0) 52%)',
                 }}
                 className="absolute inset-0 pointer-events-none z-[2]"
               />

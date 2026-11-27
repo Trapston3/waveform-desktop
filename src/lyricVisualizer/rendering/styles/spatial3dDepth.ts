@@ -39,6 +39,14 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
   private tunnelPhase = 0;
   private lastKnownActiveIdx = -1;
 
+  // Kinetic 3D Z-axis perspective camera punch & concentric ring shockwave (zero GC)
+  private zPunch = 0;
+  private zPunchVel = 0;
+  private ringShockPhase = 0;
+  private ringShockAlpha = 0;
+  private lastBass = 0;
+  private beatCooldown = 0;
+
   // Pre-allocated lane buffers (zero per-frame heap allocations)
   private readonly laneY = new Float32Array(MAX_PLANES);
   private readonly laneZ = new Float32Array(MAX_PLANES);
@@ -52,11 +60,15 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
     return 0;
   }
 
+  getLastZPunch(): number {
+    return this.zPunch;
+  }
+
   getMeasurementSpec(frame?: StyleFrameContext): StyleMeasurementSpec {
     return {
       fontWeight: 800,
-      fontSizeMultiplier: 1.04,
-      maxLineWidthRatio: 0.82,
+      fontSizeMultiplier: 1.5,
+      maxLineWidthRatio: 0.84,
       scriptMode: frame?.scriptMode ?? 'auto',
       styleId: this.id,
     };
@@ -67,6 +79,12 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
     this.initialized = false;
     this.tunnelPhase = 0;
     this.lastKnownActiveIdx = -1;
+    this.zPunch = 0;
+    this.zPunchVel = 0;
+    this.ringShockPhase = 0;
+    this.ringShockAlpha = 0;
+    this.lastBass = 0;
+    this.beatCooldown = 0;
   }
 
   render(
@@ -87,11 +105,65 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
         ? clamp01(frame.vignetteStrength)
         : 0.55;
 
+    const dt = Math.max(0.001, Math.min(0.1, frame.deltaSeconds));
+    const thumpEnabled = frame.beatCameraThump !== false && !frame.reduceMotion;
+
     if (!frame.reduceMotion) {
-      const dt = Math.max(0.001, Math.min(0.1, frame.deltaSeconds));
       this.tunnelPhase =
         (this.tunnelPhase + dt * (0.28 + frame.audio.bassEnergy * 0.36 + frame.audio.rmsLevel * 0.14)) %
         1;
+    }
+
+    if (!thumpEnabled) {
+      this.zPunch = 0;
+      this.zPunchVel = 0;
+      this.ringShockPhase = 0;
+      this.ringShockAlpha = 0;
+      this.beatCooldown = 0;
+      this.lastBass = frame.audio.bassEnergy ?? 0;
+    } else {
+      const intensityMult =
+        frame.motionIntensity === 'subtle'
+          ? 0.65
+          : frame.motionIntensity === 'vivid'
+          ? 1.32
+          : 1.0;
+      this.beatCooldown = Math.max(0, this.beatCooldown - dt);
+      const bass = frame.audio.bassEnergy || 0;
+      const bassDelta = bass - this.lastBass;
+      this.lastBass = bass;
+      const beatStrength =
+        frame.audio.beatStrength ?? (frame.audio.beatDetected ? 0.92 : bass);
+      const triggerPunch =
+        this.beatCooldown <= 0 &&
+        (Boolean(frame.audio.isDownbeat) ||
+          Boolean(frame.audio.beatDetected) ||
+          (bassDelta > 0.12 && bass > 0.38) ||
+          beatStrength > 0.66);
+
+      if (triggerPunch) {
+        const downbeatMult = frame.audio.isDownbeat ? 1.25 : 0.92;
+        this.zPunchVel += 520 * intensityMult * downbeatMult;
+        this.ringShockPhase = 0.08;
+        this.ringShockAlpha = Math.min(1, 0.78 * intensityMult * downbeatMult);
+        this.beatCooldown = 0.16;
+      }
+
+      // Critically-damped 3D Z-axis spring camera punch
+      const springAcc = -250 * this.zPunch - 21 * this.zPunchVel;
+      this.zPunchVel += springAcc * dt;
+      this.zPunch = Math.max(0, Math.min(96, this.zPunch + this.zPunchVel * dt));
+      if (this.zPunch < 0.05 && Math.abs(this.zPunchVel) < 0.25) {
+        this.zPunch = 0;
+        this.zPunchVel = 0;
+      }
+
+      if (this.ringShockAlpha > 0.005) {
+        this.ringShockPhase = Math.min(1.15, this.ringShockPhase + dt * 2.1);
+        this.ringShockAlpha *= Math.exp(-dt * 4.8);
+      } else {
+        this.ringShockAlpha = 0;
+      }
     }
 
     const camDriftX = frame.reduceMotion
@@ -119,25 +191,52 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
       ctx.fillRect(0, 0, width, height);
 
       if (varIdx === 0) {
-        // Depth Rings: 6 smoothly receding perspective tunnel rings along Z
+        const zPunchBoost = this.zPunch / 96;
+        // Depth Rings: 6 smoothly receding perspective tunnel rings along Z + luminous beat ripple
         for (let r = 0; r < 6; r++) {
           const zNorm = (r + this.tunnelPhase) / 6;
-          const z = 0.42 + zNorm * 2.75;
+          const z = Math.max(0.24, 0.42 + zNorm * 2.75 - zPunchBoost * 0.22 * (1 - zNorm * 0.6));
           const persp = 0.52 / z;
           const audioPulse = frame.reduceMotion
             ? 1
-            : 1 + frame.audio.bassEnergy * 0.08 * (1 - zNorm * 0.5);
+            : 1 + frame.audio.bassEnergy * 0.08 * (1 - zNorm * 0.5) + zPunchBoost * 0.14;
           const edgeFade = Math.sin(zNorm * Math.PI);
+          const ringRippleMatch =
+            this.ringShockAlpha > 0.02
+              ? Math.max(0, 1 - Math.abs((1 - zNorm) - this.ringShockPhase) * 3.2) * this.ringShockAlpha
+              : 0;
           ctx.strokeStyle =
             r % 2 === 0 ? frame.palette.accentPrimary : frame.palette.accentSecondary;
-          ctx.lineWidth = Math.max(0.8, 2.2 * persp);
-          ctx.globalAlpha = bgAlpha * edgeFade * (0.14 + frame.audio.rmsLevel * 0.08);
+          ctx.lineWidth = Math.max(0.8, (2.2 + ringRippleMatch * 2.8) * persp);
+          ctx.globalAlpha =
+            bgAlpha *
+            edgeFade *
+            Math.min(0.88, 0.14 + frame.audio.rmsLevel * 0.08 + ringRippleMatch * 0.34);
           ctx.beginPath();
           ctx.ellipse(
             focal.centerX - camDriftX * (0.28 - zNorm * 0.22),
             height * 0.5 - camDriftY * (0.28 - zNorm * 0.22),
             Math.max(4, focal.width * 0.48 * persp * audioPulse),
             Math.max(3, height * 0.42 * persp * audioPulse),
+            0,
+            0,
+            Math.PI * 2
+          );
+          ctx.stroke();
+        }
+
+        // Outward luminous beat shockwave ring rippling from center
+        if (this.ringShockAlpha > 0.02) {
+          const rNorm = Math.max(0.08, this.ringShockPhase);
+          ctx.strokeStyle = frame.palette.accentPrimary;
+          ctx.lineWidth = Math.max(1.2, 3.6 * (1 - rNorm * 0.5));
+          ctx.globalAlpha = bgAlpha * this.ringShockAlpha * 0.38;
+          ctx.beginPath();
+          ctx.ellipse(
+            focal.centerX,
+            height * 0.5,
+            Math.max(12, focal.width * 0.56 * rNorm),
+            Math.max(8, height * 0.48 * rNorm),
             0,
             0,
             Math.PI * 2
@@ -299,14 +398,16 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
     const startPlane = Math.max(0, pivotIdx - 3);
     const endPlane = Math.min(layout.lines.length - 1, pivotIdx + 5);
     const planeCount = endPlane - startPlane + 1;
-    const minGap = Math.max(lineH * 0.85, 38);
+    const minGap = Math.max(lineH * 0.98, 52);
 
-    // 1. Compute strict Z-spacing (z = baseZ + rel * 210) and perspective factors
+    // 1. Compute strict Z-spacing with kinetic Z-axis beat camera punch & perspective parallax
     for (let i = startPlane; i <= endPlane; i++) {
       const slot = i - startPlane;
       const rel = i - centerLineFloat;
       const distRel = Math.abs(rel);
-      const z = baseZ + distRel * 210;
+      const prox = Math.exp(-distRel * 1.15);
+      const zShift = -this.zPunch * (0.22 + 0.78 * prox);
+      const z = Math.max(58, baseZ + distRel * 224 + zShift);
       const persp = focalLength / (focalLength + z - baseZ);
       this.laneRel[slot] = rel;
       this.laneZ[slot] = z;
@@ -325,10 +426,10 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
       const prevSlot = slot - 1;
       const rel = this.laneRel[slot];
       const persp = this.lanePersp[slot];
-      const rawY = cy + rel * (lineH * 1.08) * persp + camDriftY * (1 - persp);
+      const rawY = cy + rel * (lineH * 1.14) * persp + camDriftY * (1 - persp);
       const prevScaledH = layout.lines[i - 1].height * this.lanePersp[prevSlot];
       const curScaledH = layout.lines[i].height * persp;
-      const requiredGap = Math.max(minGap, (prevScaledH + curScaledH) * 0.5 + 14);
+      const requiredGap = Math.max(minGap, (prevScaledH + curScaledH) * 0.5 + 22);
       this.laneY[slot] = Math.max(rawY, this.laneY[prevSlot] + requiredGap);
     }
 
@@ -338,10 +439,10 @@ export class Spatial3DDepthStyle implements ILyricVisualStyle {
       const nextSlot = slot + 1;
       const rel = this.laneRel[slot];
       const persp = this.lanePersp[slot];
-      const rawY = cy + rel * (lineH * 1.08) * persp + camDriftY * (1 - persp);
+      const rawY = cy + rel * (lineH * 1.14) * persp + camDriftY * (1 - persp);
       const nextScaledH = layout.lines[i + 1].height * this.lanePersp[nextSlot];
       const curScaledH = layout.lines[i].height * persp;
-      const requiredGap = Math.max(minGap, (nextScaledH + curScaledH) * 0.5 + 14);
+      const requiredGap = Math.max(minGap, (nextScaledH + curScaledH) * 0.5 + 22);
       this.laneY[slot] = Math.min(rawY, this.laneY[nextSlot] - requiredGap);
     }
 

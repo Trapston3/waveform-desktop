@@ -3,8 +3,9 @@
 //  0: 'deep-space' (default) - serene deep-space starfield + 3D starfighter & direct lyric-merge splashes
 //  1: 'nebula-run'           - album-tinted cosmic nebula veil + fluid flight weave
 //  2: 'retro-wireframe'      - vector wireframe starfighter, asteroids, and infinite horizon grid
+//  3: 'vaporwave'            - Outrun horizon sun, neon perspective grid, wireframe mountains & cyan-magenta lyrics
 
-import type { StyleFrameContext } from '../../core/models';
+import type { LyricPalette, StyleFrameContext } from '../../core/models';
 import {
   clamp01,
   drawRoundedRectPath,
@@ -54,10 +55,24 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
   private readonly drawnWordRects = new Float32Array(192);
   private readonly sortOrder = new Int32Array(48);
   private readonly arcaneOverlay = new ArcaneSketchOverlay();
+  private readonly vaporPalette: LyricPalette = {
+    bgDeep: '#070214',
+    bgMid: '#1b0633',
+    accentPrimary: '#00f5ff',
+    accentSecondary: '#ff2a9d',
+    textActive: '#ffffff',
+    textUpcoming: '#f0abfc',
+    textPassed: '#67e8f9',
+    oklchL: 0.65,
+    oklchC: 0.25,
+    oklchH: 320,
+    isFallback: false,
+  };
 
-  getVariationIndex(variationId?: string): 0 | 1 | 2 {
+  getVariationIndex(variationId?: string): 0 | 1 | 2 | 3 {
     if (variationId === 'nebula-run') return 1;
     if (variationId === 'retro-wireframe' || variationId === 'retro-vector-wireframe') return 2;
+    if (variationId === 'vaporwave') return 3;
     return 0;
   }
 
@@ -100,11 +115,13 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
         activeScene.clearPendingArcaneEvents();
       }
     }
+    const activePalette =
+      frame.variationId === 'vaporwave' ? this.vaporPalette : frame.palette;
     this.arcaneOverlay.updateAndRender(
       ctx,
       frame.timeSeconds,
       frame.deltaSeconds,
-      frame.palette,
+      activePalette,
       frame.reduceMotion,
       frame.fontFamily,
       width,
@@ -119,6 +136,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     centerY: number,
     maxWidth: number
   ): void {
+    const pal = frame.variationId === 'vaporwave' ? this.vaporPalette : frame.palette;
     const motion = frame.reduceMotion ? 0 : 1;
     const t = frame.timeSeconds || 0;
     const bass = frame.audio?.bassEnergy ?? 0;
@@ -139,7 +157,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     ctx.font = `700 22px ${frame.fontFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.shadowColor = frame.palette.accentPrimary;
+    ctx.shadowColor = pal.accentPrimary;
     ctx.shadowBlur = 14;
     ctx.fillStyle = '#ffffff';
     ctx.globalAlpha = motion === 0 ? 0.85 : 0.78 + 0.22 * Math.sin(t * 2.6);
@@ -162,8 +180,8 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       const bh = Math.max(4, Math.round(maxBarH * amp));
       const bx = startX + i * (barW + barGap);
       const by = centerY - bh * 0.5 + 2;
-      ctx.fillStyle = i % 2 === 0 ? frame.palette.accentPrimary : frame.palette.accentSecondary;
-      ctx.shadowColor = frame.palette.accentPrimary;
+      ctx.fillStyle = i % 2 === 0 ? pal.accentPrimary : pal.accentSecondary;
+      ctx.shadowColor = pal.accentPrimary;
       ctx.shadowBlur = 8;
       ctx.globalAlpha = 0.65 + amp * 0.35;
       drawRoundedRectPath(ctx, bx, by, barW, bh, 2);
@@ -174,9 +192,9 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
     ctx.font = `600 13px ${frame.fontFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.shadowColor = frame.palette.accentPrimary;
+    ctx.shadowColor = pal.accentPrimary;
     ctx.shadowBlur = 12;
-    ctx.fillStyle = frame.palette.textActive;
+    ctx.fillStyle = pal.textActive;
     ctx.globalAlpha = motion === 0 ? 0.82 : 0.72 + 0.24 * Math.sin(t * 2.2);
     ctx.fillText('INSTRUMENTAL', centerX, centerY + 24);
 
@@ -196,7 +214,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       ctx.fill();
 
       ctx.globalAlpha = 0.85;
-      ctx.fillStyle = frame.palette.accentPrimary;
+      ctx.fillStyle = pal.accentPrimary;
       drawRoundedRectPath(ctx, trackX, trackY, Math.max(4, trackW * progress), 2, 1);
       ctx.fill();
     }
@@ -223,9 +241,6 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
         : 1.0;
 
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(focalLeft, 0, focalWidth, height);
-    ctx.clip();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
@@ -268,26 +283,29 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
       // Keep every approaching word strictly on its exact flight-plane screenY (zero vertical lift or snap)
       const drawY = Math.max(minY, Math.min(maxY, gp.screenY));
 
-      const glowColor = resolveWordGlowColor(
-        gp.semanticMask,
-        frame.timeSeconds,
-        frame.palette.accentPrimary,
-        frame.palette.accentSecondary
-      );
+      const isVaporwave = frame.variationId === 'vaporwave';
+      const glowColor = isVaporwave
+        ? '#ff2a9d'
+        : resolveWordGlowColor(
+            gp.semanticMask,
+            frame.timeSeconds,
+            frame.palette.accentPrimary,
+            frame.palette.accentSecondary
+          );
 
       // Consumed words (t >= word.startSeconds) shatter at SHIP_NOSE_Z into liquid-starlight particles (never float past ship tail!)
       if (gp.consumed) {
         if (gp.mergeFlash > 0.01 && !frame.reduceMotion) {
           const p = 1.0 - gp.mergeFlash;
           ctx.save();
-          ctx.shadowColor = glowColor;
+          ctx.shadowColor = isVaporwave ? '#00f5ff' : glowColor;
           ctx.shadowBlur = 20;
 
           // Brief nose-flash dissolve during first ~90ms of impact pinned strictly at nose before full droplet dispersion
           if (gp.mergeFlash >= 0.80) {
             const wordDissolveAlpha = Math.min(1, (gp.mergeFlash - 0.80) / 0.20);
             ctx.globalAlpha = wordDissolveAlpha;
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = isVaporwave ? '#00f5ff' : '#ffffff';
             ctx.shadowBlur = 26;
             ctx.fillText(gp.text, drawX, drawY);
           }
@@ -295,7 +313,7 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
           // Expanding directional plasma ripple arc sweeping off nose/wings
           const rippleRx = (26 + p * 74) * gp.scale;
           const rippleRy = rippleRx * 0.45;
-          ctx.strokeStyle = glowColor;
+          ctx.strokeStyle = isVaporwave ? '#00f5ff' : glowColor;
           ctx.lineWidth = Math.max(1.3, (3.5 - p * 2.3) * gp.scale);
           ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.82;
           ctx.beginPath();
@@ -318,7 +336,13 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
             const dx = drawX + Math.cos(ang) * dist;
             const dy = drawY + Math.sin(ang) * dist * 0.72;
             const dr = Math.max(1.4, (3.8 - p * 2.4) * gp.scale);
-            ctx.fillStyle = d % 2 === 0 ? '#ffffff' : glowColor;
+            ctx.fillStyle = isVaporwave
+              ? d % 2 === 0
+                ? '#00f5ff'
+                : '#ff2a9d'
+              : d % 2 === 0
+              ? '#ffffff'
+              : glowColor;
             ctx.globalAlpha = gp.alpha * gp.mergeFlash * 0.94;
             ctx.beginPath();
             ctx.arc(dx, dy, dr, 0, Math.PI * 2);
@@ -378,20 +402,36 @@ export class StarfieldShip3DStyle implements ILyricVisualStyle {
         frame.recordHitRect?.(gp.lineIndex, rx0, ry0, rx1 - rx0, ry1 - ry0);
       }
 
-      // Dark drop halo + accent glow + white core typography
+      // Dark drop halo + accent glow + synthwave cyan-to-magenta gradient / white core typography
       ctx.save();
       ctx.globalAlpha = gp.alpha * (gp.isActive ? 1.0 : 0.92);
       ctx.lineJoin = 'round';
       ctx.miterLimit = 2;
-      ctx.strokeStyle = 'rgba(2, 6, 18, 0.9)';
-      ctx.lineWidth = Math.max(4, wordFontPx * 0.16);
-      ctx.shadowColor = 'rgba(2, 6, 18, 0.94)';
+      ctx.strokeStyle = isVaporwave ? 'rgba(7, 2, 20, 0.96)' : 'rgba(2, 6, 18, 0.9)';
+      ctx.lineWidth = Math.max(4.5, wordFontPx * (isVaporwave ? 0.19 : 0.16));
+      ctx.shadowColor = isVaporwave ? 'rgba(7, 2, 20, 0.96)' : 'rgba(2, 6, 18, 0.94)';
       ctx.shadowBlur = 10;
       ctx.strokeText(gp.text, finalX, drawY);
 
-      ctx.shadowColor = glowColor;
-      ctx.shadowBlur = gp.isActive ? 24 : 14;
-      ctx.fillStyle = gp.isActive ? '#ffffff' : frame.palette.textActive;
+      if (isVaporwave) {
+        const halfText = Math.max(24, textW * 0.52);
+        const vaporGrad = ctx.createLinearGradient(
+          finalX - halfText,
+          drawY - wordFontPx * 0.45,
+          finalX + halfText,
+          drawY + wordFontPx * 0.45
+        );
+        vaporGrad.addColorStop(0, '#00f5ff');
+        vaporGrad.addColorStop(0.48, gp.isActive ? '#f5d0fe' : '#e879f9');
+        vaporGrad.addColorStop(1, '#ff2a9d');
+        ctx.shadowColor = gp.isActive ? '#00f5ff' : '#ff2a9d';
+        ctx.shadowBlur = gp.isActive ? 24 : 16;
+        ctx.fillStyle = vaporGrad;
+      } else {
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = gp.isActive ? 24 : 14;
+        ctx.fillStyle = gp.isActive ? '#ffffff' : frame.palette.textActive;
+      }
       ctx.fillText(gp.text, finalX, drawY);
       ctx.restore();
     }

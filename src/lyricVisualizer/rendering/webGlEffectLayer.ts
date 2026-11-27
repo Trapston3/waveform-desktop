@@ -310,14 +310,26 @@ void main() {
     // nebula-run
     midnightSky = mix(vec3(0.016, 0.021, 0.058), u_bgDeep * 0.78, 0.60);
     nebulaLift = 0.38;
-  } else {
+  } else if (u_variation < 2.5) {
     // retro-wireframe (deeper pitch-black)
     midnightSky = mix(vec3(0.005, 0.006, 0.015), u_bgDeep * 0.24, 0.30);
     nebulaLift = 0.08;
+  } else {
+    // vaporwave (deep twilight gradient #070214 -> #1b0633 -> #3a0d47)
+    vec3 vTop = vec3(0.027, 0.008, 0.078);
+    vec3 vMid = vec3(0.106, 0.024, 0.200);
+    vec3 vHor = vec3(0.227, 0.051, 0.278);
+    float vh = clamp(v_uv.y, 0.0, 1.0);
+    midnightSky = vh > 0.55
+      ? mix(vMid, vTop, smoothstep(0.55, 0.98, vh))
+      : mix(vHor, vMid, smoothstep(0.15, 0.55, vh));
+    nebulaLift = 0.0;
   }
 
   float horizonGrad = smoothstep(-0.75, 0.75, v_uv.y);
-  vec3 skyVelvet = mix(midnightSky * 0.82, mix(midnightSky, u_bgMid * 0.32, 0.35), 1.0 - horizonGrad * 0.65);
+  vec3 skyVelvet = u_variation >= 2.5
+    ? midnightSky
+    : mix(midnightSky * 0.82, mix(midnightSky, u_bgMid * 0.32, 0.35), 1.0 - horizonGrad * 0.65);
 
   // Subtle diagonal Milky Way & album-art-tinted smooth FBM nebula veil
   vec2 mwUv = mat2(0.848, -0.530, 0.530, 0.848) * uv;
@@ -539,10 +551,22 @@ export class WebGlEffectLayer {
       }) as WebGL2RenderingContext | null;
 
       if (gl && typeof gl.createShader === 'function') {
-        this.gl = gl;
-        this.fallbackCtx = null;
-        this.setupQuad(gl);
-        return;
+        if (typeof gl.isContextLost === 'function' && gl.isContextLost()) {
+          try {
+            gl.getExtension('WEBGL_lose_context')?.restoreContext();
+          } catch {
+            // Ignore restore failure
+          }
+        }
+        if (typeof gl.isContextLost !== 'function' || !gl.isContextLost()) {
+          this.gl = gl;
+          this.fallbackCtx = null;
+          this.setupQuad(gl);
+          if (this.gl) {
+            this.gl.viewport(0, 0, Math.max(1, this.canvas.width), Math.max(1, this.canvas.height));
+            return;
+          }
+        }
       }
     } catch {
       // Fall through to Canvas2D fallback
@@ -768,6 +792,11 @@ export class WebGlEffectLayer {
         grad.addColorStop(0, '#07090e');
         grad.addColorStop(1, '#0b0e17');
       }
+    } else if (mode === 'starfield' && variationIndex === 3) {
+      grad.addColorStop(0, '#070214');
+      grad.addColorStop(0.45, '#1b0633');
+      grad.addColorStop(0.68, '#3a0d47');
+      grad.addColorStop(1, '#120424');
     } else {
       grad.addColorStop(0, params.bgDeepHex);
       grad.addColorStop(1, params.bgMidHex);
@@ -855,24 +884,35 @@ export class WebGlEffectLayer {
 
     if (this.gl) {
       const gl = this.gl;
-      for (const entry of this.programs.values()) {
-        gl.deleteProgram(entry.program);
+      try {
+        if (typeof gl.isContextLost !== 'function' || !gl.isContextLost()) {
+          gl.bindVertexArray(null);
+          gl.bindBuffer(gl.ARRAY_BUFFER, null);
+          gl.useProgram(null);
+          for (const entry of this.programs.values()) {
+            gl.deleteProgram(entry.program);
+          }
+          if (this.vbo) {
+            gl.deleteBuffer(this.vbo);
+            this.vbo = null;
+          }
+          if (this.vao) {
+            gl.deleteVertexArray(this.vao);
+            this.vao = null;
+          }
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+      } catch {
+        // Ignore cleanup errors during disposal
       }
       this.programs.clear();
-      if (this.vbo) {
-        gl.deleteBuffer(this.vbo);
-        this.vbo = null;
-      }
-      if (this.vao) {
-        gl.deleteVertexArray(this.vao);
-        this.vao = null;
-      }
-      try {
-        const loseCtx = gl.getExtension('WEBGL_lose_context');
-        loseCtx?.loseContext();
-      } catch {
-        // Ignore if extension unavailable
-      }
+      this.vbo = null;
+      this.vao = null;
+      // Do NOT call WEBGL_lose_context.loseContext() here: React StrictMode and
+      // effect remounts reuse the same <canvas> element and a forced context loss
+      // permanently bricks the canvas, leaving hasWebGlBackdrop=false and burying
+      // lower z-index 3D layers under the Canvas2D solid fallback fill.
       this.gl = null;
     }
     this.fallbackCtx = null;

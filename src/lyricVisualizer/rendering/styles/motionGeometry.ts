@@ -471,9 +471,6 @@ export class MotionGeometryStyle implements ILyricVisualStyle {
     }
 
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(focal.left, 0, focalWidth, height);
-    ctx.clip();
 
     frame.recordHitRect?.(frame.activeLineIndex, focal.left + 20, height * 0.22, focalWidth - 40, height * 0.56);
 

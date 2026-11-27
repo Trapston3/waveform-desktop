@@ -167,22 +167,17 @@ function getCardHeight(card: LyricEmbedCard | null): number {
   return 48;
 }
 
-function formatBiomeLabel(biome: MapBiomeKind): string {
-  if (biome === 'cityscape') return 'Cityscape';
-  if (biome === 'countryside') return 'Countryside';
-  return 'Highway';
+function formatDurationClock(seconds: number): string {
+  const safe = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
 }
 
-function formatTimeOfDayLabel(tod: MapTimeOfDay): string {
-  if (tod === 'day') return 'Day';
-  if (tod === 'sunset') return 'Sunset';
-  return 'Night';
-}
-
-function getBiomeSpeedLimit(biome: MapBiomeKind): string {
-  if (biome === 'cityscape') return '35';
-  if (biome === 'countryside') return '45';
-  return '65';
+function getTurnArrowGlyph(turn?: 'straight' | 'left' | 'right'): string {
+  if (turn === 'left') return '↰';
+  if (turn === 'right') return '↱';
+  return '↳';
 }
 
 function formatRemainingEta(seconds: number): string {
@@ -1428,6 +1423,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     );
 
     const isDay = env.timeOfDay === 'day';
+    const isSunset = env.timeOfDay === 'sunset';
     const bpmVal =
       typeof frame.audio.estimatedBpm === 'number' &&
       Number.isFinite(frame.audio.estimatedBpm) &&
@@ -1446,15 +1442,17 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
         ? 0.65
         : 0.0;
 
-    // 1. Top-Right Speed Limit Sign — strictly clear of top-right window controls (top >= 72px)
-    const signW = 58;
-    const signH = 74;
+    // 1. Top-Right Speed Limit Sign — biome speed limit (35 Cityscape / 65 Highway / 45 Countryside), clear of top-right controls (top >= 72px)
+    const speedLimitLabel =
+      env.biome === 'highway' ? '65' : env.biome === 'countryside' ? '45' : '35';
+    const signW = 56;
+    const signH = 72;
     const signX = focalLeft + focalWidth - signW - 20;
     const signY = 74;
 
     ctx.save();
     drawRoundedRectPath(ctx, signX, signY, signW, signH, 9);
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = isSunset ? '#fffdf7' : '#ffffff';
     ctx.shadowColor = 'rgba(0, 0, 0, 0.36)';
     ctx.shadowBlur = 12;
     ctx.fill();
@@ -1474,20 +1472,18 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.font = `800 9.5px ${IOS_FONT_STACK}`;
     ctx.fillText('SPEED', signX + signW * 0.5, signY + 15);
     ctx.fillText('LIMIT', signX + signW * 0.5, signY + 26);
-    ctx.font = `800 28px ${IOS_FONT_STACK}`;
-    ctx.fillText(getBiomeSpeedLimit(env.biome), signX + signW * 0.5, signY + 52);
+    ctx.font = `800 26px ${IOS_FONT_STACK}`;
+    ctx.fillText(speedLimitLabel, signX + signW * 0.5, signY + 51);
     ctx.restore();
 
-    // 2. Single-Source Apple Maps / CarPlay Turn-by-Turn Hero Card (upper-left / upper-center of focal rect)
-    const maxCardW = Math.max(240, focalWidth - signW - 56);
-    const cardW = Math.min(548, maxCardW);
-    const cardX =
-      focalLeft +
-      Math.max(20, Math.min(36, Math.round((focalWidth - signW - 24 - cardW) * 0.34)));
-    const cardY = 22;
+    // 2. 1:1 Apple Maps / CarPlay Turn-by-Turn Hero Card (top-left inside contentInsetLeft + 24px)
+    const maxCardW = Math.max(240, focalWidth - signW - 64);
+    const cardW = Math.min(468, maxCardW);
+    const cardX = focalLeft + 24;
+    const cardY = 24;
 
-    const stripH = 34;
-    const subBarH = 28;
+    const stripH = 40;
+    const subBarH = 30;
     const bodyPadX = 20;
     const bodyPadY = 14;
     const bodyInnerW = Math.max(180, cardW - bodyPadX * 2);
@@ -1506,10 +1502,10 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
 
     const wordIconsEnabled = frame.wordIconsEnabled !== false;
     const heroFontPx = Math.max(
-      18,
-      Math.min(26, Math.round((layout?.fontSizePx ?? 24) * 1.12))
+      20,
+      Math.min(28, Math.round((layout?.fontSizePx ?? 24) * 1.15))
     );
-    const heroLineStep = Math.round(heroFontPx * 1.32);
+    const heroLineStep = Math.round(heroFontPx * 1.3);
     const spaceW = Math.round(heroFontPx * 0.32);
     const iconSlotW = Math.round(heroFontPx * 1.05);
 
@@ -1553,74 +1549,82 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     }
 
     ctx.save();
-    // Outer card shadow + glass container
-    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 20);
-    ctx.fillStyle = isDay ? 'rgba(18, 26, 38, 0.90)' : 'rgba(14, 19, 30, 0.90)';
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.48)';
-    ctx.shadowBlur = 24;
+    // Outer card shadow + frosted CarPlay charcoal glass container (subtle Sunset/Day/Night contrast)
+    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 18);
+    ctx.fillStyle = isDay
+      ? 'rgba(34, 38, 44, 0.90)'
+      : isSunset
+      ? 'rgba(36, 28, 44, 0.89)'
+      : 'rgba(26, 30, 36, 0.88)';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.44)';
+    ctx.shadowBlur = 22;
     ctx.fill();
     ctx.shadowBlur = 0;
 
     // Clip interior sections neatly to rounded card
     ctx.save();
-    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 20);
+    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 18);
     ctx.clip();
 
-    // 2a. Top Lane-Guidance Strip (Authentic Apple Maps Emerald Green Header)
-    const stripGrad = ctx.createLinearGradient(cardX, cardY, cardX + cardW, cardY + stripH);
-    if (isDay) {
-      stripGrad.addColorStop(0, '#15803d');
-      stripGrad.addColorStop(1, '#166534');
-    } else {
-      stripGrad.addColorStop(0, '#0f5132');
-      stripGrad.addColorStop(1, '#114232');
-    }
-    ctx.fillStyle = stripGrad;
-    ctx.fillRect(cardX, cardY, cardW, stripH);
+    // 2a. Top Row: Crisp CarPlay Lane-Guidance Arrows (↑ ↑ ↑ ↱ ↱) + Compact Section/Exit Pill
+    const laneCy = cardY + stripH * 0.5 + 1;
+    const turnDir = env.upcomingTurn ?? 'right';
+    const arrowSpacing = 22;
+    const arrowStartX = cardX + 26;
+    const turnScale = 1.0 + beatLift * 0.16;
 
-    // Beat-pulsing lane arrows: ↑  ↑  ↑  ↱
-    const laneCy = cardY + stripH * 0.5;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const baseLaneAlpha = 0.46 + beatLift * 0.16;
-    ctx.font = `700 15px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = `rgba(255, 255, 255, ${baseLaneAlpha.toFixed(2)})`;
-    ctx.fillText('↑', cardX + 26, laneCy);
-    ctx.fillText('↑', cardX + 46, laneCy);
-    ctx.fillText('↑', cardX + 66, laneCy);
+    for (let lane = 0; lane < 5; lane++) {
+      const ax = arrowStartX + lane * arrowSpacing;
+      const isLeftLane = turnDir === 'left' && lane <= 1;
+      const isRightOrDefaultTurnLane = turnDir !== 'left' && lane >= 3;
+      const isActiveLane = isLeftLane || isRightOrDefaultTurnLane;
+      const glyph = turnDir === 'left' ? (lane <= 1 ? '↰' : '↑') : lane >= 3 ? '↱' : '↑';
 
-    // Active turn arrow pulsing on downbeat / beat
-    const turnScale = 1.0 + beatLift * 0.16;
-    ctx.save();
-    ctx.translate(cardX + 90, laneCy);
-    ctx.scale(turnScale, turnScale);
-    ctx.fillStyle = '#ffffff';
-    ctx.shadowColor = 'rgba(255, 255, 255, 0.72)';
-    ctx.shadowBlur = 6 + beatLift * 8;
-    ctx.font = `800 17px ${IOS_FONT_STACK}`;
-    ctx.fillText('↱', 0, 0);
-    ctx.restore();
+      if (isActiveLane) {
+        ctx.save();
+        ctx.translate(ax, laneCy);
+        ctx.scale(turnScale, turnScale);
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'rgba(255, 255, 255, 0.65)';
+        ctx.shadowBlur = 5 + beatLift * 8;
+        ctx.font = `800 18px ${IOS_FONT_STACK}`;
+        ctx.fillText(glyph, 0, 0);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = `rgba(255, 255, 255, ${(0.36 + beatLift * 0.12).toFixed(2)})`;
+        ctx.font = `700 17px ${IOS_FONT_STACK}`;
+        ctx.fillText(glyph, ax, laneCy);
+      }
+    }
 
-    // Right route / BPM badge inside top lane strip
-    const exitNumber = 41 + Math.max(0, clampedIdx) * 2;
-    const badgeLabel = `EXIT ${exitNumber} · ${bpmVal} BPM`;
+    // Compact dark pill badge on right (e.g. Verse / Chorus / Exit)
+    const sectionNum = Math.max(1, Math.floor(Math.max(0, clampedIdx) / 4) + 1);
+    const exitNumber = 11 + Math.max(0, clampedIdx) * 3;
+    const badgeLabel =
+      clampedIdx >= 0 && clampedIdx % 4 === 2
+        ? `Chorus`
+        : clampedIdx >= 0 && clampedIdx % 3 === 1
+        ? `Verse ${sectionNum}`
+        : `Exit ${exitNumber}`;
     ctx.font = `700 11px ${IOS_FONT_STACK}`;
-    const badgeW = Math.min(168, Math.max(114, ctx.measureText(badgeLabel).width + 20));
-    const badgeX = cardX + cardW - badgeW - 12;
-    const badgeY = cardY + 6;
-    drawRoundedRectPath(ctx, badgeX, badgeY, badgeW, stripH - 12, 11);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.28)';
+    const badgeW = Math.min(112, Math.max(66, ctx.measureText(badgeLabel).width + 20));
+    const badgeX = cardX + cardW - badgeW - 14;
+    const badgeY = cardY + 9;
+    drawRoundedRectPath(ctx, badgeX, badgeY, badgeW, 22, 8);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.36)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
     ctx.lineWidth = 1;
     ctx.stroke();
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#ecfdf5';
-    ctx.fillText(badgeLabel, badgeX + badgeW * 0.5, laneCy + 0.5, badgeW - 10);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillText(badgeLabel, badgeX + badgeW * 0.5, badgeY + 11.5, badgeW - 10);
 
-    // 2b. Hero Body: Word-by-word bold SF Pro Display active lyric reveal (+ optional wordIconDictionary pop)
+    // 2b. Hero Body: Bold SF Pro Display active lyric line revealing word-by-word
     const bodyTopY = cardY + stripH;
     const unsynced = isUnsyncedLyrics(frame) || frame.activeWordIndex < 0;
     const inGap =
@@ -1633,15 +1637,21 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     if (inGap || wordCount === 0) {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.font = `700 19px ${IOS_FONT_STACK}`;
-      ctx.fillStyle = 'rgba(241, 245, 249, 0.85)';
-      const cruiseTitle = frame.trackMetadata?.title
+      ctx.font = `700 20px ${IOS_FONT_STACK}`;
+      ctx.fillStyle = '#f8fafc';
+      const cruiseTitle = env.upcomingStreetName
+        ? `Following ${env.upcomingStreetName}`
+        : frame.trackMetadata?.title
         ? `Cruising · ${frame.trackMetadata.title}`
-        : 'Cruising · Following Route';
+        : env.biome === 'highway'
+        ? 'Following Highway Route'
+        : env.biome === 'countryside'
+        ? 'Following Scenic Route'
+        : 'Following City Route';
       ctx.fillText(cruiseTitle, cardX + bodyPadX, bodyTopY + bodyH * 0.5, bodyInnerW);
     } else if (activeBubble && activeMeasured) {
       const textStartX = cardX + bodyPadX;
-      const textStartY = bodyTopY + bodyPadY;
+      const textStartY = bodyTopY + bodyPadY - 2;
       ctx.font = `700 ${heroFontPx}px ${IOS_FONT_STACK}`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -1655,7 +1665,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
 
         if (isCurrent) {
           const p = clamp01(frame.wordProgress);
-          const liftY = motionScale > 0 ? -2.4 * Math.sin(p * Math.PI) * Math.min(1.2, motionScale) : 0;
+          const liftY = motionScale > 0 ? -2.2 * Math.sin(p * Math.PI) * Math.min(1.2, motionScale) : 0;
           ctx.fillStyle = '#ffffff';
           ctx.shadowColor = 'rgba(56, 189, 248, 0.68)';
           ctx.shadowBlur = 10;
@@ -1665,11 +1675,10 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
           ctx.fillStyle = '#ffffff';
           ctx.fillText(wObj.text, wx, wy);
         } else {
-          ctx.fillStyle = 'rgba(226, 232, 240, 0.34)';
+          ctx.fillStyle = 'rgba(226, 232, 240, 0.38)';
           ctx.fillText(wObj.text, wx, wy);
         }
 
-        // Subtle wordIconDictionary icon pop beside semantic words when enabled
         if (this.heroWordHasIcon[w] === 1 && (isCurrent || isPassed)) {
           const iconId = activeBubble.wordIcons[w];
           if (iconId) {
@@ -1697,9 +1706,9 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
       }
     }
 
-    // 2c. Slim Bottom Sub-Bar (↳ Next: <upcoming line>)
+    // 2c. Integrated Bottom Divider Strip (↳ Next: <upcoming line>)
     const subY = bodyTopY + bodyH;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.30)';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.28)';
     ctx.fillRect(cardX, subY, cardW, subBarH);
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
     ctx.lineWidth = 1;
@@ -1708,73 +1717,128 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.lineTo(cardX + cardW, subY);
     ctx.stroke();
 
+    const turnGlyph = getTurnArrowGlyph(env.upcomingTurn);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.font = `600 12px ${IOS_FONT_STACK}`;
-    ctx.fillStyle = 'rgba(203, 213, 225, 0.84)';
+    ctx.font = `700 12.5px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = 'rgba(241, 245, 249, 0.88)';
     const nextLabel = nextLineText
-      ? `↳ Next: ${nextLineText}`
-      : '↳ Arriving at Destination';
+      ? `${turnGlyph} Next: ${nextLineText}`
+      : `${turnGlyph} ${env.upcomingStreetName ?? 'De Anza Blvd'}`;
     ctx.fillText(nextLabel, cardX + bodyPadX, subY + subBarH * 0.5 + 0.5, cardW - bodyPadX * 2);
 
     ctx.restore(); // end interior card clip
 
-    // Specular outer rim on CarPlay Hero Card
-    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 20);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
-    ctx.lineWidth = 1.2;
+    // Specular outer 1px rim on CarPlay Hero Card
+    drawRoundedRectPath(ctx, cardX, cardY, cardW, totalCardH, 18);
+    ctx.strokeStyle = isSunset ? 'rgba(253, 186, 116, 0.24)' : 'rgba(255, 255, 255, 0.16)';
+    ctx.lineWidth = 1;
     ctx.stroke();
     ctx.restore();
 
-    // 3. Bottom CarPlay ETA Telemetry Pill inside focal rect
+    // 3. Bottom-Left CarPlay 3-Column Telemetry Pill (Remaining Time | Tempo BPM | Track Length + circular badge)
     const lastLineEnd =
-      lyrics && lyrics.lines.length > 0 ? lyrics.lines[lyrics.lines.length - 1].endSeconds : 180;
-    const totalDurSec = Math.max(frame.timeSeconds, lastLineEnd, 45);
+      lyrics && lyrics.lines.length > 0 ? lyrics.lines[lyrics.lines.length - 1].endSeconds : 167;
+    const totalDurSec = Math.max(frame.timeSeconds, lastLineEnd, 42);
     const remainingSec = Math.max(0, totalDurSec - frame.timeSeconds);
     const routeProgress = clamp01(frame.timeSeconds / Math.max(1, totalDurSec));
 
-    const telemetryText = `${formatRemainingEta(remainingSec)} left · ${bpmVal} BPM · ${formatBiomeLabel(
-      env.biome
-    )} · ${formatTimeOfDayLabel(env.timeOfDay)}`;
+    const pillW = Math.min(336, Math.max(236, focalWidth - 48));
+    const pillH = 54;
+    const pillX = focalLeft + 24;
+    const pillY = height - 24 - pillH;
 
     ctx.save();
-    ctx.font = `600 13px ${IOS_FONT_STACK}`;
-    const textW = ctx.measureText(telemetryText).width;
-    const pillW = Math.min(focalWidth - 36, Math.max(250, Math.round(textW + 52)));
-    const pillH = 38;
-    const pillX = focalLeft + (focalWidth - pillW) * 0.5;
-    const pillY = height - 56;
-
-    drawRoundedRectPath(ctx, pillX, pillY, pillW, pillH, 19);
-    ctx.fillStyle = 'rgba(14, 19, 30, 0.88)';
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
-    ctx.shadowBlur = 16;
+    drawRoundedRectPath(ctx, pillX, pillY, pillW, pillH, 16);
+    ctx.fillStyle = isDay
+      ? 'rgba(255, 255, 255, 0.92)'
+      : isSunset
+      ? 'rgba(36, 28, 44, 0.89)'
+      : 'rgba(26, 30, 36, 0.88)';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.38)';
+    ctx.shadowBlur = 18;
     ctx.fill();
     ctx.shadowBlur = 0;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.strokeStyle = isDay
+      ? 'rgba(15, 23, 42, 0.12)'
+      : isSunset
+      ? 'rgba(253, 186, 116, 0.22)'
+      : 'rgba(255, 255, 255, 0.14)';
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // Live emerald GPS status dot
-    ctx.fillStyle = '#30D158';
+    const primaryText = isDay ? '#0f172a' : isSunset ? '#fffbeb' : '#f8fafc';
+    const subText = isDay
+      ? 'rgba(15, 23, 42, 0.58)'
+      : isSunset
+      ? 'rgba(254, 243, 199, 0.66)'
+      : 'rgba(226, 232, 240, 0.62)';
+    const colsAreaW = pillW - 56;
+    const colW = colsAreaW / 3;
+    const topValY = pillY + 18;
+    const subValY = pillY + 36;
+
+    const remLabel = formatRemainingEta(remainingSec);
+    const bpmStr = String(bpmVal);
+    const durLabel = formatDurationClock(totalDurSec);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Col 1: Remaining Time
+    const c1x = pillX + 12 + colW * 0.5;
+    ctx.font = `700 16px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = primaryText;
+    ctx.fillText(remLabel, c1x, topValY);
+    ctx.font = `500 11px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = subText;
+    ctx.fillText('left', c1x, subValY);
+
+    // Col 2: Tempo BPM
+    const c2x = pillX + 12 + colW * 1.5;
+    ctx.font = `700 16px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = primaryText;
+    ctx.fillText(bpmStr, c2x, topValY);
+    ctx.font = `500 11px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = subText;
+    ctx.fillText('BPM', c2x, subValY);
+
+    // Col 3: Track Length
+    const c3x = pillX + 12 + colW * 2.5;
+    ctx.font = `700 16px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = primaryText;
+    ctx.fillText(durLabel, c3x, topValY);
+    ctx.font = `500 11px ${IOS_FONT_STACK}`;
+    ctx.fillStyle = subText;
+    ctx.fillText('duration', c3x, subValY);
+
+    // Right circular status chevron badge matching CarPlay reference (^)
+    const badgeCx = pillX + pillW - 24;
+    const badgeCy = pillY + pillH * 0.5;
+    ctx.fillStyle = isDay ? 'rgba(15, 23, 42, 0.10)' : 'rgba(255, 255, 255, 0.12)';
     ctx.beginPath();
-    ctx.arc(pillX + 18, pillY + pillH * 0.5, 4.5 + beatLift * 1.1, 0, Math.PI * 2);
+    ctx.arc(badgeCx, badgeCy, 12 + beatLift * 1.2, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#f8fafc';
-    ctx.fillText(telemetryText, pillX + 30, pillY + pillH * 0.5 - 0.5, pillW - 44);
+    ctx.strokeStyle = isDay ? '#334155' : '#e2e8f0';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(badgeCx - 4.2, badgeCy + 2);
+    ctx.lineTo(badgeCx, badgeCy - 2.4);
+    ctx.lineTo(badgeCx + 4.2, badgeCy + 2);
+    ctx.stroke();
 
-    // Slim Apple-blue route progress hairline inside bottom of pill
-    const barW = pillW - 36;
-    const barX = pillX + 18;
+    // Slim Apple-blue route progress hairline inside bottom of telemetry card
+    const barW = pillW - 32;
+    const barX = pillX + 16;
     const barY = pillY + pillH - 5;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
-    drawRoundedRectPath(ctx, barX, barY, barW, 2.2, 1.1);
+    ctx.fillStyle = isDay ? 'rgba(15, 23, 42, 0.10)' : 'rgba(255, 255, 255, 0.10)';
+    drawRoundedRectPath(ctx, barX, barY, barW, 2, 1);
     ctx.fill();
     ctx.fillStyle = IMSG_BLUE;
-    drawRoundedRectPath(ctx, barX, barY, Math.max(4, barW * routeProgress), 2.2, 1.1);
+    drawRoundedRectPath(ctx, barX, barY, Math.max(4, barW * routeProgress), 2, 1);
     ctx.fill();
 
     ctx.restore();
@@ -2137,7 +2201,7 @@ export class IosTextingMotionStyle implements ILyricVisualStyle {
     ctx.save();
     if (topClipY > 0) {
       ctx.beginPath();
-      ctx.rect(0, topClipY, focalWidth, Math.max(1, height - topClipY));
+      ctx.rect(-focal.left, topClipY, width, Math.max(1, height - topClipY));
       ctx.clip();
     }
 

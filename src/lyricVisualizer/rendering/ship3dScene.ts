@@ -66,7 +66,7 @@ const SEM_LOVE = 1 << 8;
 const SEM_GLITCH = 1 << 9;
 
 // Module-level hint synchronized by StarfieldShip3DStyle before/during render
-let currentVariationIndex: 0 | 1 | 2 = 0;
+let currentVariationIndex: 0 | 1 | 2 | 3 = 0;
 let currentBackgroundOpacity = 0.95;
 let currentVignetteStrength = 0.55;
 let activeShip3DSceneRef: Ship3DScene | null = null;
@@ -86,6 +86,7 @@ export function setShip3DSceneHint(
 ): void {
   if (variationId === 'nebula-run') currentVariationIndex = 1;
   else if (variationId === 'retro-wireframe' || variationId === 'retro-vector-wireframe') currentVariationIndex = 2;
+  else if (variationId === 'vaporwave') currentVariationIndex = 3;
   else currentVariationIndex = 0;
 
   if (typeof backgroundOpacity === 'number' && Number.isFinite(backgroundOpacity)) {
@@ -580,6 +581,7 @@ function createInfiniteHorizonGridMaterial(): THREE.ShaderMaterial {
       uColorSecondary: { value: new THREE.Color(0x818cf8) },
       uScrollZ: { value: 0.0 },
       uOpacity: { value: 0.42 },
+      uDualTone: { value: 0.0 },
     },
     vertexShader: `
       varying vec3 vWorldPos;
@@ -594,28 +596,196 @@ function createInfiniteHorizonGridMaterial(): THREE.ShaderMaterial {
       uniform vec3 uColorSecondary;
       uniform float uScrollZ;
       uniform float uOpacity;
+      uniform float uDualTone;
       varying vec3 vWorldPos;
 
-      float gridLine(vec2 coord, float widthScale) {
+      vec2 gridAxes(vec2 coord, float widthScale) {
         vec2 deriv = fwidth(coord);
         vec2 grid = abs(fract(coord - 0.5) - 0.5) / max(deriv * widthScale, vec2(0.0001));
-        float line = min(grid.x, grid.y);
-        return 1.0 - min(line, 1.0);
+        return vec2(1.0 - min(grid.x, 1.0), 1.0 - min(grid.y, 1.0));
       }
 
       void main() {
         vec2 uv = vec2(vWorldPos.x * 0.42, (vWorldPos.z + uScrollZ) * 0.42);
-        float minor = gridLine(uv * 2.0, 1.15) * 0.38;
-        float major = gridLine(uv * 0.5, 1.45);
+        vec2 minorAxes = gridAxes(uv * 2.0, 1.15) * 0.42;
+        vec2 majorAxes = gridAxes(uv * 0.5, 1.50);
+        float lineX = max(minorAxes.x, majorAxes.x);
+        float lineZ = max(minorAxes.y, majorAxes.y);
+        float lineMask = max(lineX, lineZ);
         float dist = length(vWorldPos.xz - vec2(0.0, 4.0));
-        float fogFade = exp(-dist * 0.036);
+        float fogFade = exp(-dist * 0.032);
         float edgeFade = smoothstep(78.0, 18.0, abs(vWorldPos.x)) * smoothstep(-95.0, -14.0, vWorldPos.z);
-        float intensity = max(minor, major) * fogFade * edgeFade * uOpacity;
-        vec3 col = mix(uColorPrimary, uColorSecondary, clamp(dist * 0.018, 0.0, 1.0));
+        float intensity = lineMask * fogFade * edgeFade * uOpacity;
+        vec3 depthCol = mix(uColorPrimary, uColorSecondary, clamp(dist * 0.018, 0.0, 1.0));
+        // In Vaporwave (uDualTone > 0.5), longitudinal perspective rails glow electric cyan
+        // while cross-horizon ribs glow hot magenta for unmistakable Outrun depth.
+        float cyanBias = clamp(lineX * 0.85 - lineZ * 0.45 + 0.15, 0.0, 1.0);
+        vec3 dualCol = mix(uColorPrimary, uColorSecondary, cyanBias);
+        vec3 col = mix(depthCol, dualCol, uDualTone);
         gl_FragColor = vec4(col * intensity, clamp(intensity, 0.0, 1.0));
       }
     `,
   });
+}
+
+function createVaporwaveSkyMaterial(): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    transparent: false,
+    depthWrite: false,
+    depthTest: false,
+    uniforms: {
+      uBass: { value: 0.0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        // Fullscreen clip-space backdrop quad: covers 100% of viewport at any aspect ratio,
+        // FOV warp surge, camera shake, or Split-View setViewOffset without edge gaps.
+        gl_Position = vec4(position.xy * 2.0, 0.9999, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uBass;
+      varying vec2 vUv;
+      void main() {
+        vec3 topCol = vec3(0.027, 0.008, 0.078);   // #070214
+        vec3 midCol = vec3(0.106, 0.024, 0.200);   // #1b0633
+        vec3 horCol = vec3(0.227, 0.051, 0.278);   // #3a0d47
+        vec3 floorCol = vec3(0.071, 0.016, 0.141); // #120424
+        float h = clamp(vUv.y, 0.0, 1.0);
+        vec3 col;
+        if (h >= 0.42) {
+          float skyT = (h - 0.42) / 0.58;
+          col = skyT > 0.45
+            ? mix(midCol, topCol, smoothstep(0.45, 0.98, skyT))
+            : mix(horCol, midCol, smoothstep(0.0, 0.45, skyT));
+        } else {
+          col = mix(floorCol, horCol, smoothstep(0.0, 0.42, h));
+        }
+        float horBand = exp(-abs(h - 0.42) * 11.0);
+        col += vec3(0.12, 0.018, 0.14) * horBand * (0.55 + uBass * 0.45);
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  });
+}
+
+function createVaporwaveSunMaterial(): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    uniforms: {
+      uTime: { value: 0.0 },
+      uBass: { value: 0.0 },
+      uOpacity: { value: 0.74 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uBass;
+      uniform float uOpacity;
+      varying vec2 vUv;
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        if (r > 1.0) discard;
+
+        const float discR = 0.74;
+        float discAlpha = smoothstep(discR + 0.025, discR - 0.025, r);
+        float yNorm = clamp((p.y + discR) / (2.0 * discR), 0.0, 1.0);
+
+        // Classic Outrun horizontal sun slats slicing the lower hemisphere
+        float sliceMask = 1.0;
+        if (yNorm < 0.54) {
+          float bands = fract(yNorm * 12.0 - uTime * 0.24);
+          float gap = mix(0.48, 0.12, smoothstep(0.06, 0.54, yNorm));
+          sliceMask = smoothstep(gap - 0.04, gap + 0.04, bands);
+        }
+
+        // Gradient from hot magenta bottom -> neon violet -> warm gold-cyan crest
+        vec3 cBot = vec3(1.00, 0.16, 0.55);   // #ff2a8d
+        vec3 cMid = vec3(0.76, 0.18, 0.98);   // #c22efa
+        vec3 cTop = vec3(1.00, 0.82, 0.42);   // #ffd16b
+        vec3 cCrest = vec3(0.18, 0.92, 1.00); // cyan rim highlight
+        vec3 discCol = mix(cBot, cMid, smoothstep(0.10, 0.54, yNorm));
+        discCol = mix(discCol, cTop, smoothstep(0.54, 0.88, yNorm));
+        discCol = mix(discCol, cCrest, smoothstep(0.88, 1.0, yNorm) * 0.35);
+        discCol *= 0.84 + uBass * 0.16;
+
+        // Soft outer atmospheric Outrun corona halo (subtle so 2D lyrics stay razor-sharp)
+        float halo = exp(-max(0.0, r - discR * 0.88) * 5.8) * smoothstep(1.0, discR * 0.92, r);
+        vec3 haloCol = mix(vec3(0.95, 0.16, 0.62), vec3(0.48, 0.14, 0.92), clamp(vUv.y, 0.0, 1.0));
+        float haloAlpha = halo * (0.28 + uBass * 0.10);
+
+        float bodyAlpha = discAlpha * sliceMask * uOpacity;
+        float outAlpha = clamp(max(bodyAlpha, haloAlpha), 0.0, 1.0);
+        if (outAlpha < 0.004) discard;
+        vec3 outCol = mix(haloCol, discCol, clamp(bodyAlpha / max(outAlpha, 0.001), 0.0, 1.0));
+        gl_FragColor = vec4(outCol, outAlpha);
+      }
+    `,
+  });
+}
+
+function createVaporwaveMountainGeometry(sideSign: -1 | 1): THREE.BufferGeometry {
+  const segZ = 18;
+  const cols = 4; // inner ridge base -> mid crest -> outer peak -> far skirt
+  const stripLen = 72;
+  const positions = new Float32Array((segZ + 1) * cols * 3);
+  const indices: number[] = [];
+
+  for (let iz = 0; iz <= segZ; iz++) {
+    const z = -stripLen * 0.5 + (iz / segZ) * stripLen;
+    // Periodic in iz % segZ so consecutive strips tile seamlessly
+    const izWrap = iz % segZ;
+    for (let ix = 0; ix < cols; ix++) {
+      const hSeed = Math.sin(izWrap * 1.047 + ix * 2.1 + sideSign * 0.7) * 0.5 + 0.5;
+      const hSeed2 = Math.cos(izWrap * 2.094 + ix * 1.4 - sideSign * 1.1) * 0.5 + 0.5;
+      const xDist = 9.4 + ix * 5.8 + (ix === 1 || ix === 2 ? (hSeed - 0.5) * 1.8 : 0);
+      const x = sideSign * xDist;
+      const yBase = -2.35;
+      const peakH =
+        ix === 0
+          ? 0.0
+          : ix === 1
+          ? 2.2 + hSeed * 3.8
+          : ix === 2
+          ? 4.4 + hSeed2 * 5.2
+          : 0.4 + hSeed * 1.4;
+      const o = (iz * cols + ix) * 3;
+      positions[o] = x;
+      positions[o + 1] = yBase + peakH;
+      positions[o + 2] = z;
+    }
+  }
+
+  for (let iz = 0; iz < segZ; iz++) {
+    for (let ix = 0; ix < cols - 1; ix++) {
+      const a = iz * cols + ix;
+      const b = a + 1;
+      const c = (iz + 1) * cols + ix;
+      const d = c + 1;
+      if (sideSign > 0) {
+        indices.push(a, c, b, b, c, d);
+      } else {
+        indices.push(a, b, c, b, d, c);
+      }
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
 }
 
 function createNebulaCloudTexture(): THREE.CanvasTexture | null {
@@ -764,6 +934,7 @@ interface ThreeSceneState {
   portBeaconMat: THREE.MeshBasicMaterial;
   stbdBeaconMat: THREE.MeshBasicMaterial;
   shipWireMat: THREE.LineBasicMaterial;
+  shipWireAccentMat: THREE.LineBasicMaterial;
   innerPlumeL: THREE.Mesh;
   innerPlumeR: THREE.Mesh;
   outerPlumeL: THREE.Mesh;
@@ -826,6 +997,16 @@ interface ThreeSceneState {
   nebulaTex: THREE.CanvasTexture | null;
   retroGridMesh: THREE.Mesh;
   retroGridMat: THREE.ShaderMaterial;
+  vaporHiddenMat: THREE.MeshBasicMaterial;
+  vaporAsteroidFillMat: THREE.MeshBasicMaterial;
+  vaporSkyMesh: THREE.Mesh;
+  vaporSkyMat: THREE.ShaderMaterial;
+  vaporSunMesh: THREE.Mesh;
+  vaporSunMat: THREE.ShaderMaterial;
+  vaporMtnMeshes: THREE.Mesh[];
+  vaporMtnWireMeshes: THREE.LineSegments[];
+  vaporMtnFillMat: THREE.MeshBasicMaterial;
+  vaporMtnWireMat: THREE.LineBasicMaterial;
   disposables: Array<{ dispose: () => void }>;
 }
 
@@ -1063,7 +1244,7 @@ export class Ship3DScene {
   private frameCx = 400;
   private frameCy = 348;
   private frameFocal = 390;
-  private frameVarIdx: 0 | 1 | 2 = 0;
+  private frameVarIdx: 0 | 1 | 2 | 3 = 0;
   private frameIsOverlay = false;
   private shipCenterX = 400;
   private shipCenterY = 444;
@@ -1085,6 +1266,7 @@ export class Ship3DScene {
   private dpr = 1;
   private shockwaveCursor = 0;
   private readonly boundContextLost: (e: Event) => void;
+  private readonly boundContextRestored: () => void;
 
   constructor(shipCanvas?: HTMLCanvasElement | null) {
     this.boundContextLost = (e: Event) => {
@@ -1092,6 +1274,12 @@ export class Ship3DScene {
         e.preventDefault();
       }
       this.threeActive = false;
+    };
+    this.boundContextRestored = () => {
+      if (!this.targetCanvas) return;
+      this.disposeThree();
+      this.threeInitAttempted = false;
+      this.tryInitThree();
     };
     this.initScene();
     if (shipCanvas) {
@@ -1442,6 +1630,9 @@ export class Ship3DScene {
       this.revealBlastedKeys.fill(-1);
       this.revealFiredKeys.fill(-1);
       this.arcaneEventCount = 0;
+      if (this.threeState) {
+        this.threeState.trailInitialized = false;
+      }
     }
   }
 
@@ -1848,6 +2039,18 @@ export class Ship3DScene {
       return;
     }
 
+    // Reset pixel-store unpack state on reused WebGL2 canvases (e.g. React StrictMode remounts)
+    // so Three.js WebGLRenderer's internal 3D dummy texture upload never triggers INVALID_OPERATION.
+    try {
+      const existingGl = canvas.getContext('webgl2') as WebGL2RenderingContext | null;
+      if (existingGl && (!existingGl.isContextLost || !existingGl.isContextLost())) {
+        existingGl.pixelStorei(existingGl.UNPACK_FLIP_Y_WEBGL, 0);
+        existingGl.pixelStorei(existingGl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+      }
+    } catch {
+      // Ignore if context cannot be pre-inspected
+    }
+
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
@@ -1862,12 +2065,24 @@ export class Ship3DScene {
       return;
     }
 
+    const glCtx = renderer.getContext();
+    if (glCtx && typeof glCtx.isContextLost === 'function' && glCtx.isContextLost()) {
+      try {
+        renderer.dispose();
+      } catch {
+        // Ignore
+      }
+      this.threeActive = false;
+      return;
+    }
+
     renderer.setClearColor(0x000000, 0);
     renderer.setPixelRatio(this.dpr);
     renderer.setSize(this.width, this.height, false);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.18;
     canvas.addEventListener('webglcontextlost', this.boundContextLost);
+    canvas.addEventListener('webglcontextrestored', this.boundContextRestored);
 
     const disposables: Array<{ dispose: () => void }> = [];
     const scene = new THREE.Scene();
@@ -1946,6 +2161,11 @@ export class Ship3DScene {
       transparent: true,
       opacity: 0.28,
     });
+    const shipWireAccentMat = new THREE.LineBasicMaterial({
+      color: 0x5eead4,
+      transparent: true,
+      opacity: 0.28,
+    });
     disposables.push(
       hiddenLineFillMat,
       hiddenLineCanopyMat,
@@ -1957,18 +2177,20 @@ export class Ship3DScene {
       trimEmissiveMat,
       portBeaconMat,
       stbdBeaconMat,
-      shipWireMat
+      shipWireMat,
+      shipWireAccentMat
     );
 
     const bindShipMesh = (
       mesh: THREE.Mesh,
       normalMat: THREE.Material,
       wireMat: THREE.Material = hiddenLineFillMat,
-      edgeGeom?: THREE.EdgesGeometry
+      edgeGeom?: THREE.EdgesGeometry,
+      useAccentWire = false
     ) => {
       shipMeshBindings.push({ mesh, normalMat, wireMat });
       if (edgeGeom) {
-        const wire = new THREE.LineSegments(edgeGeom, shipWireMat);
+        const wire = new THREE.LineSegments(edgeGeom, useAccentWire ? shipWireAccentMat : shipWireMat);
         wire.position.copy(mesh.position);
         wire.rotation.copy(mesh.rotation);
         wire.scale.copy(mesh.scale);
@@ -2098,7 +2320,7 @@ export class Ship3DScene {
       wingPivot.add(wing);
       shipMeshBindings.push({ mesh: wing, normalMat: titaniumMat, wireMat: hiddenLineFillMat });
 
-      const wingWire = new THREE.LineSegments(wingEdgeGeom, shipWireMat);
+      const wingWire = new THREE.LineSegments(wingEdgeGeom, shipWireAccentMat);
       if (side < 0) wingWire.scale.x = -1;
       wingPivot.add(wingWire);
       shipWireOverlays.push(wingWire);
@@ -2114,7 +2336,7 @@ export class Ship3DScene {
       wingPivot.add(pod);
       shipMeshBindings.push({ mesh: pod, normalMat: darkGunmetalMat, wireMat: hiddenLineFillMat });
 
-      const podWire = new THREE.LineSegments(podEdgeGeom, shipWireMat);
+      const podWire = new THREE.LineSegments(podEdgeGeom, shipWireAccentMat);
       podWire.position.copy(pod.position);
       wingPivot.add(podWire);
       shipWireOverlays.push(podWire);
@@ -2149,7 +2371,7 @@ export class Ship3DScene {
       fin.position.set(side * 0.44, 0.14, 0.54);
       fin.rotation.z = -side * 0.36;
       shipGroup.add(fin);
-      bindShipMesh(fin, panelAccentMat, hiddenLineFillMat, finEdgeGeom);
+      bindShipMesh(fin, panelAccentMat, hiddenLineFillMat, finEdgeGeom, true);
     }
     disposables.push(finGeom, finEdgeGeom);
 
@@ -2575,6 +2797,85 @@ export class Ship3DScene {
     scene.add(retroGridMesh);
     disposables.push(retroGridGeom, retroGridMat);
 
+    // Vaporwave Outrun Environment (Sky Dome Plane, Sliced Neon Sun, Wireframe Mountains & Crystal Materials)
+    const vaporHiddenMat = new THREE.MeshBasicMaterial({
+      color: 0x0c061c,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    const vaporAsteroidFillMat = new THREE.MeshBasicMaterial({
+      color: 0x1a0936,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+
+    const vaporSkyGeom = new THREE.PlaneGeometry(1, 1);
+    const vaporSkyMat = createVaporwaveSkyMaterial();
+    const vaporSkyMesh = new THREE.Mesh(vaporSkyGeom, vaporSkyMat);
+    vaporSkyMesh.position.set(0, 0, 0);
+    vaporSkyMesh.visible = false;
+    vaporSkyMesh.frustumCulled = false;
+    vaporSkyMesh.renderOrder = -1000;
+    scene.add(vaporSkyMesh);
+
+    const vaporSunGeom = new THREE.PlaneGeometry(30, 30);
+    const vaporSunMat = createVaporwaveSunMaterial();
+    const vaporSunMesh = new THREE.Mesh(vaporSunGeom, vaporSunMat);
+    vaporSunMesh.position.set(0, 1.6, -56);
+    vaporSunMesh.visible = false;
+    vaporSunMesh.frustumCulled = false;
+    vaporSunMesh.renderOrder = -15;
+    scene.add(vaporSunMesh);
+
+    const vaporMtnFillMat = new THREE.MeshBasicMaterial({
+      color: 0x120426,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    const vaporMtnWireMat = new THREE.LineBasicMaterial({
+      color: 0xff2a9d,
+      transparent: true,
+      opacity: 0.78,
+    });
+    const vaporMtnGeomL = createVaporwaveMountainGeometry(-1);
+    const vaporMtnGeomR = createVaporwaveMountainGeometry(1);
+    const vaporMtnWireGeomL = new THREE.WireframeGeometry(vaporMtnGeomL);
+    const vaporMtnWireGeomR = new THREE.WireframeGeometry(vaporMtnGeomR);
+    const vaporMtnMeshes: THREE.Mesh[] = [];
+    const vaporMtnWireMeshes: THREE.LineSegments[] = [];
+    for (let copy = 0; copy < 2; copy++) {
+      for (const side of [0, 1] as const) {
+        const fillG = side === 0 ? vaporMtnGeomL : vaporMtnGeomR;
+        const wireG = side === 0 ? vaporMtnWireGeomL : vaporMtnWireGeomR;
+        const mMesh = new THREE.Mesh(fillG, vaporMtnFillMat);
+        const wMesh = new THREE.LineSegments(wireG, vaporMtnWireMat);
+        mMesh.add(wMesh);
+        mMesh.position.set(0, 0, -24 - copy * 72);
+        mMesh.visible = false;
+        mMesh.frustumCulled = false;
+        scene.add(mMesh);
+        vaporMtnMeshes.push(mMesh);
+        vaporMtnWireMeshes.push(wMesh);
+      }
+    }
+    disposables.push(
+      vaporHiddenMat,
+      vaporAsteroidFillMat,
+      vaporSkyGeom,
+      vaporSkyMat,
+      vaporSunGeom,
+      vaporSunMat,
+      vaporMtnFillMat,
+      vaporMtnWireMat,
+      vaporMtnGeomL,
+      vaporMtnGeomR,
+      vaporMtnWireGeomL,
+      vaporMtnWireGeomR
+    );
+
     this.threeState = {
       renderer,
       canvas,
@@ -2601,6 +2902,7 @@ export class Ship3DScene {
       portBeaconMat,
       stbdBeaconMat,
       shipWireMat,
+      shipWireAccentMat,
       innerPlumeL: leftThruster.inner,
       innerPlumeR: rightThruster.inner,
       outerPlumeL: leftThruster.outer,
@@ -2663,14 +2965,24 @@ export class Ship3DScene {
       nebulaTex,
       retroGridMesh,
       retroGridMat,
+      vaporHiddenMat,
+      vaporAsteroidFillMat,
+      vaporSkyMesh,
+      vaporSkyMat,
+      vaporSunMesh,
+      vaporSunMat,
+      vaporMtnMeshes,
+      vaporMtnWireMeshes,
+      vaporMtnFillMat,
+      vaporMtnWireMat,
       disposables,
     };
     this.threeActive = true;
   }
 
   resize(width: number, height: number, dpr = 1): void {
-    const safeW = Math.max(1, Math.floor(width));
-    const safeH = Math.max(1, Math.floor(height));
+    const safeW = Math.max(1, Math.floor(Number.isFinite(width) ? width : this.width));
+    const safeH = Math.max(1, Math.floor(Number.isFinite(height) ? height : this.height));
     const safeDpr = Math.max(1, Math.min(2, Number.isFinite(dpr) ? dpr : 1));
     this.width = safeW;
     this.height = safeH;
@@ -2680,6 +2992,7 @@ export class Ship3DScene {
       this.threeState.renderer.setPixelRatio(safeDpr);
       this.threeState.renderer.setSize(safeW, safeH, false);
       this.threeState.camera.aspect = safeW / safeH;
+      this.threeState.camera.clearViewOffset();
       this.threeState.camera.updateProjectionMatrix();
     }
   }
@@ -3273,23 +3586,38 @@ export class Ship3DScene {
     palette: LyricPalette,
     reduceMotion: boolean,
     isOverlayMode: boolean,
-    varIdx: 0 | 1 | 2,
+    varIdx: 0 | 1 | 2 | 3,
     warpSpeed: number,
     cx: number
   ): void {
     const st = this.threeState;
     if (!st) return;
 
-    if (width !== this.width || height !== this.height) {
-      this.resize(width, height, this.dpr);
+    const glCtx = st.renderer.getContext();
+    if (glCtx && typeof glCtx.isContextLost === 'function' && glCtx.isContextLost()) {
+      this.threeActive = false;
+      return;
     }
 
+    const safeW = Math.max(1, Math.floor(Number.isFinite(width) ? width : this.width));
+    const safeH = Math.max(1, Math.floor(Number.isFinite(height) ? height : this.height));
+    if (safeW !== this.width || safeH !== this.height) {
+      this.resize(safeW, safeH, this.dpr);
+    }
+
+    const isVapor = varIdx === 3;
     parseColorToRgbInto(palette.accentPrimary, this.tmpRgbA);
     parseColorToRgbInto(palette.accentSecondary, this.tmpRgbB);
     parseColorToRgbInto(palette.bgDeep, this.tmpRgbC);
     this.tmpColorA.setRGB(this.tmpRgbA[0], this.tmpRgbA[1], this.tmpRgbA[2]);
     this.tmpColorB.setRGB(this.tmpRgbB[0], this.tmpRgbB[1], this.tmpRgbB[2]);
     this.tmpColorC.setRGB(this.tmpRgbC[0], this.tmpRgbC[1], this.tmpRgbC[2]);
+
+    if (isVapor) {
+      this.tmpColorA.setHex(0x00f5ff); // Electric cyan
+      this.tmpColorB.setHex(0xff2a9d); // Hot magenta
+      this.tmpColorC.setHex(0x24083a); // Twilight violet fog
+    }
 
     // Rainbow or Cryo override color
     if (this.rainbowTimer > 0) {
@@ -3302,8 +3630,11 @@ export class Ship3DScene {
     }
 
     // Shift frustum optical axis smoothly to focalCenterX without clipping edge-to-edge stars
-    if (Math.abs(cx - width * 0.5) > 1.0) {
-      st.camera.setViewOffset(width, height, width * 0.5 - cx, 0, width, height);
+    const safeCx = Number.isFinite(cx) ? cx : safeW * 0.5;
+    const rawOffsetX = safeW * 0.5 - safeCx;
+    if (Math.abs(rawOffsetX) > 1.0) {
+      const clampedOffsetX = Math.max(-safeW * 0.45, Math.min(safeW * 0.45, rawOffsetX));
+      st.camera.setViewOffset(safeW, safeH, clampedOffsetX, 0, safeW, safeH);
     } else {
       st.camera.clearViewOffset();
     }
@@ -3340,30 +3671,48 @@ export class Ship3DScene {
       st.scene.fog = null;
     } else {
       st.scene.fog = st.fog;
-      st.fog.color.copy(this.tmpColorC).multiplyScalar(0.55);
-      st.fog.density = varIdx === 1 ? 0.015 : 0.018;
+      if (isVapor) {
+        st.fog.color.copy(this.tmpColorC);
+        st.fog.density = 0.0125;
+      } else {
+        st.fog.color.copy(this.tmpColorC).multiplyScalar(0.55);
+        st.fog.density = varIdx === 1 ? 0.015 : 0.018;
+      }
     }
 
-    // Unified Hidden-Line Vector Wireframe vs PBR Titanium across 100% of ship parts & asteroids
-    const isWire = varIdx === 2;
+    // Unified Hidden-Line Vector Wireframe / Vaporwave vs PBR Titanium across 100% of ship parts & asteroids
+    const isWire = varIdx === 2 || isVapor;
     for (let i = 0; i < st.shipMeshBindings.length; i++) {
       const b = st.shipMeshBindings[i];
-      b.mesh.material = isWire ? b.wireMat : b.normalMat;
+      b.mesh.material = isVapor && b.wireMat === st.hiddenLineFillMat
+        ? st.vaporHiddenMat
+        : isWire
+        ? b.wireMat
+        : b.normalMat;
     }
     st.asteroidBasaltMat.wireframe = false;
-    st.trimEmissiveMat.color.copy(this.tmpColorA);
+    st.trimEmissiveMat.color.copy(isVapor ? this.tmpColorB : this.tmpColorA);
     if (this.collectFlash > 0.05) {
       st.trimEmissiveMat.color.lerp(this.tmpColorC.setRGB(1, 1, 1), this.collectFlash * 0.65);
     }
     st.cockpitGlowMat.color.copy(this.tmpColorA);
     st.shipWireMat.color.copy(this.tmpColorA);
-    st.shipWireMat.opacity = isWire ? 0.92 : 0.22;
+    st.shipWireMat.opacity = isVapor ? 0.96 : isWire ? 0.92 : 0.22;
+    st.shipWireAccentMat.color.copy(isVapor ? this.tmpColorB : this.tmpColorA);
+    st.shipWireAccentMat.opacity = isVapor ? 0.94 : isWire ? 0.92 : 0.22;
     for (let i = 0; i < st.shipWireOverlays.length; i++) {
       st.shipWireOverlays[i].visible = true;
     }
-    st.asteroidWireMat.color.copy(this.tmpColorB);
+    st.asteroidWireMat.color.copy(isVapor ? this.tmpColorB : this.tmpColorB);
+    if (isVapor) {
+      st.asteroidWireMat.color.setHex(0xe879f9);
+    }
     for (let i = 0; i < ASTEROID_COUNT; i++) {
-      st.asteroidMeshes[i].material = isWire ? st.hiddenLineFillMat : st.asteroidBasaltMat;
+      st.asteroidMeshes[i].material = isVapor
+        ? st.vaporAsteroidFillMat
+        : isWire
+        ? st.hiddenLineFillMat
+        : st.asteroidBasaltMat;
       st.asteroidWireMeshes[i].visible = isWire;
     }
 
@@ -3428,21 +3777,31 @@ export class Ship3DScene {
     st.outerPlumeMat.uniforms.uIntensity.value = Math.min(1.3, 0.52 + this.thrustPulse * 0.42 + this.warpSurge * 0.42);
     st.outerPlumeMat.uniforms.uTime.value = timeSeconds;
 
-    // Wingtip Additive Ribbon Contrails
-    const trailAdvectZ = (reduceMotion ? 0.2 : warpSpeed * 6.8) * dt;
+    // Wingtip Additive Ribbon Contrails (bounded strictly ahead of camera near plane)
+    const maxTrailZ = st.camera.position.z - 1.15;
+    const trailAdvectZ = Math.min(0.11, (reduceMotion ? 0.03 : warpSpeed * 2.2) * dt);
     this.tmpVecA.set(-2.12, -0.02, 1.2).applyMatrix4(st.shipGroup.matrixWorld);
     this.tmpVecB.set(2.12, -0.02, 1.2).applyMatrix4(st.shipGroup.matrixWorld);
 
-    if (!st.trailInitialized) {
+    const trailJumpDist = st.trailInitialized
+      ? Math.hypot(
+          this.tmpVecA.x - st.portTrailHistory[0],
+          this.tmpVecA.y - st.portTrailHistory[1],
+          this.tmpVecA.z - st.portTrailHistory[2]
+        )
+      : 999;
+
+    if (!st.trailInitialized || trailJumpDist > 2.2) {
       st.trailInitialized = true;
       for (let s = 0; s < TRAIL_SEGMENTS; s++) {
         const o = s * 3;
+        const zOff = Math.min(maxTrailZ, this.tmpVecA.z + s * 0.075);
         st.portTrailHistory[o] = this.tmpVecA.x;
         st.portTrailHistory[o + 1] = this.tmpVecA.y;
-        st.portTrailHistory[o + 2] = this.tmpVecA.z + s * 0.08;
+        st.portTrailHistory[o + 2] = zOff;
         st.stbdTrailHistory[o] = this.tmpVecB.x;
         st.stbdTrailHistory[o + 1] = this.tmpVecB.y;
-        st.stbdTrailHistory[o + 2] = this.tmpVecB.z + s * 0.08;
+        st.stbdTrailHistory[o + 2] = Math.min(maxTrailZ, this.tmpVecB.z + s * 0.075);
       }
     } else {
       for (let s = TRAIL_SEGMENTS - 1; s > 0; s--) {
@@ -3450,11 +3809,11 @@ export class Ship3DScene {
         const src = (s - 1) * 3;
         st.portTrailHistory[dst] = st.portTrailHistory[src];
         st.portTrailHistory[dst + 1] = st.portTrailHistory[src + 1];
-        st.portTrailHistory[dst + 2] = st.portTrailHistory[src + 2] + trailAdvectZ;
+        st.portTrailHistory[dst + 2] = Math.min(maxTrailZ, st.portTrailHistory[src + 2] + trailAdvectZ);
 
         st.stbdTrailHistory[dst] = st.stbdTrailHistory[src];
         st.stbdTrailHistory[dst + 1] = st.stbdTrailHistory[src + 1];
-        st.stbdTrailHistory[dst + 2] = st.stbdTrailHistory[src + 2] + trailAdvectZ;
+        st.stbdTrailHistory[dst + 2] = Math.min(maxTrailZ, st.stbdTrailHistory[src + 2] + trailAdvectZ);
       }
       st.portTrailHistory[0] = this.tmpVecA.x;
       st.portTrailHistory[1] = this.tmpVecA.y;
@@ -3466,21 +3825,23 @@ export class Ship3DScene {
 
     const trailBright = isOverlayMode ? 0.55 : 0.88;
     const isRainbow = this.rainbowTimer > 0;
-    const hasSplitClip = this.contentInsetLeft > 2 && width > 1;
-    const splitFadeStart = this.contentInsetLeft + 10;
+    const hasSplitFade = this.contentInsetLeft > 2 && width > 1;
+    const splitFadeStart = Math.max(0, this.contentInsetLeft - 140);
+    const splitFadeSpan = Math.max(140, this.contentInsetLeft - splitFadeStart + 40);
     for (let s = 0; s < TRAIL_SEGMENTS; s++) {
       const tNorm = 1 - s / (TRAIL_SEGMENTS - 1);
       const halfW = (0.042 + Math.min(0.04, Math.abs(this.shipVx) * 0.03)) * tNorm * (1 + this.warpSurge * 0.45);
       const ho = s * 3;
       const vo = s * 6;
 
-      let portFade = tNorm * tNorm * trailBright;
-      if (hasSplitClip) {
+      const portNearFade = Math.max(0, Math.min(1, (maxTrailZ - st.portTrailHistory[ho + 2]) / 1.1));
+      let portFade = tNorm * tNorm * trailBright * portNearFade;
+      if (hasSplitFade) {
         this.tmpVecC
           .set(st.portTrailHistory[ho], st.portTrailHistory[ho + 1], st.portTrailHistory[ho + 2])
           .project(st.camera);
         const ptScreenX = (this.tmpVecC.x * 0.5 + 0.5) * width;
-        portFade *= Math.max(0, Math.min(1, (ptScreenX - splitFadeStart) / 36));
+        portFade *= Math.max(0, Math.min(1, (ptScreenX - splitFadeStart) / splitFadeSpan));
       }
 
       st.portTrailPositions[vo] = st.portTrailHistory[ho];
@@ -3490,9 +3851,15 @@ export class Ship3DScene {
       st.portTrailPositions[vo + 4] = st.portTrailHistory[ho + 1] - halfW;
       st.portTrailPositions[vo + 5] = st.portTrailHistory[ho + 2];
 
-      let pr = (0.95 * 0.55 + this.tmpColorA.r * 0.45) * portFade;
-      let pg = (0.24 * 0.55 + this.tmpColorA.g * 0.45) * portFade;
-      let pb = (0.38 * 0.55 + this.tmpColorA.b * 0.45) * portFade;
+      let pr = isVapor
+        ? 1.0 * portFade
+        : (0.95 * 0.55 + this.tmpColorA.r * 0.45) * portFade;
+      let pg = isVapor
+        ? 0.16 * portFade
+        : (0.24 * 0.55 + this.tmpColorA.g * 0.45) * portFade;
+      let pb = isVapor
+        ? 0.62 * portFade
+        : (0.38 * 0.55 + this.tmpColorA.b * 0.45) * portFade;
       if (isRainbow) {
         this.tmpColorC.setHSL((timeSeconds * 0.9 + s * 0.04) % 1, 0.95, 0.6);
         pr = this.tmpColorC.r * portFade;
@@ -3506,13 +3873,14 @@ export class Ship3DScene {
       st.portTrailColors[vo + 4] = pg;
       st.portTrailColors[vo + 5] = pb;
 
-      let stbdFade = tNorm * tNorm * trailBright;
-      if (hasSplitClip) {
+      const stbdNearFade = Math.max(0, Math.min(1, (maxTrailZ - st.stbdTrailHistory[ho + 2]) / 1.1));
+      let stbdFade = tNorm * tNorm * trailBright * stbdNearFade;
+      if (hasSplitFade) {
         this.tmpVecC
           .set(st.stbdTrailHistory[ho], st.stbdTrailHistory[ho + 1], st.stbdTrailHistory[ho + 2])
           .project(st.camera);
         const stScreenX = (this.tmpVecC.x * 0.5 + 0.5) * width;
-        stbdFade *= Math.max(0, Math.min(1, (stScreenX - splitFadeStart) / 36));
+        stbdFade *= Math.max(0, Math.min(1, (stScreenX - splitFadeStart) / splitFadeSpan));
       }
 
       st.stbdTrailPositions[vo] = st.stbdTrailHistory[ho];
@@ -3522,9 +3890,15 @@ export class Ship3DScene {
       st.stbdTrailPositions[vo + 4] = st.stbdTrailHistory[ho + 1] - halfW;
       st.stbdTrailPositions[vo + 5] = st.stbdTrailHistory[ho + 2];
 
-      let sr = (0.14 * 0.5 + this.tmpColorA.r * 0.5) * stbdFade;
-      let sg = (0.85 * 0.5 + this.tmpColorA.g * 0.5) * stbdFade;
-      let sb = (0.95 * 0.5 + this.tmpColorA.b * 0.5) * stbdFade;
+      let sr = isVapor
+        ? 0.0 * stbdFade
+        : (0.14 * 0.5 + this.tmpColorA.r * 0.5) * stbdFade;
+      let sg = isVapor
+        ? 0.96 * stbdFade
+        : (0.85 * 0.5 + this.tmpColorA.g * 0.5) * stbdFade;
+      let sb = isVapor
+        ? 1.0 * stbdFade
+        : (0.95 * 0.5 + this.tmpColorA.b * 0.5) * stbdFade;
       if (isRainbow) {
         this.tmpColorC.setHSL((timeSeconds * 0.9 + 0.5 + s * 0.04) % 1, 0.95, 0.6);
         sr = this.tmpColorC.r * stbdFade;
@@ -3659,11 +4033,19 @@ export class Ship3DScene {
         mesh.rotation.set(this.shardData[base + 8], this.shardData[base + 9], this.shardData[base + 10]);
         mesh.scale.setScalar(sz);
         st.shardMats[s].opacity = life * (isWire ? 0.45 : 0.85);
-        st.shardWireMats[s].color.setRGB(
-          Math.min(1, 0.92 + life * 0.08),
-          Math.min(1, 0.35 + life * 0.42),
-          Math.min(1, 0.08 + (1 - life) * 0.35)
-        );
+        if (isVapor) {
+          if (s % 2 === 0) {
+            st.shardWireMats[s].color.setRGB(1.0, 0.16, 0.62);
+          } else {
+            st.shardWireMats[s].color.setRGB(0.0, 0.96, 1.0);
+          }
+        } else {
+          st.shardWireMats[s].color.setRGB(
+            Math.min(1, 0.92 + life * 0.08),
+            Math.min(1, 0.35 + life * 0.42),
+            Math.min(1, 0.08 + (1 - life) * 0.35)
+          );
+        }
         st.shardWireMats[s].opacity = Math.min(1, life * 1.15);
       } else {
         mesh.visible = false;
@@ -3808,17 +4190,48 @@ export class Ship3DScene {
       }
     }
 
-    // Seamless Infinite Fog-Faded Horizon Grid
-    const showGrid = varIdx === 2 && !isOverlayMode;
+    // Seamless Infinite Fog-Faded Horizon Grid (Retro Wireframe + Vaporwave Outrun)
+    const showGrid = (varIdx === 2 || isVapor) && !isOverlayMode;
     st.retroGridMesh.visible = showGrid;
     if (showGrid) {
       if (!reduceMotion) {
         this.gridScrollZ += warpSpeed * 7.5 * dt;
       }
-      st.retroGridMat.uniforms.uColorPrimary.value.copy(this.tmpColorA);
-      st.retroGridMat.uniforms.uColorSecondary.value.copy(this.tmpColorB);
+      if (isVapor) {
+        st.retroGridMat.uniforms.uColorPrimary.value.setHex(0xff2a9d);
+        st.retroGridMat.uniforms.uColorSecondary.value.setHex(0x00f5ff);
+        st.retroGridMat.uniforms.uOpacity.value = 0.68 + audio.bassEnergy * 0.26;
+        st.retroGridMat.uniforms.uDualTone.value = 1.0;
+      } else {
+        st.retroGridMat.uniforms.uColorPrimary.value.copy(this.tmpColorA);
+        st.retroGridMat.uniforms.uColorSecondary.value.copy(this.tmpColorB);
+        st.retroGridMat.uniforms.uOpacity.value = 0.42 + audio.bassEnergy * 0.25;
+        st.retroGridMat.uniforms.uDualTone.value = 0.0;
+      }
       st.retroGridMat.uniforms.uScrollZ.value = this.gridScrollZ;
-      st.retroGridMat.uniforms.uOpacity.value = 0.42 + audio.bassEnergy * 0.25;
+    }
+
+    // Vaporwave Outrun Twilight Sky, Sliced Neon Sun & Scrolling Wireframe Mountains
+    const showVapor = isVapor && !isOverlayMode;
+    st.vaporSkyMesh.visible = showVapor;
+    st.vaporSunMesh.visible = showVapor;
+    if (showVapor) {
+      st.vaporSkyMat.uniforms.uBass.value = audio.bassEnergy;
+      st.vaporSunMat.uniforms.uTime.value = timeSeconds;
+      st.vaporSunMat.uniforms.uBass.value = audio.bassEnergy;
+      st.vaporSunMat.uniforms.uOpacity.value = 0.74;
+      const sunPulse = reduceMotion ? 1.0 : 1.0 + audio.bassEnergy * 0.06;
+      st.vaporSunMesh.scale.set(sunPulse, sunPulse, 1);
+      st.vaporMtnWireMat.color.setHex(0xff2a9d);
+    }
+    const mtnScroll = (((this.gridScrollZ * 0.65) % 72) + 72) % 72;
+    for (let m = 0; m < st.vaporMtnMeshes.length; m++) {
+      const mm = st.vaporMtnMeshes[m];
+      mm.visible = showVapor;
+      if (showVapor) {
+        const copyIdx = Math.floor(m / 2);
+        mm.position.z = -24 - copyIdx * 72 + mtnScroll;
+      }
     }
 
     st.renderer.setClearColor(0x000000, 0);
@@ -3914,7 +4327,14 @@ export class Ship3DScene {
         ctx.lineTo(this.astProjX[i2], this.astProjY[i2]);
         ctx.closePath();
 
-        if (varIdx === 2) {
+        if (varIdx === 3) {
+          ctx.fillStyle = 'rgba(26, 9, 54, 0.92)';
+          ctx.globalAlpha = distAlpha;
+          ctx.fill();
+          ctx.strokeStyle = f % 2 === 0 ? '#e879f9' : '#ff2a9d';
+          ctx.lineWidth = 1.25;
+          ctx.stroke();
+        } else if (varIdx === 2) {
           ctx.fillStyle = 'rgba(5, 5, 11, 0.92)';
           ctx.globalAlpha = distAlpha;
           ctx.fill();
@@ -4622,55 +5042,129 @@ export class Ship3DScene {
     if (!isOverlayMode && !hasWebGlBackdrop) {
       ctx.save();
       ctx.globalAlpha = bgAlpha;
-      const bg = ctx.createRadialGradient(cx, height * 0.36, 12, cx, cy, Math.max(width, height) * 0.86);
-      if (varIdx === 2) {
-        bg.addColorStop(0, '#090618');
-        bg.addColorStop(0.55, '#05030d');
-        bg.addColorStop(1, '#020206');
-      } else {
-        bg.addColorStop(0, palette.bgMid);
-        bg.addColorStop(0.55, palette.bgDeep);
-        bg.addColorStop(1, '#03050b');
-      }
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, width, height);
-
-      if (varIdx === 1) {
-        const driftX = reduceMotion ? 0 : Math.sin(timeSeconds * 0.25) * stageSpan * 0.08;
-        const neb1 = ctx.createRadialGradient(
-          cx - stageSpan * 0.15 + driftX,
-          height * 0.38,
-          16,
-          cx - stageSpan * 0.15 + driftX,
-          height * 0.38,
-          Math.max(width, height) * 0.52
-        );
-        neb1.addColorStop(0, palette.accentPrimary);
-        neb1.addColorStop(0.5, palette.accentSecondary);
-        neb1.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        ctx.globalAlpha = bgAlpha * (0.22 + audio.rmsLevel * 0.14);
-        ctx.fillStyle = neb1;
+      if (varIdx === 3) {
+        // Vaporwave Twilight Sky (#070214 -> #1b0633 -> #3a0d47)
+        const sky = ctx.createLinearGradient(0, 0, 0, height);
+        sky.addColorStop(0, '#070214');
+        sky.addColorStop(0.45, '#1b0633');
+        sky.addColorStop(0.64, '#3a0d47');
+        sky.addColorStop(1, '#120424');
+        ctx.fillStyle = sky;
         ctx.fillRect(0, 0, width, height);
-      } else if (varIdx === 2) {
-        const gridHorizonY = height * 0.62;
-        ctx.strokeStyle = palette.accentPrimary;
-        ctx.lineWidth = 1;
-        for (let r = -8; r <= 8; r++) {
-          ctx.globalAlpha = bgAlpha * 0.16;
+
+        const gridHorizonY = height * 0.6;
+        const sunR = Math.min(stageSpan, height) * (0.23 + audio.bassEnergy * 0.015);
+        const sunCy = gridHorizonY - sunR * 0.12;
+
+        // Subtle atmospheric Outrun Neon Sun centered in focal area
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, sunCy, sunR, 0, Math.PI * 2);
+        ctx.clip();
+        const sunGrad = ctx.createLinearGradient(cx, sunCy - sunR, cx, sunCy + sunR);
+        sunGrad.addColorStop(0, 'rgba(255, 209, 102, 0.78)');
+        sunGrad.addColorStop(0.45, 'rgba(184, 41, 255, 0.76)');
+        sunGrad.addColorStop(1, 'rgba(255, 42, 133, 0.78)');
+        ctx.fillStyle = sunGrad;
+        ctx.fillRect(cx - sunR, sunCy - sunR, sunR * 2, sunR * 2);
+
+        ctx.fillStyle = '#24083a';
+        for (let b = 0; b < 6; b++) {
+          const bandY = sunCy + sunR * (0.1 + b * 0.14);
+          const bandH = Math.max(2, sunR * (0.025 + b * 0.012));
+          ctx.fillRect(cx - sunR, bandY, sunR * 2, bandH);
+        }
+        ctx.restore();
+
+        // Low-poly neon-wireframe synthwave mountain silhouettes flanking left & right
+        ctx.fillStyle = 'rgba(18, 4, 38, 0.92)';
+        ctx.strokeStyle = '#ff2a9d';
+        ctx.lineWidth = 1.4;
+        for (const side of [-1, 1] as const) {
           ctx.beginPath();
-          ctx.moveTo(cx + r * stageSpan * 0.02, gridHorizonY);
-          ctx.lineTo(cx + r * stageSpan * 0.12, height);
+          ctx.moveTo(cx + side * sunR * 0.75, gridHorizonY);
+          ctx.lineTo(cx + side * stageSpan * 0.24, gridHorizonY - sunR * 0.42);
+          ctx.lineTo(cx + side * stageSpan * 0.36, gridHorizonY - sunR * 0.22);
+          ctx.lineTo(cx + side * stageSpan * 0.52, gridHorizonY - sunR * 0.62);
+          ctx.lineTo(side < 0 ? 0 : width, gridHorizonY - sunR * 0.3);
+          ctx.lineTo(side < 0 ? 0 : width, gridHorizonY);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        // Scrolling infinite hot-magenta & electric-cyan perspective grid floor
+        for (let r = -10; r <= 10; r++) {
+          ctx.strokeStyle = r % 2 === 0 ? '#ff2a9d' : '#00f5ff';
+          ctx.globalAlpha = bgAlpha * 0.32;
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          ctx.moveTo(cx + r * stageSpan * 0.026, gridHorizonY);
+          ctx.lineTo(cx + r * stageSpan * 0.14, height);
           ctx.stroke();
         }
         const phase = reduceMotion ? 0 : (timeSeconds * warpSpeed * 0.8) % 1;
-        for (let row = 0; row < 6; row++) {
-          const t = (row + phase) / 6;
+        for (let row = 0; row < 7; row++) {
+          const t = (row + phase) / 7;
           const gy = gridHorizonY + t * t * (height - gridHorizonY);
-          ctx.globalAlpha = bgAlpha * (0.06 + t * 0.2);
+          ctx.strokeStyle = row % 2 === 0 ? '#ff2a9d' : '#00f5ff';
+          ctx.globalAlpha = bgAlpha * (0.12 + t * 0.34);
           ctx.beginPath();
           ctx.moveTo(0, gy);
           ctx.lineTo(width, gy);
           ctx.stroke();
+        }
+      } else {
+        const bg = ctx.createRadialGradient(cx, height * 0.36, 12, cx, cy, Math.max(width, height) * 0.86);
+        if (varIdx === 2) {
+          bg.addColorStop(0, '#090618');
+          bg.addColorStop(0.55, '#05030d');
+          bg.addColorStop(1, '#020206');
+        } else {
+          bg.addColorStop(0, palette.bgMid);
+          bg.addColorStop(0.55, palette.bgDeep);
+          bg.addColorStop(1, '#03050b');
+        }
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, width, height);
+
+        if (varIdx === 1) {
+          const driftX = reduceMotion ? 0 : Math.sin(timeSeconds * 0.25) * stageSpan * 0.08;
+          const neb1 = ctx.createRadialGradient(
+            cx - stageSpan * 0.15 + driftX,
+            height * 0.38,
+            16,
+            cx - stageSpan * 0.15 + driftX,
+            height * 0.38,
+            Math.max(width, height) * 0.52
+          );
+          neb1.addColorStop(0, palette.accentPrimary);
+          neb1.addColorStop(0.5, palette.accentSecondary);
+          neb1.addColorStop(1, 'rgba(0, 0, 0, 0)');
+          ctx.globalAlpha = bgAlpha * (0.22 + audio.rmsLevel * 0.14);
+          ctx.fillStyle = neb1;
+          ctx.fillRect(0, 0, width, height);
+        } else if (varIdx === 2) {
+          const gridHorizonY = height * 0.62;
+          ctx.strokeStyle = palette.accentPrimary;
+          ctx.lineWidth = 1;
+          for (let r = -8; r <= 8; r++) {
+            ctx.globalAlpha = bgAlpha * 0.16;
+            ctx.beginPath();
+            ctx.moveTo(cx + r * stageSpan * 0.02, gridHorizonY);
+            ctx.lineTo(cx + r * stageSpan * 0.12, height);
+            ctx.stroke();
+          }
+          const phase = reduceMotion ? 0 : (timeSeconds * warpSpeed * 0.8) % 1;
+          for (let row = 0; row < 6; row++) {
+            const t = (row + phase) / 6;
+            const gy = gridHorizonY + t * t * (height - gridHorizonY);
+            ctx.globalAlpha = bgAlpha * (0.06 + t * 0.2);
+            ctx.beginPath();
+            ctx.moveTo(0, gy);
+            ctx.lineTo(width, gy);
+            ctx.stroke();
+          }
         }
       }
 
@@ -4857,10 +5351,17 @@ export class Ship3DScene {
       ctx.lineTo(this.shardProjX[2], this.shardProjY[2]);
       ctx.lineTo(this.shardProjX[3], this.shardProjY[3]);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(58, 28, 20, 0.85)';
+      ctx.fillStyle = varIdx === 3 ? 'rgba(26, 9, 54, 0.88)' : 'rgba(58, 28, 20, 0.85)';
       ctx.globalAlpha = life * (isOverlayMode ? 0.6 : 0.85);
       ctx.fill();
-      ctx.strokeStyle = life > 0.5 ? '#ff9d3b' : palette.accentPrimary;
+      ctx.strokeStyle =
+        varIdx === 3
+          ? s % 2 === 0
+            ? '#ff2a9d'
+            : '#00f5ff'
+          : life > 0.5
+          ? '#ff9d3b'
+          : palette.accentPrimary;
       ctx.lineWidth = Math.max(1.1, 2.2 * life);
       ctx.globalAlpha = Math.min(1, life * 1.1) * (isOverlayMode ? 0.72 : 0.96);
       ctx.stroke();
@@ -4957,7 +5458,15 @@ export class Ship3DScene {
       ctx.lineTo(this.projX[i2], this.projY[i2]);
       ctx.closePath();
 
-      if (varIdx === 2) {
+      if (varIdx === 3) {
+        ctx.fillStyle = partKind === 2 ? 'rgba(10, 26, 46, 0.94)' : 'rgba(12, 6, 28, 0.95)';
+        ctx.globalAlpha = isOverlayMode ? 0.86 : 0.97;
+        ctx.fill();
+        ctx.strokeStyle = partKind === 1 ? '#ff2a9d' : '#00f5ff';
+        ctx.globalAlpha = 0.94;
+        ctx.lineWidth = partKind === 2 ? 1.6 : 1.35;
+        ctx.stroke();
+      } else if (varIdx === 2) {
         ctx.fillStyle = partKind === 2 ? 'rgba(7, 18, 30, 0.92)' : 'rgba(4, 5, 11, 0.94)';
         ctx.globalAlpha = isOverlayMode ? 0.85 : 0.96;
         ctx.fill();
@@ -5007,11 +5516,17 @@ export class Ship3DScene {
     if (!st) return;
     if (typeof st.canvas.removeEventListener === 'function') {
       st.canvas.removeEventListener('webglcontextlost', this.boundContextLost);
+      st.canvas.removeEventListener('webglcontextrestored', this.boundContextRestored);
     }
     for (let i = 0; i < st.disposables.length; i++) {
       st.disposables[i].dispose();
     }
     try {
+      const gl = st.renderer.getContext();
+      if (gl && (!gl.isContextLost || !gl.isContextLost())) {
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+      }
       st.renderer.dispose();
     } catch {
       // Ignore WebGL disposal errors during shutdown

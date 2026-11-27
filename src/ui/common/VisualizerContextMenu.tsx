@@ -128,7 +128,7 @@ const MAP_SCENE_OPTIONS: readonly { id: MapScenePreference; label: string }[] = 
   { id: 'auto', label: 'Auto' },
   { id: 'cityscape', label: 'Cityscape' },
   { id: 'highway', label: 'Highway' },
-  { id: 'countryside', label: 'Country' },
+  { id: 'countryside', label: 'Countryside' },
 ];
 
 const MAP_TIME_OPTIONS: readonly { id: MapTimePreference; label: string }[] = [
@@ -680,8 +680,9 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                         <button
                           key={opt.id}
                           type="button"
+                          title={opt.label}
                           onClick={() => setMapScene(opt.id)}
-                          className={`py-1 px-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer truncate ${
+                          className={`py-1 px-0.5 rounded-md text-[9.5px] font-medium transition-colors cursor-pointer truncate ${
                             active
                               ? 'bg-white/25 text-white font-semibold'
                               : 'bg-white/5 hover:bg-white/15 text-white/70'

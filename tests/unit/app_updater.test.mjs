@@ -507,7 +507,7 @@ describe('One-Click In-App Updater & Persistent Cold-Boot Reminder', () => {
         currentVersion: '1.2.0',
         latestVersion: '1.3.0',
         releaseName: 'WaveForm 1.3.0',
-        releaseNotes: 'Liquid Glass updater + audio polish',
+        releaseNotes: '## WaveForm v1.3.0\n### Highlights\n- **Updater**: Verified `original-fs` staging\n- Polished Markdown notes',
         releaseUrl: 'https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.0',
         publishedAt: '2026-11-24T12:00:00Z',
         assetName: 'WaveForm-Setup-1.3.0.exe',
@@ -547,6 +547,12 @@ describe('One-Click In-App Updater & Persistent Cold-Boot Reminder', () => {
     assert.ok(openModalHtml.includes('One-Click Update Now'));
     assert.ok(openModalHtml.includes('Remind Me Next Launch'));
     assert.ok(openModalHtml.includes('View on GitHub'));
+    assert.ok(openModalHtml.includes('<strong'));
+    assert.ok(openModalHtml.includes('<code'));
+    assert.ok(openModalHtml.includes('<ul'));
+    assert.equal(openModalHtml.includes('## WaveForm'), false);
+    assert.equal(openModalHtml.includes('**Updater**'), false);
+    assert.equal(openModalHtml.includes('`original-fs`'), false);
 
     // Pill is hidden while modal is open
     const barWithOpenModal = renderToStaticMarkup(React.createElement(DesktopTitleBar));

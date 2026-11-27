@@ -20,6 +20,98 @@ function formatMegabytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const tokens: React.ReactNode[] = [];
+  const regex = /\*\*([^*]+)\*\*|`([^`]+)`/g;
+  let lastIndex = 0;
+  let key = 0;
+  for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
+    if (match.index > lastIndex) {
+      tokens.push(text.slice(lastIndex, match.index));
+    }
+    if (match[1] !== undefined) {
+      tokens.push(
+        <strong key={`b-${key++}`} className="font-semibold text-[var(--color-primary)]">
+          {match[1]}
+        </strong>
+      );
+    } else if (match[2] !== undefined) {
+      tokens.push(
+        <code
+          key={`c-${key++}`}
+          className="px-1.5 py-0.5 mx-0.5 rounded bg-white/10 font-mono text-[11px] text-[var(--color-primary)]"
+        >
+          {match[2]}
+        </code>
+      );
+    }
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    tokens.push(text.slice(lastIndex));
+  }
+  return tokens;
+}
+
+function renderReleaseNotes(markdown: string): React.ReactNode[] {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const nodes: React.ReactNode[] = [];
+  let listItems: React.ReactNode[] = [];
+  let blockKey = 0;
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    nodes.push(
+      <ul
+        key={`ul-${blockKey++}`}
+        className="list-disc pl-4 space-y-1 text-xs leading-relaxed text-[var(--color-primary)]/90"
+      >
+        {listItems}
+      </ul>
+    );
+    listItems = [];
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      flushList();
+      continue;
+    }
+    const headingMatch = /^(#{2,3})\s+(.+)$/.exec(trimmed);
+    if (headingMatch) {
+      flushList();
+      const level = headingMatch[1].length;
+      nodes.push(
+        <div
+          key={`h-${blockKey++}`}
+          className={
+            level === 2
+              ? 'text-xs font-bold text-[var(--color-primary)] pt-1.5 first:pt-0'
+              : 'text-[11px] font-semibold uppercase tracking-wide text-[var(--color-on-surface-variant)] pt-1.5 first:pt-0'
+          }
+        >
+          {renderInlineMarkdown(headingMatch[2])}
+        </div>
+      );
+      continue;
+    }
+    const bulletMatch = /^[-*]\s+(.+)$/.exec(trimmed);
+    if (bulletMatch) {
+      listItems.push(<li key={`li-${blockKey++}`}>{renderInlineMarkdown(bulletMatch[1])}</li>);
+      continue;
+    }
+    flushList();
+    nodes.push(
+      <p key={`p-${blockKey++}`} className="text-xs leading-relaxed text-[var(--color-primary)]/90 break-words">
+        {renderInlineMarkdown(trimmed)}
+      </p>
+    );
+  }
+  flushList();
+  return nodes;
+}
+
 export const UpdatePromptModal: React.FC = () => {
   const state = useUpdateStore((s) => s.state);
   const isModalOpen = useUpdateStore((s) => s.isModalOpen);
@@ -158,10 +250,12 @@ export const UpdatePromptModal: React.FC = () => {
               <span>{formatMegabytes(state.assetSize)}</span>
             ) : null}
           </div>
-          <p className="text-xs leading-relaxed text-[var(--color-primary)]/90 whitespace-pre-wrap break-words">
-            {state.releaseNotes?.trim() ||
-              'Includes performance improvements, audio engine refinements, and desktop stability updates.'}
-          </p>
+          <div className="space-y-1.5">
+            {renderReleaseNotes(
+              state.releaseNotes?.trim() ||
+                'Includes performance improvements, audio engine refinements, and desktop stability updates.'
+            )}
+          </div>
         </div>
 
         {/* Live Download Progress */}

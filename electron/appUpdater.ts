@@ -1,9 +1,30 @@
 import { createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+
+let cachedRawFs: typeof fs | null = null;
+
+export function getRawFs(): typeof fs {
+  if (cachedRawFs) return cachedRawFs;
+  if (process.versions?.electron) {
+    try {
+      const req = createRequire(import.meta.url);
+      const loaded = req('original-fs') as typeof fs | undefined;
+      if (loaded && typeof loaded.existsSync === 'function' && loaded.promises) {
+        cachedRawFs = loaded;
+        return cachedRawFs;
+      }
+    } catch {
+      // Fall back to node:fs outside Electron ASAR host
+    }
+  }
+  cachedRawFs = fs;
+  return cachedRawFs;
+}
 
 export const DEFAULT_GITHUB_REPO = 'Trapston3/waveform-desktop';
 export const DEFAULT_CHECK_TIMEOUT_MS = 8000;
@@ -120,6 +141,7 @@ export function readInstalledAppVersionInfo(
   installDir?: string,
   fallbackVersion = '0.0.0'
 ): InstalledAppVersionInfo {
+  const rawFs = getRawFs();
   const resolvedInstallDir = installDir || path.dirname(process.execPath);
   const candidates = [
     path.join(resolvedInstallDir, 'resources', 'app-version.json'),
@@ -127,8 +149,8 @@ export function readInstalledAppVersionInfo(
   ];
   for (const candidate of candidates) {
     try {
-      if (!fs.existsSync(candidate)) continue;
-      const parsed = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+      if (!rawFs.existsSync(candidate)) continue;
+      const parsed = JSON.parse(rawFs.readFileSync(candidate, 'utf-8'));
       const ver = typeof parsed?.version === 'string' ? parsed.version.trim().replace(/^[vV]/, '') : '';
       const electronVersion =
         typeof parsed?.electronVersion === 'string' && parsed.electronVersion.trim()
@@ -637,12 +659,19 @@ export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): s
 }
 
 export async function computeFileSha256(filePath: string): Promise<string> {
+  const rawFs = getRawFs();
   return new Promise((resolve, reject) => {
     const hash = createHash('sha256');
-    const stream = fs.createReadStream(filePath);
+    const stream = rawFs.createReadStream(filePath);
+    let digestHex: string | null = null;
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('error', reject);
-    stream.on('end', () => resolve(hash.digest('hex').toLowerCase()));
+    stream.on('end', () => {
+      digestHex = hash.digest('hex').toLowerCase();
+    });
+    stream.on('close', () => {
+      resolve(digestHex ?? hash.digest('hex').toLowerCase());
+    });
   });
 }
 
@@ -704,7 +733,7 @@ async function streamBodyToFile(
     });
   };
 
-  const writeStream = fs.createWriteStream(destPath);
+  const writeStream = getRawFs().createWriteStream(destPath);
   const writeChunk = (chunk: Uint8Array): Promise<void> =>
     new Promise((resolve, reject) => {
       const ok = writeStream.write(chunk, (err) => {
@@ -922,10 +951,11 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
           let changedCount: number | null = null;
           let removedCount: number | null = null;
 
+          const rawFs = getRawFs();
           const localManifestPath = path.join(installDir, 'resources', 'install-manifest.tsv');
-          if (!isPortable && patchAsset && manifestAsset && fs.existsSync(localManifestPath)) {
+          if (!isPortable && patchAsset && manifestAsset && rawFs.existsSync(localManifestPath)) {
             try {
-              const localText = fs.readFileSync(localManifestPath, 'utf-8');
+              const localText = rawFs.readFileSync(localManifestPath, 'utf-8');
               const localMeta = parseInstallManifestMeta(localText);
               const manResp = await fetchFn(manifestAsset.url, {
                 headers: {
@@ -1080,18 +1110,19 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
       });
     }
 
+    const rawFs = getRawFs();
     const safeAssetName = path.basename(state.assetName);
     const updateDir = path.join(tempDir, 'WaveForm-Update');
     const destPath = path.join(updateDir, safeAssetName);
 
     const cleanupDownloadedInstaller = async () => {
-      await fs.promises.rm(destPath, { force: true }).catch(() => {});
-      await fs.promises.rm(updateDir, { recursive: true, force: true }).catch(() => {});
+      await rawFs.promises.rm(destPath, { force: true }).catch(() => {});
+      await rawFs.promises.rm(updateDir, { recursive: true, force: true }).catch(() => {});
     };
 
     try {
-      await fs.promises.rm(updateDir, { recursive: true, force: true });
-      await fs.promises.mkdir(updateDir, { recursive: true });
+      await rawFs.promises.rm(updateDir, { recursive: true, force: true });
+      await rawFs.promises.mkdir(updateDir, { recursive: true });
 
       const totalKnown = state.assetSize ?? 0;
       emitState({
@@ -1192,14 +1223,21 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
 
       if (useDirectPatch && plannedDelta && remoteManifestMap) {
         const stagingDir = path.join(updateDir, 'staging');
-        await fs.promises.mkdir(stagingDir, { recursive: true });
+        await rawFs.promises.mkdir(stagingDir, { recursive: true });
         await extractZipFn(destPath, stagingDir);
 
         for (const relPath of plannedDelta.changedFiles) {
           const expectedEntry = remoteManifestMap.get(relPath);
           if (!expectedEntry) continue;
-          const stagedFilePath = path.join(stagingDir, relPath.replace(/\\/g, path.sep));
-          if (!fs.existsSync(stagedFilePath)) {
+          const stagedFilePath = path.join(stagingDir, relPath.replace(/[\\/]+/g, path.sep));
+          let isStagedFile = false;
+          try {
+            const st = await rawFs.promises.stat(stagedFilePath);
+            isStagedFile = st.isFile();
+          } catch {
+            isStagedFile = false;
+          }
+          if (!isStagedFile) {
             await cleanupDownloadedInstaller();
             return emitState({
               status: 'error',
@@ -1236,7 +1274,7 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
           removedFiles: plannedDelta.removedFiles,
         });
         const scriptPath = path.join(updateDir, 'apply-patch.ps1');
-        await fs.promises.writeFile(scriptPath, scriptText, 'utf-8');
+        await rawFs.promises.writeFile(scriptPath, scriptText, 'utf-8');
 
         const child = spawnFn(
           'powershell.exe',

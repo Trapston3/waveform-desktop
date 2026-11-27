@@ -1,5 +1,3 @@
-use napi::bindgen_prelude::Either;
-use napi_derive::napi;
 use once_cell::sync::Lazy;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
@@ -8,17 +6,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct AutoEqFilter {
-    #[napi(js_name = "type")]
     pub filter_type: String,
     pub freq: u32,
     pub q: f64,
     pub gain_db: f64,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct AutoEqSearchResult {
     pub id: u32,
@@ -28,7 +23,6 @@ pub struct AutoEqSearchResult {
     pub rig: String,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct AutoEqProfile {
     pub id: String,
@@ -41,7 +35,6 @@ pub struct AutoEqProfile {
     pub filters: Vec<AutoEqFilter>,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct AutoEqStatus {
     pub ready: bool,
@@ -53,6 +46,12 @@ pub struct AutoEqStatus {
     pub db_path: Option<String>,
     pub load_time_ms: f64,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum AutoEqLookup {
+    Name(String),
+    Id(i64),
 }
 
 #[derive(Clone, Debug)]
@@ -717,19 +716,16 @@ fn build_status(state: Option<&AutoEqDbState>, error: Option<String>, load_ms: f
     }
 }
 
-#[napi]
 pub fn autoeq_init(candidate_paths: Option<Vec<String>>) -> AutoEqStatus {
     let (st, err, ms) = ensure_loaded(candidate_paths.as_deref());
     build_status(st.as_deref(), err, ms)
 }
 
-#[napi]
 pub fn autoeq_status() -> AutoEqStatus {
     let (st, err, ms) = ensure_loaded(None);
     build_status(st.as_deref(), err, ms)
 }
 
-#[napi]
 pub fn autoeq_search(query: String, limit: Option<u32>) -> Vec<AutoEqSearchResult> {
     let Some(cleaned) = sanitize_query(&query) else {
         return Vec::new();
@@ -835,14 +831,13 @@ fn load_profile_from_entry(state: &AutoEqDbState, entry: &AutoEqIndexEntry) -> O
     })
 }
 
-#[napi]
-pub fn autoeq_find_profile(name_or_id: Either<String, i64>) -> Option<AutoEqProfile> {
+pub fn autoeq_find_profile(name_or_id: AutoEqLookup) -> Option<AutoEqProfile> {
     let (Some(state), _, _) = ensure_loaded(None) else {
         return None;
     };
 
     let query_str = match name_or_id {
-        Either::B(num) => {
+        AutoEqLookup::Id(num) => {
             if num <= 0 {
                 return None;
             }
@@ -853,7 +848,7 @@ pub fn autoeq_find_profile(name_or_id: Either<String, i64>) -> Option<AutoEqProf
                 .find(|e| e.id == target_id && e.parametric)?;
             return load_profile_from_entry(&state, entry);
         }
-        Either::A(s) => s,
+        AutoEqLookup::Name(s) => s,
     };
 
     let cleaned = sanitize_query(&query_str)?;
@@ -976,12 +971,12 @@ mod tests {
         assert_eq!(hits[0].name, "Sony WH-CH720N");
         assert!(hits[0].parametric);
 
-        let prof = autoeq_find_profile(Either::A("7Hz Salnotes Zero".to_string())).unwrap();
+        let prof = autoeq_find_profile(AutoEqLookup::Name("7Hz Salnotes Zero".to_string())).unwrap();
         assert!(prof.parametric);
         assert_eq!(prof.filters.len(), 10);
         assert!(prof.preamp_gain_db <= 0.0);
 
-        let rtl = autoeq_find_profile(Either::A("\u{202E}SONY\u{202C}".to_string())).unwrap();
+        let rtl = autoeq_find_profile(AutoEqLookup::Name("\u{202E}SONY\u{202C}".to_string())).unwrap();
         assert!(rtl.name.to_ascii_lowercase().contains("sony"));
     }
 }

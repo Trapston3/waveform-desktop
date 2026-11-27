@@ -8,6 +8,7 @@
 // - Decoupled 0Hz playback re-render time pills
 
 import React, { useRef, useEffect, useState, useMemo, useCallback, memo } from 'react';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import {
   ChevronDown,
   Shuffle,
@@ -754,9 +755,8 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
       const text = await targetFile.text();
       const trackKey = currentTrack.videoId || currentTrack.id || '';
       if (!trackKey) return;
-      const api = (window as any)?.electronAPI;
-      if (typeof api?.saveCustomLyrics === 'function') {
-        await api.saveCustomLyrics(trackKey, text);
+      if (hasPlatformBridge('saveCustomLyrics')) {
+        await getPlatformBridge().saveCustomLyrics(trackKey, text);
       }
       await reloadLyricsForTrack(currentTrack);
       setLrcDropNotice(`Custom lyrics loaded: ${targetFile.name}`);

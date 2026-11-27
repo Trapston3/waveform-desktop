@@ -3,6 +3,7 @@
 // Ports InnerTubeXResolver.kt (ANDROID_VR / IOS / VISIONOS + sw.js_data visitorData) & JioSaavnService.kt (320kbps AAC)
 
 import { InnerTubeClient, universalFetch, toPlayableStreamUrl } from './InnerTubeClient';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 import { InnerTubeParser } from './InnerTubeParser';
 import { TrackMatcher, type MatchTarget, type MatchCandidate } from './TrackMatcher';
 
@@ -181,8 +182,7 @@ export function wrapLosslessStreamUrl(rawUrl: string): string {
     return rawUrl;
   }
   if (
-    typeof window !== 'undefined' &&
-    (window as any).electronAPI &&
+    hasPlatformBridge() &&
     /^https?:\/\//i.test(rawUrl)
   ) {
     return `waveform-stream://proxy?url=${encodeURIComponent(rawUrl)}`;
@@ -342,12 +342,10 @@ export class StreamResolver {
   }
 
   private async resolveViaElectronSabr(videoId: string): Promise<ResolvedStream | null> {
-    if (typeof window === 'undefined') return null;
-    const api = (window as any).electronAPI;
-    if (!api || typeof api.resolveYoutubeStream !== 'function') return null;
+    if (!hasPlatformBridge('resolveYoutubeStream')) return null;
 
     try {
-      const res = await api.resolveYoutubeStream(videoId);
+      const res = await getPlatformBridge().resolveYoutubeStream(videoId);
       if (res && typeof res.streamUrl === 'string' && res.streamUrl.length > 0) {
         const mime = typeof res.mimeType === 'string' && res.mimeType ? res.mimeType : 'audio/webm';
         const isOpus = mime.toLowerCase().includes('webm') || mime.toLowerCase().includes('opus');
@@ -628,10 +626,9 @@ export class StreamResolver {
   }
 
   public async resolve(songId: string, title?: string, artist?: string, targetDurationSec?: number): Promise<ResolvedStream> {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
-    if (typeof api?.offlineCacheResolve === 'function') {
+    if (hasPlatformBridge('offlineCacheResolve')) {
       try {
-        const offline = await api.offlineCacheResolve(songId);
+        const offline = await getPlatformBridge().offlineCacheResolve(songId);
         if (offline?.url) {
           return {
             url: offline.url,

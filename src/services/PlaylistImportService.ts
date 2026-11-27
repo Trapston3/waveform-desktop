@@ -5,6 +5,7 @@ import type { Song } from '../models/Song';
 import { normalizeSong } from '../models/Song';
 import { MusicService } from './MusicService';
 import { TrackMatcher, type MatchCandidate } from './TrackMatcher';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export type ImportedSource = 'spotify' | 'apple' | 'youtube';
 
@@ -55,10 +56,9 @@ export function detectImportUrlSource(rawUrl: string): ImportedSource | null {
 export const PlaylistImportService = {
   async fetchPreview(url: string): Promise<ImportedPlaylistData> {
     const trimmed = url.trim();
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
 
-    if (typeof api?.importPlaylistFromUrl === 'function') {
-      const preview = await api.importPlaylistFromUrl(trimmed);
+    if (hasPlatformBridge('importPlaylistFromUrl')) {
+      const preview = await getPlatformBridge().importPlaylistFromUrl(trimmed);
       if (preview?.source === 'youtube' && preview?.id) {
         const ms = new MusicService();
         const detail = await ms.getReleaseDetails(preview.id, 'playlist');

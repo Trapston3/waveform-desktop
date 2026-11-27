@@ -14,6 +14,7 @@ import {
 } from '../services/StorageService';
 import type { LocalMediaScanner } from '../services/LocalMediaScanner';
 import { useSettingsStore } from './settingsStore';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export type { RichListeningHistoryEntry, YearlyReplayStats };
 export { formatLocalYearMonth };
@@ -113,8 +114,7 @@ export type LibraryStore = LibraryState & LibraryActions;
 let globalStorageInstance: StorageService | null = null;
 
 function getElectronApi(): any {
-  if (typeof window === 'undefined') return undefined;
-  return (window as any).electronAPI;
+  return hasPlatformBridge() ? getPlatformBridge() : undefined;
 }
 
 function normalizeFolderKey(folderPath: string): string {
@@ -479,7 +479,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
         storageInstance.getPlaylists(),
         storageInstance.getFavorites(),
         storageInstance.getListeningHistory(),
-        typeof api?.loadLocalLibraryCache === 'function'
+        hasPlatformBridge('loadLocalLibraryCache')
           ? Promise.resolve(api.loadLocalLibraryCache()).catch(() => null)
           : Promise.resolve(null),
         storageInstance.getSettings().catch(() => null),
@@ -514,7 +514,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
       });
 
       // Run non-blocking background incremental scan in Electron so new/modified/deleted files stay in sync
-      if (typeof api?.incrementalScanLocalFolders === 'function' && hydratedFolders.length > 0) {
+      if (hasPlatformBridge('incrementalScanLocalFolders') && hydratedFolders.length > 0) {
         void Promise.resolve(api.incrementalScanLocalFolders(hydratedFolders))
           .then((result: any) => {
             if (!result || !Array.isArray(result.tracks)) return;
@@ -878,7 +878,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
 
       if (scanner && typeof (scanner as any).scanDirectory === 'function') {
         rawScanned = await (scanner as any).scanDirectory(cleanFolder);
-      } else if (typeof api?.scanLocalFolder === 'function') {
+      } else if (hasPlatformBridge('scanLocalFolder')) {
         rawScanned = await api.scanLocalFolder(cleanFolder);
       } else {
         // High-resolution local library fallback for browser preview environment
@@ -1029,10 +1029,10 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
     let nextTracks: Song[];
 
     const removeFolderIpc =
-      typeof api?.removeLocalFolder === 'function'
-        ? api.removeLocalFolder.bind(api)
-        : typeof api?.removeLocalLibraryFolder === 'function'
-        ? api.removeLocalLibraryFolder.bind(api)
+      hasPlatformBridge('removeLocalFolder')
+        ? (folder: string) => api.removeLocalFolder(folder)
+        : hasPlatformBridge('removeLocalLibraryFolder')
+        ? (folder: string) => api.removeLocalLibraryFolder?.(folder)
         : null;
 
     if (removeFolderIpc) {
@@ -1065,9 +1065,9 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
         return tf !== targetKey && tp !== targetKey && !tp.startsWith(targetPrefix);
       });
 
-      if (typeof api?.saveLocalLibraryCache === 'function') {
+      if (hasPlatformBridge('saveLocalLibraryCache')) {
         try {
-          await api.saveLocalLibraryCache({ folders: nextFolders, tracks: nextTracks });
+          await getPlatformBridge().saveLocalLibraryCache({ folders: nextFolders, tracks: nextTracks });
         } catch {
           // Non-fatal
         }
@@ -1113,10 +1113,9 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
 
     set({ localSongs: nextTracks });
 
-    const api = getElectronApi();
-    if (typeof api?.saveLocalLibraryCache === 'function') {
+    if (hasPlatformBridge('saveLocalLibraryCache')) {
       try {
-        await api.saveLocalLibraryCache({
+        await getPlatformBridge().saveLocalLibraryCache({
           folders: prevState.localFolders,
           tracks: nextTracks,
         });

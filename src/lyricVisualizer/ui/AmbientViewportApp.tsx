@@ -6,6 +6,7 @@
 // and glassmorphic right-click VisualizerContextMenu.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import {
   ChevronLeft,
   ChevronRight,
@@ -185,19 +186,18 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
   // Initialize LyricsPipeline for in-app portal resolution
   useEffect(() => {
     if (!inAppPortal) return;
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
     pipelineRef.current = new LyricsPipeline({
       enableLrclibFallback: true,
       cache: {
         getCachedLyrics: async (songKey: string) => {
-          if (typeof api?.lvGetLyricsCache === 'function') {
-            return (await api.lvGetLyricsCache(songKey)) ?? null;
+          if (hasPlatformBridge('lvGetLyricsCache')) {
+            return (await getPlatformBridge().lvGetLyricsCache(songKey)) ?? null;
           }
           return null;
         },
         setCachedLyrics: async (songKey: string, lyrics: Lyrics) => {
-          if (typeof api?.lvSetLyricsCache === 'function') {
-            await api.lvSetLyricsCache(songKey, lyrics);
+          if (hasPlatformBridge('lvSetLyricsCache')) {
+            await getPlatformBridge().lvSetLyricsCache(songKey, lyrics);
           }
         },
       },
@@ -332,10 +332,9 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
 
   const handleCloseAmbient = useCallback(() => {
     setVizMenu((prev) => (prev.isOpen ? { ...prev, isOpen: false } : prev));
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
     if (!inAppPortal) {
       try {
-        api?.lvCloseAmbient?.();
+        getPlatformBridge().lvCloseAmbient();
       } catch {
         // Ignore in browser/test mode
       }
@@ -387,7 +386,7 @@ export const AmbientViewportApp: React.FC<AmbientViewportAppProps> = ({
 
   // Subscribe to IPC broadcast state (standalone window) and platform events (power-lock -> setLocked(true))
   useEffect(() => {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    const api = hasPlatformBridge() ? getPlatformBridge() : undefined;
 
     const handleIncomingPayload = (payload: LyricVisualizerBroadcastPayload) => {
       if (!payload || typeof payload !== 'object') return;

@@ -18,6 +18,7 @@ import {
   type MotionIntensity,
   type VisualStyleId,
 } from '../core/models';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 
 export type ClipAspectRatio = '9:16' | '16:9';
 export type ClipDurationSec = 10 | 15 | 30;
@@ -786,14 +787,8 @@ export interface SaveClipResult {
   readonly filePath?: string;
 }
 
-interface ElectronSaveClipWindow {
-  electronAPI?: {
-    lvSaveClipFile?: (payload: { defaultName: string; bytes: Uint8Array }) => Promise<SaveClipResult | void>;
-  };
-}
-
 /**
- * Saves an exported video clip via Electron native save dialog when available,
+ * Saves an exported video clip via native desktop save dialog when available,
  * falling back to an anchor download in standard browser contexts.
  */
 export async function saveClipBlob(
@@ -801,17 +796,15 @@ export async function saveClipBlob(
   defaultFileName: string
 ): Promise<SaveClipResult> {
   const safeName = defaultFileName.trim() || 'waveform-lyric-clip.webm';
-  const win = typeof window !== 'undefined' ? (window as unknown as ElectronSaveClipWindow) : undefined;
-  const lvSave = win?.electronAPI?.lvSaveClipFile;
 
-  if (typeof lvSave === 'function') {
+  if (hasPlatformBridge('lvSaveClipFile')) {
     const buffer = await blob.arrayBuffer();
     const bytes = new Uint8Array(buffer);
-    const res = await lvSave({ defaultName: safeName, bytes });
+    const res = await getPlatformBridge().lvSaveClipFile({ defaultName: safeName, bytes });
     if (res && typeof res === 'object' && 'saved' in res) {
-      return res;
+      return res as SaveClipResult;
     }
-    return { saved: true };
+    return { saved: true, canceled: (res as any)?.canceled, filePath: (res as any)?.filePath };
   }
 
   if (typeof document !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {

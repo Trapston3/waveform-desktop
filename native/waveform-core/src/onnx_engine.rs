@@ -1,5 +1,3 @@
-use napi::bindgen_prelude::{AsyncTask, Env, Float32Array, Result as NapiResult, Task};
-use napi_derive::napi;
 use once_cell::sync::Lazy;
 use ort::environment::Environment;
 use ort::session::Session;
@@ -14,7 +12,6 @@ use std::sync::{Mutex, RwLock};
 const BEAT_MODEL_FILENAME: &str = "beat_this_final0_q8.onnx";
 const VOCALS_MODEL_FILENAME: &str = "vocals_umxhq_int8.onnx";
 
-#[napi(object)]
 #[derive(Clone, Debug, Default)]
 pub struct OnnxStatus {
     pub ort_loaded: bool,
@@ -30,7 +27,6 @@ pub struct OnnxStatus {
     pub error: Option<String>,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct BeatInferenceResult {
     pub used_onnx: bool,
@@ -42,7 +38,6 @@ pub struct BeatInferenceResult {
     pub error: Option<String>,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct VocalsMaskResult {
     pub used_onnx: bool,
@@ -53,14 +48,12 @@ pub struct VocalsMaskResult {
     pub error: Option<String>,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct TimeRange {
     pub start_sec: f64,
     pub end_sec: f64,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct TrackBeatAnalysisResult {
     pub used_onnx: bool,
@@ -75,16 +68,15 @@ pub struct TrackBeatAnalysisResult {
     pub error: Option<String>,
 }
 
-#[napi(object)]
+#[derive(Clone, Debug)]
 pub struct VocalSeparationResult {
     pub used_onnx: bool,
-    pub vocals_left: Float32Array,
-    pub vocals_right: Float32Array,
+    pub vocals_left: Vec<f32>,
+    pub vocals_right: Vec<f32>,
     pub sample_rate: f64,
     pub error: Option<String>,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct LyricAutoSyncResult {
     pub offset_ms: f64,
@@ -373,39 +365,6 @@ pub fn init_models_sync(
     status
 }
 
-pub struct OnnxInitTask {
-    models_dir: Option<String>,
-    ort_dylib_path: Option<String>,
-}
-
-impl Task for OnnxInitTask {
-    type Output = OnnxStatus;
-    type JsValue = OnnxStatus;
-
-    fn compute(&mut self) -> NapiResult<Self::Output> {
-        Ok(init_models_sync(
-            self.models_dir.as_deref(),
-            self.ort_dylib_path.as_deref(),
-        ))
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-#[napi]
-pub fn onnx_init_models(
-    models_dir: Option<String>,
-    ort_dylib_path: Option<String>,
-) -> AsyncTask<OnnxInitTask> {
-    AsyncTask::new(OnnxInitTask {
-        models_dir,
-        ort_dylib_path,
-    })
-}
-
-#[napi]
 pub fn onnx_status() -> OnnxStatus {
     MANAGER
         .read()
@@ -623,15 +582,6 @@ pub fn infer_beats_core(
     infer_beats_spectral_fallback(spectrogram, tf, fps)
 }
 
-#[napi]
-pub fn onnx_infer_beats(
-    spectrogram: Float32Array,
-    time_frames: u32,
-    sample_rate: Option<f64>,
-) -> BeatInferenceResult {
-    infer_beats_core(spectrogram.as_ref(), time_frames, sample_rate)
-}
-
 pub fn infer_vocals_mask_core(mix_magnitude: &[f32], frames: Option<u32>) -> VocalsMaskResult {
     let tf = frames.unwrap_or(960) as usize;
     let expected = 2usize.saturating_mul(2049).saturating_mul(tf);
@@ -694,14 +644,6 @@ pub fn infer_vocals_mask_core(mix_magnitude: &[f32], frames: Option<u32>) -> Voc
         time_frames: tf as u32,
         error: Some("onnxruntime.dll not loaded; vocals inference unavailable".to_string()),
     }
-}
-
-#[napi]
-pub fn onnx_infer_vocals_mask(
-    mix_magnitude: Float32Array,
-    frames: Option<u32>,
-) -> VocalsMaskResult {
-    infer_vocals_mask_core(mix_magnitude.as_ref(), frames)
 }
 
 fn resample_linear(samples: &[f32], src_sr: f64, dst_sr: f64) -> Vec<f32> {
@@ -1076,42 +1018,6 @@ pub fn analyze_track_beats_pcm_core(
     }
 }
 
-pub struct AnalyzeBeatsPcmTask {
-    left: Vec<f32>,
-    right: Option<Vec<f32>>,
-    sample_rate: f64,
-}
-
-impl Task for AnalyzeBeatsPcmTask {
-    type Output = TrackBeatAnalysisResult;
-    type JsValue = TrackBeatAnalysisResult;
-
-    fn compute(&mut self) -> NapiResult<Self::Output> {
-        Ok(analyze_track_beats_pcm_core(
-            &self.left,
-            self.right.as_deref(),
-            self.sample_rate,
-        ))
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-#[napi]
-pub fn onnx_analyze_track_beats_pcm(
-    left_pcm: Float32Array,
-    right_pcm: Option<Float32Array>,
-    sample_rate: f64,
-) -> AsyncTask<AnalyzeBeatsPcmTask> {
-    AsyncTask::new(AnalyzeBeatsPcmTask {
-        left: left_pcm.to_vec(),
-        right: right_pcm.map(|r| r.to_vec()),
-        sample_rate,
-    })
-}
-
 pub fn separate_vocals_pcm_core(
     left_in: &[f32],
     right_in: &[f32],
@@ -1340,60 +1246,6 @@ pub fn separate_vocals_pcm_core(
     }
 }
 
-pub struct SeparateVocalsOutput {
-    used_onnx: bool,
-    vocals_left: Vec<f32>,
-    vocals_right: Vec<f32>,
-    sample_rate: f64,
-    error: Option<String>,
-}
-
-pub struct SeparateVocalsPcmTask {
-    left: Vec<f32>,
-    right: Vec<f32>,
-    sample_rate: f64,
-}
-
-impl Task for SeparateVocalsPcmTask {
-    type Output = SeparateVocalsOutput;
-    type JsValue = VocalSeparationResult;
-
-    fn compute(&mut self) -> NapiResult<Self::Output> {
-        let (used_onnx, vocals_left, vocals_right, error) =
-            separate_vocals_pcm_core(&self.left, &self.right, self.sample_rate);
-        Ok(SeparateVocalsOutput {
-            used_onnx,
-            vocals_left,
-            vocals_right,
-            sample_rate: self.sample_rate,
-            error,
-        })
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
-        Ok(VocalSeparationResult {
-            used_onnx: output.used_onnx,
-            vocals_left: Float32Array::new(output.vocals_left),
-            vocals_right: Float32Array::new(output.vocals_right),
-            sample_rate: output.sample_rate,
-            error: output.error,
-        })
-    }
-}
-
-#[napi]
-pub fn onnx_separate_vocals_pcm(
-    left_pcm: Float32Array,
-    right_pcm: Float32Array,
-    sample_rate: f64,
-) -> AsyncTask<SeparateVocalsPcmTask> {
-    AsyncTask::new(SeparateVocalsPcmTask {
-        left: left_pcm.to_vec(),
-        right: right_pcm.to_vec(),
-        sample_rate,
-    })
-}
-
 pub fn estimate_lyric_offset_ms_core(
     vocal_envelope: &[f32],
     envelope_fps: f64,
@@ -1522,15 +1374,6 @@ pub fn estimate_lyric_offset_ms_core(
         offset_ms: best_ms.clamp(-12000.0, 12000.0),
         confidence: (confidence * 100.0).round() / 100.0,
     }
-}
-
-#[napi]
-pub fn estimate_lyric_offset_ms(
-    vocal_envelope: Float32Array,
-    envelope_fps: f64,
-    line_start_times_sec: Vec<f64>,
-) -> LyricAutoSyncResult {
-    estimate_lyric_offset_ms_core(vocal_envelope.as_ref(), envelope_fps, &line_start_times_sec)
 }
 
 #[cfg(test)]

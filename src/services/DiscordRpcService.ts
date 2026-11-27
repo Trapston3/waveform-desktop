@@ -3,6 +3,7 @@
 // plus pure framing & activity payload helpers matching Discord IPC specifications.
 
 import type { Song } from '../models/Song';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export const DISCORD_DEFAULT_CLIENT_ID = '1574112665163530280';
 export const GET_WAVEFORM_URL = 'https://github.com/trapston3/waveform-desktop';
@@ -305,10 +306,7 @@ function getElectronDiscordApi(): {
   discordRpcGetStatus?: () => Promise<{ status?: DiscordRpcStatus; connected?: boolean }>;
   discordRpcConfigure?: (config: Record<string, any>) => Promise<{ status?: DiscordRpcStatus }>;
 } | null {
-  if (typeof window !== 'undefined' && (window as any).electronAPI) {
-    return (window as any).electronAPI;
-  }
-  return null;
+  return hasPlatformBridge() ? (getPlatformBridge() as any) : null;
 }
 
 export class DiscordRpcService {

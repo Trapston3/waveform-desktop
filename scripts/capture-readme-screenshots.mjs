@@ -250,7 +250,7 @@ async function runElectronScreenshotHarness() {
   ipcMain.handle('ui:setTrayBehavior', () => {});
   const idleUpdaterState = {
     status: 'idle',
-    currentVersion: '1.3.4',
+    currentVersion: '1.3.5',
     latestVersion: null,
     releaseName: null,
     releaseNotes: null,
@@ -998,13 +998,13 @@ async function runElectronScreenshotHarness() {
   ]);
   await capturePng('03-visualizer-code-kinetic.png', '03-visualizer-code-kinetic');
 
-  // 4. 04-visualizer-spaceship-3d.png (Spaceship 3D starfighter + asteroids)
+  // 4. 04-visualizer-spaceship-3d.png (Vaporwave Starfield Ship 3D + Outrun sun & neon grid)
   await configureSceneAndReload({
     trackIndex: 3,
     positionMs: 45200,
     nowPlayingLyricsMode: 'visualizer',
     styleId: 'StarfieldShip3D',
-    variationByStyle: { StarfieldShip3D: 'deep-space' },
+    variationByStyle: { StarfieldShip3D: 'vaporwave' },
     nowPlayingLayout: 'split',
     hideAlbumCover: false,
     textAlign: 'center',

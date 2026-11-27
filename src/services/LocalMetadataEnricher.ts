@@ -2,6 +2,7 @@
 // Browser/renderer-safe background artwork enricher for local tracks.
 
 import type { Song } from '../models/Song';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 const MAX_CONCURRENCY = 3;
 
@@ -46,8 +47,8 @@ export async function enrichLocalTracksInBackground(
   const pending = tracks.filter((t) => t && t.videoId && !t.thumbnailUrl);
   if (pending.length === 0) return;
 
-  const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
-  const hasElectronEnrich = typeof api?.enrichLocalArtwork === 'function';
+  const api = hasPlatformBridge() ? getPlatformBridge() : undefined;
+  const hasElectronEnrich = hasPlatformBridge('enrichLocalArtwork');
 
   let cursor = 0;
   const workerCount = Math.min(MAX_CONCURRENCY, pending.length);
@@ -59,7 +60,7 @@ export async function enrichLocalTracksInBackground(
       if (!track) continue;
 
       try {
-        const url = hasElectronEnrich
+        const url = api && hasElectronEnrich
           ? await api.enrichLocalArtwork({
               artist: track.artist,
               title: track.title,

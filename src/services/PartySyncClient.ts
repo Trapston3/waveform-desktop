@@ -3,6 +3,8 @@
 // persistent Zustand room store (`usePartyStore`), and in-memory MockPartyBroadcastServer.
 
 import { create } from 'zustand';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
+import { usePlayerStore } from '../state/playerStore';
 import type {
   PartyTrack,
   PartyMember,
@@ -1249,7 +1251,7 @@ let lastPublishedPlayState: string | null = null;
 let remoteApplyDepth = 0;
 
 function getElectronApi(): any {
-  return typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+  return hasPlatformBridge() ? getPlatformBridge() : undefined;
 }
 
 function makeSenderId(): string {
@@ -1981,7 +1983,6 @@ class InternetPartyCoordinator {
 async function attachPlayerStoreSync(client: PartySyncClient): Promise<void> {
   detachPlayerStoreSync();
   try {
-    const { usePlayerStore } = await import('../state/playerStore');
     const initialState = usePlayerStore.getState();
     lastPublishedTrackId = initialState.currentTrack?.videoId || null;
     lastPublishedPlayState = initialState.playbackState;
@@ -2037,11 +2038,11 @@ function detachPlayerStoreSync(): void {
   }
   lastPublishedTrackId = null;
   lastPublishedPlayState = null;
-  void import('../state/playerStore')
-    .then(({ usePlayerStore }) => {
-      usePlayerStore.getState().setPlaybackRate(1.0);
-    })
-    .catch(() => {});
+  try {
+    usePlayerStore.getState().setPlaybackRate(1.0);
+  } catch {
+    // Ignore in headless tests
+  }
 }
 
 function createClientWithStoreBindings(): PartySyncClient {
@@ -2059,7 +2060,6 @@ function createClientWithStoreBindings(): PartySyncClient {
     },
     onPlaybackRateRequested: async (rate) => {
       try {
-        const { usePlayerStore } = await import('../state/playerStore');
         usePlayerStore.getState().setPlaybackRate(rate);
       } catch {
         // Ignore in headless tests
@@ -2068,7 +2068,6 @@ function createClientWithStoreBindings(): PartySyncClient {
     onPauseWaitChanged: async (waiting) => {
       let applied = false;
       try {
-        const { usePlayerStore } = await import('../state/playerStore');
         const pState = usePlayerStore.getState();
         remoteApplyDepth++;
         applied = true;
@@ -2152,7 +2151,6 @@ function createClientWithStoreBindings(): PartySyncClient {
 
       let applied = false;
       try {
-        const { usePlayerStore } = await import('../state/playerStore');
         const pState = usePlayerStore.getState();
         if (pState.currentTrack?.videoId === track.videoId) return;
         remoteApplyDepth++;
@@ -2196,7 +2194,6 @@ function createClientWithStoreBindings(): PartySyncClient {
       }));
       let applied = false;
       try {
-        const { usePlayerStore } = await import('../state/playerStore');
         const pState = usePlayerStore.getState();
         remoteApplyDepth++;
         applied = true;
@@ -2222,7 +2219,6 @@ function createClientWithStoreBindings(): PartySyncClient {
       }));
       let applied = false;
       try {
-        const { usePlayerStore } = await import('../state/playerStore');
         remoteApplyDepth++;
         applied = true;
         usePlayerStore.getState().seek(targetMs);
@@ -2399,7 +2395,6 @@ export const usePartyStore = create<PartyStore>((set, get) => ({
 
     // Push currently playing track snapshot into the newly created room
     try {
-      const { usePlayerStore } = await import('../state/playerStore');
       const pState = usePlayerStore.getState();
       const pt = songToPartyTrack(pState.currentTrack);
       if (pt) {

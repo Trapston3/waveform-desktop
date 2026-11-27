@@ -8,6 +8,7 @@ import {
   normalizeAutoEqCompact,
   extractMeasurementRig,
 } from './sqliteReader';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export { normalizeAutoEqCompact, extractMeasurementRig, scoreAutoEqMatch };
 
@@ -254,9 +255,9 @@ export class AutoEqLoader {
    * Returns AutoEQ database readiness and row counts via IPC in renderer or pure-TS SQLite reader in Node.
    */
   public static async getStatus(): Promise<AutoEqStatus> {
-    if (typeof window !== 'undefined' && typeof (window as any).electronAPI?.getAutoEqStatus === 'function') {
+    if (hasPlatformBridge('getAutoEqStatus')) {
       try {
-        const ipcStatus = await (window as any).electronAPI.getAutoEqStatus();
+        const ipcStatus = await getPlatformBridge().getAutoEqStatus();
         if (ipcStatus && typeof ipcStatus.totalCount === 'number') {
           return {
             ready: Boolean(ipcStatus.ready),
@@ -308,10 +309,10 @@ export class AutoEqLoader {
       return cloneAutoEqProfile(curated);
     }
 
-    // 2. In renderer with Electron IPC, delegate query to main process
-    if (typeof window !== 'undefined' && typeof (window as any).electronAPI?.findAutoEqProfile === 'function') {
+    // 2. In renderer with platform bridge, delegate query to host process
+    if (hasPlatformBridge('findAutoEqProfile')) {
       try {
-        const ipcProfile = await (window as any).electronAPI.findAutoEqProfile(nameOrId);
+        const ipcProfile = await getPlatformBridge().findAutoEqProfile(nameOrId);
         if (ipcProfile) return ipcProfile;
       } catch {
         // Fallback to local db
@@ -371,10 +372,10 @@ export class AutoEqLoader {
     const trimmed = query.trim();
     const cacheKey = `${trimmed.toLowerCase()}::${safeLimit}`;
 
-    // In renderer with Electron IPC, delegate search to main process
-    if (typeof window !== 'undefined' && typeof (window as any).electronAPI?.searchAutoEq === 'function') {
+    // In renderer with platform bridge, delegate search to host process
+    if (hasPlatformBridge('searchAutoEq')) {
       try {
-        const ipcResults = await (window as any).electronAPI.searchAutoEq(query, safeLimit);
+        const ipcResults = await getPlatformBridge().searchAutoEq(query, safeLimit);
         if (Array.isArray(ipcResults) && ipcResults.length > 0) {
           return ipcResults.slice(0, safeLimit);
         }

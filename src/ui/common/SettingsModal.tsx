@@ -26,6 +26,7 @@ import {
 import { useSettingsStore, useUpdateStore } from '../../state/settingsStore';
 import { useLibraryStore } from '../../state/libraryStore';
 import { usePlayerStore } from '../../state/playerStore';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import {
   normalizeNowPlayingLayout,
   resolveStyleVariationId,
@@ -162,20 +163,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
-    const getStatus = (window as any)?.electronAPI?.discordRpcGetStatus;
-    if (typeof getStatus !== 'function') return;
+    if (!hasPlatformBridge('discordRpcGetStatus')) return;
+    const bridge = getPlatformBridge();
 
     const refresh = () => {
-      Promise.resolve(getStatus())
+      Promise.resolve(bridge.discordRpcGetStatus())
         .then((snap) => {
           if (!cancelled && snap && typeof snap === 'object') {
             setDiscordStatus(snap);
           }
         })
         .catch(() => {});
-      const getScrobbleStatus = (window as any)?.electronAPI?.scrobbleGetStatus;
-      if (typeof getScrobbleStatus === 'function') {
-        Promise.resolve(getScrobbleStatus())
+      if (hasPlatformBridge('scrobbleGetStatus')) {
+        Promise.resolve(bridge.scrobbleGetStatus())
           .then((snap) => {
             if (!cancelled && snap && typeof snap === 'object') {
               setScrobbleStatus({
@@ -209,10 +209,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
   useEffect(() => {
     if (!isOpen || activeTab !== 'ergonomics') return;
-    const fn = (window as any)?.electronAPI?.hotkeysGetStatus;
-    if (typeof fn !== 'function') return;
+    if (!hasPlatformBridge('hotkeysGetStatus')) return;
     let cancelled = false;
-    Promise.resolve(fn())
+    Promise.resolve(getPlatformBridge().hotkeysGetStatus())
       .then((snap) => {
         if (!cancelled && snap && typeof snap === 'object') {
           setHotkeyStatus({
@@ -284,10 +283,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   };
 
   const handleBrowseFolder = async () => {
-    const picker = (window as any)?.electronAPI?.selectLocalFolder;
-    if (typeof picker !== 'function') return;
+    if (!hasPlatformBridge('selectLocalFolder')) return;
     try {
-      const result = await picker();
+      const result = await getPlatformBridge().selectLocalFolder();
       const folderPath =
         typeof result === 'string'
           ? result
@@ -1921,11 +1919,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                           type="button"
                           disabled={scrobbleBusy === 'lfm'}
                           onClick={async () => {
-                            const fn = (window as any)?.electronAPI?.scrobbleTestLastFm;
-                            if (typeof fn !== 'function') return;
+                            if (!hasPlatformBridge('scrobbleTestLastFm')) return;
                             setScrobbleBusy('lfm');
                             try {
-                              const res = await fn({
+                              const res = await getPlatformBridge().scrobbleTestLastFm({
                                 lastFmApiKey: settings['scrobble.lastFmApiKey'] || '',
                                 lastFmApiSecret: settings['scrobble.lastFmApiSecret'] || '',
                                 lastFmSessionKey: settings['scrobble.lastFmSessionKey'] || '',
@@ -1968,11 +1965,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                           type="button"
                           disabled={scrobbleBusy === 'lb'}
                           onClick={async () => {
-                            const fn = (window as any)?.electronAPI?.scrobbleValidateListenBrainz;
-                            if (typeof fn !== 'function') return;
+                            if (!hasPlatformBridge('scrobbleValidateListenBrainz')) return;
                             setScrobbleBusy('lb');
                             try {
-                              const res = await fn(settings['scrobble.listenBrainzToken'] || '');
+                              const res = await getPlatformBridge().scrobbleValidateListenBrainz(settings['scrobble.listenBrainzToken'] || '');
                               setLbTestResult(
                                 res?.valid
                                   ? `Valid token (${res.userName || 'connected'})`
@@ -1998,11 +1994,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                           type="button"
                           disabled={scrobbleBusy === 'flush' || scrobbleStatus.queueLength === 0}
                           onClick={async () => {
-                            const fn = (window as any)?.electronAPI?.scrobbleFlushQueue;
-                            if (typeof fn !== 'function') return;
+                            if (!hasPlatformBridge('scrobbleFlushQueue')) return;
                             setScrobbleBusy('flush');
                             try {
-                              const res = await fn();
+                              const res = await getPlatformBridge().scrobbleFlushQueue();
                               setScrobbleStatus((prev) => ({
                                 ...prev,
                                 queueLength: Number(res?.remaining) || 0,
@@ -2035,9 +2030,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                         <button
                           type="button"
                           onClick={async () => {
-                            const resetFn = (window as any)?.electronAPI?.hotkeysResetDefaults;
-                            if (typeof resetFn === 'function') {
-                              const res = await resetFn();
+                            if (hasPlatformBridge('hotkeysResetDefaults')) {
+                              const res = await getPlatformBridge().hotkeysResetDefaults();
                               if (res?.bindings) {
                                 await handleUpdate({
                                   'hotkeys.enabled': true,

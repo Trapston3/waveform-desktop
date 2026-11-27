@@ -8,6 +8,7 @@ import { LyricsService } from '../services/LyricsService';
 import { hasNonLatinScript } from '../utils/transliterate';
 import { useSettingsStore } from './settingsStore';
 import { useLyricVisualizerStore } from '../lyricVisualizer/state/lyricVisualizerStore';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export type LyricsStatus = 'idle' | 'loading' | 'found' | 'not_found' | 'empty' | 'error';
 
@@ -104,7 +105,7 @@ export const useLyricsStore = create<LyricsState>((set, get) => ({
       error: null,
     });
 
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    const api = hasPlatformBridge() ? getPlatformBridge() : undefined;
     const cacheKeyArg = {
       artist: track.artist || '',
       title: track.title || '',

@@ -3,6 +3,7 @@
 // Guarantees zero-flicker frame-0 rehydration and native durability across app refreshes/restarts
 
 import type { Song } from '../models/Song';
+import { hasPlatformBridge } from '../platform/index';
 
 export interface PersistedPlaybackSession {
   version: 1;
@@ -116,8 +117,8 @@ export function persistSessionDebounced(session: PersistedPlaybackSession, delay
   }
   saveDebounceTimer = setTimeout(async () => {
     try {
-      if (typeof window !== 'undefined' && (window as any).electronAPI) {
-        // Can bridge to Electron if needed
+      if (hasPlatformBridge()) {
+        // Can bridge to desktop host if needed
       }
     } catch (err) {
       console.warn('[sessionPersistence] savePlaybackSession failed:', err);

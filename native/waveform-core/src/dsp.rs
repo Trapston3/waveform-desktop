@@ -1,6 +1,4 @@
 use crate::autoeq::AutoEqFilter;
-use napi::bindgen_prelude::{Either, Float32Array};
-use napi_derive::napi;
 use once_cell::sync::Lazy;
 use realfft::{RealFftPlanner, RealToComplex};
 use std::collections::HashMap;
@@ -178,21 +176,6 @@ pub fn compute_biquad_magnitude_db_core(
     out
 }
 
-#[napi]
-pub fn compute_biquad_magnitude_db(
-    filters: Vec<AutoEqFilter>,
-    freqs: Vec<f64>,
-    sample_rate: Option<f64>,
-    preamp_db: Option<f64>,
-) -> Vec<f64> {
-    compute_biquad_magnitude_db_core(
-        &filters,
-        &freqs,
-        sample_rate.unwrap_or(48000.0),
-        preamp_db.unwrap_or(0.0),
-    )
-}
-
 #[derive(Clone, Copy)]
 struct SvfBandParams {
     effective_g: f64,
@@ -340,24 +323,6 @@ pub fn compute_svf_eq_magnitude_db_core(
     out
 }
 
-#[napi]
-pub fn compute_svf_eq_magnitude_db(
-    bands10: Vec<f64>,
-    freqs: Vec<f64>,
-    sample_rate: Option<f64>,
-    tone_bass_db: Option<f64>,
-    tone_treble_db: Option<f64>,
-) -> Vec<f64> {
-    compute_svf_eq_magnitude_db_core(
-        &bands10,
-        &freqs,
-        sample_rate.unwrap_or(44100.0),
-        tone_bass_db.unwrap_or(0.0),
-        tone_treble_db.unwrap_or(0.0),
-    )
-}
-
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct BpmState {
     pub rolling_energy: f64,
@@ -383,7 +348,6 @@ impl Default for BpmState {
     }
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct AudioFrameAnalysis {
     pub spectrum32: Vec<f64>,
@@ -610,25 +574,6 @@ pub fn analyze_audio_frame_core(
         estimated_bpm: state.estimated_bpm.clamp(65.0, 185.0),
         bpm_state: state,
     }
-}
-
-#[napi]
-pub fn analyze_audio_frame(
-    pcm_samples: Float32Array,
-    sample_rate: Option<f64>,
-    prev_magnitudes: Option<Either<Float32Array, Vec<f64>>>,
-    bpm_state: Option<BpmState>,
-) -> AudioFrameAnalysis {
-    let prev_vec: Option<Vec<f64>> = prev_magnitudes.map(|either| match either {
-        Either::A(arr) => arr.as_ref().iter().map(|&v| v as f64).collect(),
-        Either::B(vec) => vec,
-    });
-    analyze_audio_frame_core(
-        pcm_samples.as_ref(),
-        sample_rate.unwrap_or(44100.0),
-        prev_vec.as_deref(),
-        bpm_state,
-    )
 }
 
 #[cfg(test)]

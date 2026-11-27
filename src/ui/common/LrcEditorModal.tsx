@@ -8,6 +8,7 @@ import type { ParsedLyrics } from '../../services/LyricsService';
 import { LyricsService } from '../../services/LyricsService';
 import { useLyricsStore } from '../../state/lyricsStore';
 import { useLyricVisualizerStore } from '../../lyricVisualizer/state/lyricVisualizerStore';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 
 export interface LrcEditorModalProps {
   isOpen: boolean;
@@ -68,9 +69,8 @@ export const LrcEditorModal: React.FC<LrcEditorModalProps> = ({
     setTapSyncActive(false);
     setTapLineIndex(0);
 
-    const api = (window as any)?.electronAPI;
-    if (typeof api?.getCustomLyrics === 'function') {
-      Promise.resolve(api.getCustomLyrics(trackKey))
+    if (hasPlatformBridge('getCustomLyrics')) {
+      Promise.resolve(getPlatformBridge().getCustomLyrics(trackKey))
         .then((rec) => {
           if (cancelled) return;
           if (rec?.rawText) {
@@ -100,9 +100,8 @@ export const LrcEditorModal: React.FC<LrcEditorModalProps> = ({
     if (!trackKey) return;
     const clamped = Math.max(-2000, Math.min(2000, Math.round(nextOffsetMs)));
     setSongOffsetMs(clamped, trackKey);
-    const api = (window as any)?.electronAPI;
-    if (typeof api?.setCustomLyricsOffset === 'function') {
-      void api.setCustomLyricsOffset(trackKey, clamped).catch(() => {});
+    if (hasPlatformBridge('setCustomLyricsOffset')) {
+      void getPlatformBridge().setCustomLyricsOffset(trackKey, clamped).catch(() => {});
     }
   };
 
@@ -160,9 +159,8 @@ export const LrcEditorModal: React.FC<LrcEditorModalProps> = ({
     if (!trackKey) return;
     setIsSaving(true);
     try {
-      const api = (window as any)?.electronAPI;
-      if (typeof api?.saveCustomLyrics === 'function') {
-        await api.saveCustomLyrics(trackKey, rawText, currentOffsetMs);
+      if (hasPlatformBridge('saveCustomLyrics')) {
+        await getPlatformBridge().saveCustomLyrics(trackKey, rawText, currentOffsetMs);
       }
       await reloadLyricsForTrack(track);
       setStatusMessage('Saved custom lyrics override.');
@@ -177,9 +175,8 @@ export const LrcEditorModal: React.FC<LrcEditorModalProps> = ({
     if (!trackKey) return;
     setIsSaving(true);
     try {
-      const api = (window as any)?.electronAPI;
-      if (typeof api?.deleteCustomLyrics === 'function') {
-        await api.deleteCustomLyrics(trackKey);
+      if (hasPlatformBridge('deleteCustomLyrics')) {
+        await getPlatformBridge().deleteCustomLyrics(trackKey);
       }
       resetSongOffsetMs(trackKey);
       LyricsService.clearCache();

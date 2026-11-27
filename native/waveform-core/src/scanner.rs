@@ -4,8 +4,6 @@ use lofty::id3::v2::{FrameFlags, SynchronizedTextFrame, TimestampFormat};
 use lofty::picture::MimeType;
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagType};
-use napi::bindgen_prelude::{AsyncTask, Env, Result as NapiResult, Task};
-use napi_derive::napi;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use sha1::{Digest as Sha1Digest, Sha1};
@@ -43,14 +41,12 @@ const FOLDER_COVER_NAMES: &[&str] = &[
     "album.webp",
 ];
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct TrackArtist {
     pub id: String,
     pub name: String,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct LocalTrack {
     pub id: String,
@@ -96,7 +92,6 @@ pub struct LocalTrack {
     pub metadata_cache_key: String,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct CachedTrackInput {
     pub local_file_path: String,
@@ -104,7 +99,6 @@ pub struct CachedTrackInput {
     pub size: f64,
 }
 
-#[napi(object)]
 #[derive(Clone, Debug)]
 pub struct IncrementalScanResult {
     pub folders: Vec<String>,
@@ -910,71 +904,6 @@ pub fn scan_incremental_sync(
         updated,
         removed,
     }
-}
-
-pub struct ScanFolderTask {
-    folder_path: String,
-    user_data_path: String,
-}
-
-impl Task for ScanFolderTask {
-    type Output = Vec<LocalTrack>;
-    type JsValue = Vec<LocalTrack>;
-
-    fn compute(&mut self) -> NapiResult<Self::Output> {
-        Ok(scan_folder_sync(&self.folder_path, &self.user_data_path))
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-pub struct IncrementalScanTask {
-    folders: Vec<String>,
-    user_data_path: String,
-    cached_entries: Vec<CachedTrackInput>,
-}
-
-impl Task for IncrementalScanTask {
-    type Output = IncrementalScanResult;
-    type JsValue = IncrementalScanResult;
-
-    fn compute(&mut self) -> NapiResult<Self::Output> {
-        Ok(scan_incremental_sync(
-            &self.folders,
-            &self.user_data_path,
-            &self.cached_entries,
-        ))
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-#[napi]
-pub fn scan_folder_metadata(
-    folder_path: String,
-    user_data_path: String,
-) -> AsyncTask<ScanFolderTask> {
-    AsyncTask::new(ScanFolderTask {
-        folder_path,
-        user_data_path,
-    })
-}
-
-#[napi]
-pub fn scan_local_folders_incremental(
-    folders: Vec<String>,
-    user_data_path: String,
-    cached_entries: Option<Vec<CachedTrackInput>>,
-) -> AsyncTask<IncrementalScanTask> {
-    AsyncTask::new(IncrementalScanTask {
-        folders,
-        user_data_path,
-        cached_entries: cached_entries.unwrap_or_default(),
-    })
 }
 
 #[cfg(test)]

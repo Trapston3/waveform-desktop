@@ -2,6 +2,7 @@
 // InnerTube client emulating YouTube Music WEB_REMIX with SAPISIDHASH, universal CORS-free transport, and retry backoff
 
 import type { LyricsData, LyricLine, LyricSyllable } from './LyricsService';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export interface InnerTubeClientOptions {
   cookie?: string;
@@ -112,7 +113,7 @@ export interface UniversalFetchResponse {
 
 /**
  * Universal network fetch that automatically routes through:
- * 1. Electron main-process IPC (`window.electronAPI.fetch`) when running inside Electron
+ * 1. Desktop host IPC (`PlatformBridge.fetch`) when running inside the desktop shell
  * 2. Vite dev/preview server proxy (`/__waveform_proxy`) when running inside a browser on localhost
  * 3. Direct `fetch()` when running in Node.js or when Electron webRequest handles headers
  */
@@ -121,10 +122,9 @@ export async function universalFetch(
   options: { method?: string; headers?: Record<string, string>; body?: string } = {}
 ): Promise<UniversalFetchResponse> {
   const hasWindow = typeof window !== 'undefined';
-  const electronFetch = hasWindow ? (window as any).electronAPI?.fetch : undefined;
 
-  if (typeof electronFetch === 'function') {
-    const res = await electronFetch(url, options);
+  if (hasPlatformBridge('fetch')) {
+    const res = await getPlatformBridge().fetch(url, options);
     if (res && typeof res.text === 'string') {
       return {
         ok: Boolean(res.ok),
@@ -189,7 +189,7 @@ export function toPlayableStreamUrl(rawUrl: string): string {
     return rawUrl;
   }
   const hasWindow = typeof window !== 'undefined';
-  const isElectron = hasWindow && Boolean((window as any).electronAPI);
+  const isElectron = hasPlatformBridge();
   // In Vite browser dev/preview (non-Electron), route remote googlevideo.com streams through /__waveform_stream
   if (hasWindow && !isElectron && window.location?.protocol?.startsWith('http')) {
     if (rawUrl.includes('googlevideo.com')) {

@@ -7,6 +7,7 @@ import {
   validateSongContract,
   normalizeSong,
 } from '../models/index';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 import type {
   AppSettings,
   Song,
@@ -1038,17 +1039,14 @@ export class StorageService implements IStorageService {
       ? localLoaded.filter((item) => item && typeof item.videoId === 'string')
       : [];
 
-    const api =
-      typeof window !== 'undefined'
-        ? (window as any).electronAPI
-        : (globalThis as any).window?.electronAPI;
-    if (typeof api?.replayLoad === 'function') {
+    if (hasPlatformBridge('replayLoad')) {
       try {
-        const diskRes = await api.replayLoad();
+        const bridge = getPlatformBridge();
+        const diskRes = await bridge.replayLoad();
         const diskEntries = Array.isArray(diskRes?.entries) ? diskRes.entries : [];
         const merged = mergeListeningEntries(diskEntries, cleanLocal);
-        if (cleanLocal.length > 0 && merged.length > diskEntries.length && typeof api?.replayFlush === 'function') {
-          await api.replayFlush(merged).catch(() => {});
+        if (cleanLocal.length > 0 && merged.length > diskEntries.length && hasPlatformBridge('replayFlush')) {
+          await bridge.replayFlush(merged).catch(() => {});
         }
         this.listeningCache = merged;
         return this.listeningCache;
@@ -1105,12 +1103,8 @@ export class StorageService implements IStorageService {
       this.listeningCache = history;
       await writeJsonAtomic(this.getListeningHistoryFilePath(), history);
 
-      const api =
-        typeof window !== 'undefined'
-          ? (window as any).electronAPI
-          : (globalThis as any).window?.electronAPI;
-      if (typeof api?.replayAppend === 'function') {
-        void Promise.resolve(api.replayAppend(finalEntry)).catch(() => {});
+      if (hasPlatformBridge('replayAppend')) {
+        void Promise.resolve(getPlatformBridge().replayAppend(finalEntry)).catch(() => {});
       }
 
       const deltaSec = Math.max(0, nextDur - prevDur);
@@ -1203,12 +1197,8 @@ export class StorageService implements IStorageService {
       this.listeningCache = history;
       await writeJsonAtomic(this.getListeningHistoryFilePath(), history);
 
-      const api =
-        typeof window !== 'undefined'
-          ? (window as any).electronAPI
-          : (globalThis as any).window?.electronAPI;
-      if (typeof api?.replayAppend === 'function') {
-        void Promise.resolve(api.replayAppend(entry)).catch(() => {});
+      if (hasPlatformBridge('replayAppend')) {
+        void Promise.resolve(getPlatformBridge().replayAppend(entry)).catch(() => {});
       }
 
       const monthly = await this.getMonthlyListeningHistory(yearMonth);
@@ -1335,12 +1325,8 @@ export class StorageService implements IStorageService {
       this.listeningCache = [];
       this.monthlyCache.clear();
 
-      const api =
-        typeof window !== 'undefined'
-          ? (window as any).electronAPI
-          : (globalThis as any).window?.electronAPI;
-      if (typeof api?.replayReset === 'function') {
-        void Promise.resolve(api.replayReset()).catch(() => {});
+      if (hasPlatformBridge('replayReset')) {
+        void Promise.resolve(getPlatformBridge().replayReset()).catch(() => {});
       }
 
       if (nodeFs && nodePath) {

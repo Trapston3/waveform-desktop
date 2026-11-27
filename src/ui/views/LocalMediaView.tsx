@@ -20,6 +20,7 @@ import { useSettingsStore } from '../../state/settingsStore';
 import { enrichLocalTracksInBackground } from '../../services/LocalMetadataEnricher';
 import { DesktopTrackTable } from '../components/DesktopTrackTable';
 import type { Song } from '../../models/Song';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 
 export interface LocalMediaViewProps {
   onOpenContextMenu?: (e: React.MouseEvent, song: Song) => void;
@@ -48,9 +49,11 @@ export const LocalMediaView: React.FC<LocalMediaViewProps> = memo(({ onOpenConte
     const trimmed = folder.trim();
     if (!trimmed) return;
     try {
-      const api = (window as any).electronAPI;
-      // Electron: real scan via main process; otherwise store falls back to its web preview scan.
-      const scanner = api?.scanLocalFolder ? { scanDirectory: (p: string) => api.scanLocalFolder(p) } : null;
+      const bridge = getPlatformBridge();
+      // Desktop host: real scan via main process; otherwise store falls back to its web preview scan.
+      const scanner = hasPlatformBridge('scanLocalFolder')
+        ? { scanDirectory: (p: string) => bridge.scanLocalFolder(p) }
+        : null;
       const scanned = await startLocalMediaScan(scanner as any, trimmed);
       if (Array.isArray(scanned) && scanned.length > 0) {
         void enrichLocalTracksInBackground(scanned, (videoId, patch) => {
@@ -72,7 +75,7 @@ export const LocalMediaView: React.FC<LocalMediaViewProps> = memo(({ onOpenConte
   const handleScan = () => runScan(folderPath);
 
   const handleBrowse = async () => {
-    const res = await (window as any).electronAPI?.selectLocalFolder?.();
+    const res = await getPlatformBridge().selectLocalFolder();
     if (!res || res.canceled || !res.folderPath) return;
     setFolderPath(res.folderPath);
     try {

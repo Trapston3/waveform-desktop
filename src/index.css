@@ -2,7 +2,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('./assets/fonts/sf_pro_display_regular.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -10,7 +10,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('./assets/fonts/sf_pro_display_medium.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_medium.woff2') format('woff2');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -18,7 +18,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('./assets/fonts/sf_pro_display_semibold.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_semibold.woff2') format('woff2');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
@@ -26,7 +26,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('./assets/fonts/sf_pro_display_bold.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_bold.woff2') format('woff2');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -34,7 +34,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('./assets/fonts/sf_pro_display_heavy.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_heavy.woff2') format('woff2');
   font-weight: 800;
   font-style: normal;
   font-display: swap;
@@ -42,7 +42,7 @@
 
 @font-face {
   font-family: 'SF Pro Display';
-  src: url('./assets/fonts/sf_pro_display_heavy.otf') format('opentype');
+  src: url('./assets/fonts/sf_pro_display_heavy.woff2') format('woff2');
   font-weight: 900;
   font-style: normal;
   font-display: swap;

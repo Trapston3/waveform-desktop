@@ -4,8 +4,8 @@
   <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, a Rust <code>napi-rs</code> Native Performance Core, Web Audio DSP, and 12 hardware-accelerated lyric visualizers.</strong></p>
 
   <p>
-    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.4"><img src="https://img.shields.io/badge/Release-v1.3.4-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.3.4" /></a>
-    <img src="https://img.shields.io/badge/Rust-napi--rs_Native_Core-DEA584?style=flat-square&logo=rust&logoColor=black" alt="Rust napi-rs Native Core" />
+    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.5"><img src="https://img.shields.io/badge/Release-v1.3.5-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.3.5" /></a>
+    <img src="https://img.shields.io/badge/Rust-waveform--core_Workspace-DEA584?style=flat-square&logo=rust&logoColor=black" alt="Rust waveform-core Workspace" />
     <img src="https://img.shields.io/badge/Electron-30.5.1-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
     <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React 19" />
     <img src="https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
@@ -15,7 +15,7 @@
 
 ---
 
-## Screenshots (`v1.3.4`)
+## Screenshots (`v1.3.5`)
 
 | Now Playing & Apple Music Fluid Mesh | iOS Group Chat + Kinetic Glow (`iosTextingMotion`) |
 | :---: | :---: |
@@ -29,9 +29,9 @@
 | :---: | :---: |
 | ![Studio DAW Timeline](docs/screenshots/09-visualizer-studio-daw.png) | ![Motion Geometry Constellation](docs/screenshots/10-visualizer-constellation.png) |
 
-| Code Editor Kinetic Visualizer | Arcane Spaceship 3D (Blasting & Scribbles) |
+| Code Editor Kinetic Visualizer | Starfield Ship 3D (Vaporwave & Arcane) |
 | :---: | :---: |
-| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![Arcane Spaceship 3D](docs/screenshots/04-visualizer-spaceship-3d.png) |
+| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![Starfield Ship 3D Vaporwave](docs/screenshots/04-visualizer-spaceship-3d.png) |
 
 | Lyrics Focus Mode (Minimal Controls) | 3D Cover Flow & Library |
 | :---: | :---: |
@@ -67,7 +67,7 @@ irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/in
 
 ### Direct `.exe` Download & Fast Delta Updater
 
-Grab [`WaveForm-Setup-1.3.4.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.4/WaveForm-Setup-1.3.4.exe) (NSIS installer) or [`WaveForm-Portable-1.3.4.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.4/WaveForm-Portable-1.3.4.exe) (standalone executable) from the [v1.3.4 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.4).
+Grab [`WaveForm-Setup-1.3.5.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.5/WaveForm-Setup-1.3.5.exe) (NSIS installer) or [`WaveForm-Portable-1.3.5.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.5/WaveForm-Portable-1.3.5.exe) (standalone executable) from the [v1.3.5 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.5).
 
 ### One-Click In-App Auto-Updater (`electron/appUpdater.ts`, `UpdatePromptModal.tsx`)
 
@@ -76,13 +76,13 @@ Grab [`WaveForm-Setup-1.3.4.exe`](https://github.com/Trapston3/waveform-desktop/
 
 ---
 
-## Native Rust Performance Core (`native/waveform-core`)
+## Native Rust Performance Core & Pre-Rust Bridge (`native/`, `src/platform/`)
 
-WaveForm v1.3.4 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
+WaveForm v1.3.5 splits its Rust workspace cleanly into pure Rust (`native/waveform-core`, `rlib` with zero `napi` dependencies) and thin N-API bindings (`native/waveform-napi` -> `waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`), paired with a typed `PlatformBridge` renderer boundary (`src/platform/`), lossless `.woff2` `SF Pro Display` fonts, and tracked baselines ([ROADMAP.md](ROADMAP.md) · [docs/PERF_BASELINE.md](docs/PERF_BASELINE.md)):
 
-- **SQLite AutoEQ Engine (`src/autoeq.rs`, `rusqlite` bundled)**: Indexes all 17,703 rows (8,850 parametric `PaP\x01` profiles) into a normalized accent/punctuation-stripped 36-bit bitmask + trigram index for sub-millisecond fuzzy search (`sony whch-720n` → `Sony WH-CH720N`) and Boundary-07 parametric filter decoding.
-- **Multi-Core Parallel Media Scanner (`src/scanner.rs`, `lofty` + `rayon` + `walkdir` + `sha2`)**: Scans local folders incrementally against cached `(path, mtimeMs, size)` diffs across all CPU cores, extracts tags, synced/unsynced lyrics (`USLT`/`SYLT`/`©lyr`/`LYRICS`), and writes content-addressed deduplicated cover art into `userData/artwork-cache/`.
-- **Real-Time DSP, FFT & Native ONNX ML Engine (`src/dsp.rs`, `src/onnx_engine.rs`, `realfft` + `ort`)**: Powers live RBJ/SVF 10-band EQ curves, 32-band spectra, and background-thread ONNX / STFT inference (`beat_this_final0_q8.onnx` & `vocals_umxhq_int8.onnx`) for neural PCM beat/downbeat detection (`onnx_analyze_track_beats_pcm`), vocal stem separation (`onnx_separate_vocals_pcm`), chorus hook detection, vocal-silence gap detection, and cross-correlation Auto-Lyric Sync (`estimate_lyric_offset_ms`).
+- **SQLite AutoEQ Engine (`native/waveform-core/src/autoeq.rs`, `rusqlite` bundled)**: Indexes all 17,703 rows (8,850 parametric `PaP\x01` profiles) into a normalized accent/punctuation-stripped 36-bit bitmask + trigram index for sub-millisecond fuzzy search (`sony whch-720n` → `Sony WH-CH720N`) and Boundary-07 parametric filter decoding.
+- **Multi-Core Parallel Media Scanner (`native/waveform-core/src/scanner.rs`, `lofty` + `rayon` + `walkdir` + `sha2`)**: Scans local folders incrementally against cached `(path, mtimeMs, size)` diffs across all CPU cores, extracts tags, synced/unsynced lyrics (`USLT`/`SYLT`/`©lyr`/`LYRICS`), and writes content-addressed deduplicated cover art into `userData/artwork-cache/`.
+- **Real-Time DSP, FFT & Native ONNX ML Engine (`native/waveform-core/src/dsp.rs`, `onnx_engine.rs`, `realfft` + `ort`)**: Powers live RBJ/SVF 10-band EQ curves, 32-band spectra, and background-thread ONNX / STFT inference (`beat_this_final0_q8.onnx` & `vocals_umxhq_int8.onnx`) for neural PCM beat/downbeat detection, vocal stem separation, chorus hook detection, vocal-silence gap detection, and cross-correlation Auto-Lyric Sync.
 
 ---
 
@@ -97,9 +97,9 @@ WaveForm v1.3.4 compiles a native Windows x64 `napi-rs` addon (`waveform-core.wi
 - **68-Bar Waveform & Live PCM Visualizer (`WaveformExtractor.ts`, `LiveVisualizer.ts`, `WaveformCanvasSeekbar.tsx`)**: Hardware-accelerated High-DPI canvas seekbar with optimistic seek latching.
 
 ### LyricVisualizer Subsystem (`src/lyricVisualizer/`, `electron/lyricVisualizerPlatform.ts`)
-- **Creator Studio (`v1.3.4`) — 12 Consolidated Visualizers, 15s Clip Export & Word Micro-FX**: Exports 15s (`16:9` / `9:16` / `1:1`) WebM clips with synced audio via `MediaRecorder`, imports/exports JSON style presets, renders semantic `wordIconDictionary` icons & micro-animations across every theme, and ensures edge-safe Beat Camera Thump overscan.
-- **Flagship iOS Native Design (`IosTextingMotion`)**: Four flagship modes — `Messages` (with Kinetic Pop-up Mode & Zoom), `Liquid Glass`, `Group Chat` (colorful avatar PFPs + active luminescence), and Three.js `2.5D Navigation Map` with genre-aware biomes (`Cityscape` / `Highway` / `Countryside`) & time-of-day lighting.
-- **Arcane Spaceship 3D, Solari Split-Flap & Studio DAW**: Reworked 3D starfighter with same-altitude word spawns, multi-piece asteroid shattering revealing hidden lyrics, and Arcane neon scribble overlays, alongside OKLCH album-art-matched `Solari Split-Flap` and `Studio DAW Timeline`.
+- **Visual Craft & Pre-Rust Bridge (`v1.3.5`)**: Seamless full-bleed Split View (feathered scrim, zero vertical seam), Spatial 3D Z-thump perspective camera, 1:1 Apple Maps / CarPlay `Cityscape` / `Highway` / `Countryside` biomes with `Auto | Night | Sunset | Day` lighting and turning CarPlay sedan, plus `StarfieldShip3D` `Vaporwave` Outrun shader stage. Exports 15s (`16:9` / `9:16` / `1:1`) WebM clips with synced audio via `MediaRecorder`, imports/exports JSON style presets, and renders semantic `wordIconDictionary` icons & micro-animations across every theme.
+- **Flagship iOS Native Design (`IosTextingMotion`)**: Four flagship modes — `Messages` (with Kinetic Pop-up Mode & Zoom), `Liquid Glass`, `Group Chat` (colorful avatar PFPs + active luminescence), and Three.js `2.5D Navigation Map` (`Cityscape` / `Highway` / `Countryside`) with CarPlay turn-by-turn lane guidance & telemetry pills.
+- **Starfield Ship 3D (`Vaporwave`, `Deep Space`, `Nebula Run`, `Retro Wireframe`), Solari Split-Flap & Studio DAW**: Reworked 3D starfighter with Outrun sun/grid horizon, same-altitude word spawns, multi-piece asteroid shattering revealing hidden lyrics, and Arcane neon scribble overlays, alongside OKLCH album-art-matched `Solari Split-Flap` and `Studio DAW Timeline`.
 - **Multi-Surface Windows Guards**: Embeds in `NowPlayingScreen` (with unified **Studio Tools** popover & decluttered context menu), multi-monitor click-through Desktop Overlays (`#/overlay`), and Fullscreen Ambient Mode (`#/ambient`) with `KeepAwake`, fullscreen game suppression, and lock-screen `0%` GPU suspend. See [DECISIONS.md](DECISIONS.md).
 
 ### Power Tools, Offline Pinning & Practice Suite (`v1.3.2`)

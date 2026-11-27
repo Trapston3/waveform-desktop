@@ -1,0 +1,16 @@
+[package]
+name = "waveform-napi"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2.16.17", features = ["napi8", "async"] }
+napi-derive = "2.16.13"
+waveform-core = { path = "../waveform-core" }
+
+[build-dependencies]
+napi-build = "2.1"

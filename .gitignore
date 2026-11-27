@@ -32,5 +32,6 @@ Thumbs.db
 .idea/
 
 # Rust native core build artifacts
+native/target/
 native/waveform-core/target/
 native/waveform-core/*.node

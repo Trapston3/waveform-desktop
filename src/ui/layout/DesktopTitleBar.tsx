@@ -17,19 +17,7 @@ import {
 import { useThemeStore } from '../theme/Theme';
 import { useNavigationStore } from '../../state/navigationStore';
 import { useUpdateStore } from '../../state/settingsStore';
-
-declare global {
-  interface Window {
-    electronAPI?: {
-      minimize: () => Promise<void>;
-      maximize: () => Promise<void>;
-      close: () => Promise<void>;
-      isMaximized: () => Promise<boolean>;
-      onMaximizedChange: (callback: (isMaximized: boolean) => void) => () => void;
-      platform: string;
-    };
-  }
-}
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 
 export const DesktopTitleBar: React.FC = () => {
   const [isMaximized, setIsMaximized] = useState(false);
@@ -56,22 +44,23 @@ export const DesktopTitleBar: React.FC = () => {
           : `Update v${updateState.latestVersion || ''}`;
 
   useEffect(() => {
-    if (window.electronAPI?.isMaximized) {
-      window.electronAPI.isMaximized().then(setIsMaximized);
+    const bridge = getPlatformBridge();
+    if (hasPlatformBridge('isMaximized')) {
+      bridge.isMaximized().then(setIsMaximized);
     }
 
-    if (window.electronAPI?.onMaximizedChange) {
-      const unsubscribe = window.electronAPI.onMaximizedChange((max) => {
+    if (hasPlatformBridge('onMaximizedChange')) {
+      const unsubscribe = bridge.onMaximizedChange((max) => {
         setIsMaximized(max);
       });
       return () => unsubscribe();
     }
   }, []);
 
-  const handleMinimize = () => window.electronAPI?.minimize();
-  const handleMaximize = () => window.electronAPI?.maximize();
-  const handleClose = () => window.electronAPI?.close();
-  const isMac = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin';
+  const handleMinimize = () => void getPlatformBridge().minimize();
+  const handleMaximize = () => void getPlatformBridge().maximize();
+  const handleClose = () => void getPlatformBridge().close();
+  const isMac = hasPlatformBridge() && getPlatformBridge().platform === 'darwin';
 
   return (
     <header className="relative app-drag-region flex items-center justify-between h-10 md:h-12 pl-3 pr-0 border-b border-[var(--glass-border-subtle)] bg-[rgba(242,242,247,0.85)] dark:bg-[rgba(16,16,20,0.75)] backdrop-blur-xl text-[var(--color-primary)] select-none z-[60]">

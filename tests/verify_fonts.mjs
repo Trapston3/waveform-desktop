@@ -31,12 +31,12 @@ console.log('--- Parsed @font-face rules from src/index.css ---');
 console.table(faces);
 
 const expectedWeights = [
-  { weight: 400, expectedFile: 'sf_pro_display_regular.otf', label: 'Regular' },
-  { weight: 500, expectedFile: 'sf_pro_display_medium.otf', label: 'Medium' },
-  { weight: 600, expectedFile: 'sf_pro_display_semibold.otf', label: 'Semibold' },
-  { weight: 700, expectedFile: 'sf_pro_display_bold.otf', label: 'Bold' },
-  { weight: 800, expectedFile: 'sf_pro_display_heavy.otf', label: 'Heavy (800)' },
-  { weight: 900, expectedFile: 'sf_pro_display_heavy.otf', label: 'Heavy (900)' },
+  { weight: 400, expectedFile: 'sf_pro_display_regular.woff2', label: 'Regular' },
+  { weight: 500, expectedFile: 'sf_pro_display_medium.woff2', label: 'Medium' },
+  { weight: 600, expectedFile: 'sf_pro_display_semibold.woff2', label: 'Semibold' },
+  { weight: 700, expectedFile: 'sf_pro_display_bold.woff2', label: 'Bold' },
+  { weight: 800, expectedFile: 'sf_pro_display_heavy.woff2', label: 'Heavy (800)' },
+  { weight: 900, expectedFile: 'sf_pro_display_heavy.woff2', label: 'Heavy (900)' },
 ];
 
 const sfPro = faces.filter((f) => f.family === 'SF Pro Display');
@@ -69,7 +69,7 @@ const distCssContent = fs.readFileSync(path.join(distAssetsDir, distCss), 'utf-8
 console.log(`\n--- Verifying Compiled Bundle: dist/assets/${distCss} ---`);
 
 for (const exp of expectedWeights) {
-  const baseName = exp.expectedFile.replace('.otf', '');
+  const baseName = exp.expectedFile.replace('.woff2', '');
   assert.ok(
     distCssContent.includes(baseName),
     `Compiled bundle does not contain reference to ${baseName}`

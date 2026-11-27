@@ -9,6 +9,7 @@ files:
   - "!dist/assets/data/**"
   - dist-electron/**/*
   - native/waveform-core/*.node
+  - "!native/target/**"
   - "!native/waveform-core/target/**"
   - build/icon.ico
   - build/icon.png

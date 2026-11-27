@@ -5,6 +5,7 @@
 // 3) TheAudioDB (strArtistLogo transparent PNG, strArtistFanart / strArtistBanner)
 
 import { universalFetch } from './InnerTubeClient';
+import { hasPlatformBridge } from '../platform/index';
 
 export interface AppleArtistArt {
   heroUrl: string | null;
@@ -61,7 +62,7 @@ export function toProxiedArtistImageUrl(url: string | null | undefined): string 
     return trimmed;
   }
   if (/^https?:\/\//i.test(trimmed)) {
-    if (typeof window !== 'undefined' && Boolean((window as any).electronAPI)) {
+    if (hasPlatformBridge()) {
       return `waveform-local://artist-art?url=${encodeURIComponent(trimmed)}`;
     }
     return trimmed;

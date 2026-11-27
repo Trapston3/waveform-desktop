@@ -22,6 +22,7 @@ import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore } from '../../state/queueStore';
 import { useSettingsStore } from '../../state/settingsStore';
 import { saveSyncSession } from '../../utils/sessionPersistence';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 
 const DISCORD_SETTING_KEYS = [
   'scrobble.discordRpcEnabled',
@@ -365,8 +366,8 @@ export function useAudioController() {
 
   // 3B-2. Native Last.fm & ListenBrainz Scrobbling lifecycle + Settings sync
   useEffect(() => {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
-    if (!api) return;
+    if (!hasPlatformBridge()) return;
+    const api = getPlatformBridge();
 
     const pushScrobbleConfig = (s: AppSettings) => {
       void api.scrobbleConfigure?.({
@@ -497,8 +498,8 @@ export function useAudioController() {
 
   // 3B-3. Customizable Global Hotkeys sync & action dispatcher
   useEffect(() => {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
-    if (!api) return;
+    if (!hasPlatformBridge()) return;
+    const api = getPlatformBridge();
 
     const pushHotkeys = (s: AppSettings) => {
       void api.hotkeysConfigure?.({
@@ -553,7 +554,7 @@ export function useAudioController() {
 
   // 3C. Tray playback commands & minimize/close-to-tray behavior sync
   useEffect(() => {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    const api = hasPlatformBridge() ? getPlatformBridge() : undefined;
     const syncTrayBehavior = (settings: AppSettings) => {
       void api?.setTrayBehavior?.({
         minimizeToTray: Boolean(settings['ui.minimizeToTray']),

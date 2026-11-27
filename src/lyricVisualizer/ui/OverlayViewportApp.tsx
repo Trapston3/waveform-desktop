@@ -6,6 +6,7 @@
 // Renders zero opaque chrome when click-through locked, and a subtle drag/control bar when unlocked.
 
 import React, { useEffect, useRef } from 'react';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import { ChevronLeft, ChevronRight, Lock, Move, Sparkles, X } from 'lucide-react';
 import {
   type AudioFrameMetrics,
@@ -84,7 +85,7 @@ export const OverlayViewportApp: React.FC = () => {
 
   // Subscribe to IPC broadcast state, request initial snapshot, and listen to platform events
   useEffect(() => {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+    const api = hasPlatformBridge() ? getPlatformBridge() : undefined;
 
     const handleIncomingPayload = (payload: LyricVisualizerBroadcastPayload) => {
       if (!payload || typeof payload !== 'object') return;

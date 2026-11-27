@@ -3,6 +3,7 @@
 // with deterministic TypeScript fallbacks for tests and browser-only environments.
 
 import { deriveBarsFromBeatAnalysis } from '../utils/practiceLoop';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export interface TimeRange {
   startSec: number;
@@ -39,8 +40,7 @@ export interface LyricAutoSyncResult {
 }
 
 function getElectronApi(): any | null {
-  if (typeof window === 'undefined') return null;
-  return (window as any).electronAPI ?? null;
+  return hasPlatformBridge() ? getPlatformBridge() : null;
 }
 
 /**

@@ -4,6 +4,7 @@
 import { create } from 'zustand';
 import type { Song } from '../models/Song';
 import { StreamResolver } from './StreamResolver';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export interface OfflineCacheStatsState {
   limitBytes: number;
@@ -44,7 +45,7 @@ const DEFAULT_STATS: OfflineCacheStatsState = {
 };
 
 function getApi(): any {
-  return typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+  return hasPlatformBridge() ? getPlatformBridge() : undefined;
 }
 
 function applyStats(
@@ -63,10 +64,9 @@ export const useOfflineCacheStore = create<OfflineCacheStoreState>((set, get) =>
   lastError: null,
 
   refreshStats: async () => {
-    const api = getApi();
-    if (typeof api?.offlineCacheGetStats !== 'function') return null;
+    if (!hasPlatformBridge('offlineCacheGetStats')) return null;
     try {
-      const stats = await api.offlineCacheGetStats();
+      const stats = await getPlatformBridge().offlineCacheGetStats();
       applyStats(set, stats);
       return stats;
     } catch {
@@ -75,10 +75,9 @@ export const useOfflineCacheStore = create<OfflineCacheStoreState>((set, get) =>
   },
 
   setLimitGb: async (gb: number) => {
-    const api = getApi();
-    if (typeof api?.offlineCacheSetLimitGb !== 'function') return null;
+    if (!hasPlatformBridge('offlineCacheSetLimitGb')) return null;
     try {
-      const stats = await api.offlineCacheSetLimitGb(gb);
+      const stats = await getPlatformBridge().offlineCacheSetLimitGb(gb);
       applyStats(set, stats);
       return stats;
     } catch {
@@ -87,10 +86,9 @@ export const useOfflineCacheStore = create<OfflineCacheStoreState>((set, get) =>
   },
 
   clearUnpinnedCache: async () => {
-    const api = getApi();
-    if (typeof api?.offlineCacheClearUnpinned !== 'function') return null;
+    if (!hasPlatformBridge('offlineCacheClearUnpinned')) return null;
     try {
-      const res = await api.offlineCacheClearUnpinned();
+      const res = await getPlatformBridge().offlineCacheClearUnpinned();
       if (res?.stats) applyStats(set, res.stats);
       return {
         removedCount: Number(res?.removedCount) || 0,
@@ -103,8 +101,8 @@ export const useOfflineCacheStore = create<OfflineCacheStoreState>((set, get) =>
 
   pinTrack: async (track: Song) => {
     const trackId = track?.videoId || track?.id || '';
+    if (!trackId || !hasPlatformBridge('offlineCachePin')) return false;
     const api = getApi();
-    if (!trackId || typeof api?.offlineCachePin !== 'function') return false;
 
     set((s) => ({
       pinningIds: s.pinningIds.includes(trackId) ? s.pinningIds : [...s.pinningIds, trackId],
@@ -141,10 +139,9 @@ export const useOfflineCacheStore = create<OfflineCacheStoreState>((set, get) =>
   },
 
   unpinTrack: async (trackId: string) => {
-    const api = getApi();
-    if (!trackId || typeof api?.offlineCacheUnpin !== 'function') return false;
+    if (!trackId || !hasPlatformBridge('offlineCacheUnpin')) return false;
     try {
-      const stats = await api.offlineCacheUnpin(trackId);
+      const stats = await getPlatformBridge().offlineCacheUnpin(trackId);
       applyStats(set, stats);
       return true;
     } catch {
@@ -180,11 +177,9 @@ export const OfflineCacheService = {
     sizeBytes: number;
     mimeType?: string;
   } | null> {
-    if (!trackId) return null;
-    const api = getApi();
-    if (typeof api?.offlineCacheResolve !== 'function') return null;
+    if (!trackId || !hasPlatformBridge('offlineCacheResolve')) return null;
     try {
-      const res = await api.offlineCacheResolve(trackId);
+      const res = await getPlatformBridge().offlineCacheResolve(trackId);
       if (res?.url) return res;
     } catch {
       // Cache lookup miss

@@ -3,6 +3,7 @@
 // multi-monitor overlay state, ambient mode, OKLCH palette, and Electron IPC sync.
 
 import { create } from 'zustand';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import {
   type AudioFrameMetrics,
   BUNDLED_FONTS,
@@ -35,6 +36,7 @@ import {
 } from '../core';
 import { exportStylePresetJson, parseStylePresetJson } from '../export/lyricClipExporter';
 import { getSharedWaveFormPlaybackBridge } from '../bridge/waveFormPlaybackBridge';
+import { registerLyricVisualizerStore } from '../../state/settingsStore';
 
 const STORAGE_KEY = 'waveform.lyricVisualizer.v1';
 
@@ -158,13 +160,7 @@ export interface LyricVisualizerState {
 }
 
 function getElectronApi(): any {
-  if (typeof window !== 'undefined' && (window as any).electronAPI) {
-    return (window as any).electronAPI;
-  }
-  if (typeof globalThis !== 'undefined' && (globalThis as any).window?.electronAPI) {
-    return (globalThis as any).window.electronAPI;
-  }
-  return undefined;
+  return hasPlatformBridge() ? getPlatformBridge() : undefined;
 }
 
 export function clampFontSizeScale(scale: number): number {
@@ -924,10 +920,9 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     });
 
     if (!key) return;
-    const api = getElectronApi();
-    if (typeof api?.lvGetSongOffset === 'function') {
+    if (hasPlatformBridge('lvGetSongOffset')) {
       try {
-        const remoteOffset = await api.lvGetSongOffset(key);
+        const remoteOffset = await getPlatformBridge().lvGetSongOffset(key);
         if (typeof remoteOffset === 'number' && Number.isFinite(remoteOffset)) {
           const clamped = clampOffsetMs(remoteOffset);
           set((s) => {
@@ -1116,10 +1111,9 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
   },
 
   refreshMonitors: async (): Promise<MonitorDescriptor[]> => {
-    const api = getElectronApi();
-    if (typeof api?.lvGetMonitors === 'function') {
+    if (hasPlatformBridge('lvGetMonitors')) {
       try {
-        const list = await api.lvGetMonitors();
+        const list = await getPlatformBridge().lvGetMonitors();
         if (Array.isArray(list) && list.length > 0) {
           set({ availableMonitors: list });
           return list;
@@ -1144,12 +1138,12 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     get().broadcastSnapshot(undefined, true);
     const api = getElectronApi();
     try {
-      if (typeof api?.setFullscreen === 'function') {
+      if (hasPlatformBridge('setFullscreen')) {
         await api.setFullscreen(true);
-        if (typeof api?.lvSetKeepAwake === 'function') {
+        if (hasPlatformBridge('lvSetKeepAwake')) {
           await api.lvSetKeepAwake(Boolean(config.keepAwakeInAmbient));
         }
-      } else if (typeof api?.lvOpenAmbient === 'function') {
+      } else if (hasPlatformBridge('lvOpenAmbient')) {
         await api.lvOpenAmbient(config.keepAwakeInAmbient);
       } else if (typeof document !== 'undefined' && typeof document.documentElement?.requestFullscreen === 'function') {
         await document.documentElement.requestFullscreen().catch(() => {});
@@ -1177,12 +1171,12 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     });
     const api = getElectronApi();
     try {
-      if (typeof api?.setFullscreen === 'function') {
+      if (hasPlatformBridge('setFullscreen')) {
         await api.setFullscreen(false);
-        if (typeof api?.lvSetKeepAwake === 'function') {
+        if (hasPlatformBridge('lvSetKeepAwake')) {
           await api.lvSetKeepAwake(false);
         }
-      } else if (typeof api?.lvCloseAmbient === 'function') {
+      } else if (hasPlatformBridge('lvCloseAmbient')) {
         await api.lvCloseAmbient();
       } else if (typeof document !== 'undefined' && document.fullscreenElement) {
         await document.exitFullscreen?.().catch(() => {});
@@ -1512,3 +1506,5 @@ export const useLyricVisualizerStore = create<LyricVisualizerState>((set, get) =
     }
   },
 }));
+
+registerLyricVisualizerStore(useLyricVisualizerStore);

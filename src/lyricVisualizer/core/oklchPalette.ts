@@ -1,4 +1,5 @@
 import type { LyricPalette } from './models';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 
 export interface RgbColor {
   readonly r: number;
@@ -693,11 +694,8 @@ export async function extractPaletteFromArtworkUrl(url: string): Promise<LyricPa
 
   const task = (async (): Promise<LyricPalette> => {
     try {
-      const electronApi = typeof window !== 'undefined' ? (window as any)?.electronAPI : undefined;
-      const getArtworkPixels = electronApi?.getArtworkPixels;
-
-      if (typeof getArtworkPixels === 'function') {
-        const pixels = await getArtworkPixels(trimmedUrl);
+      if (hasPlatformBridge('getArtworkPixels')) {
+        const pixels = await getPlatformBridge().getArtworkPixels(trimmedUrl);
         if (pixels && pixels.rgba && pixels.width > 0 && pixels.height > 0) {
           const palette = extractPaletteFromPixels(pixels.rgba, pixels.width, pixels.height);
           if (!palette.isFallback) {
@@ -713,7 +711,7 @@ export async function extractPaletteFromArtworkUrl(url: string): Promise<LyricPa
       }
 
       const loadUrl =
-        electronApi && (trimmedUrl.startsWith('http://') || trimmedUrl.startsWith('https://'))
+        hasPlatformBridge() && (trimmedUrl.startsWith('http://') || trimmedUrl.startsWith('https://'))
           ? `waveform-local://artist-art?url=${encodeURIComponent(trimmedUrl)}`
           : trimmedUrl;
 

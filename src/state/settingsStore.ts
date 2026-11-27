@@ -7,6 +7,7 @@ import type { AppSettings } from '../models/Settings';
 import { defaultAppSettings, mergeSettings } from '../models/Settings';
 import { StorageService } from '../services/StorageService';
 import { applyThemeSettings } from '../ui/theme/Theme';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 import type { useLyricVisualizerStore as UseLyricVisualizerStoreType } from '../lyricVisualizer/state/lyricVisualizerStore';
 
 export interface SettingsState {
@@ -92,30 +93,25 @@ function attachVisualizerSubscription(vizStore: typeof UseLyricVisualizerStoreTy
   });
 }
 
-async function ensureVizStore(): Promise<typeof UseLyricVisualizerStoreType | null> {
-  if (cachedVizStore) return cachedVizStore;
-  try {
-    const mod = await import('../lyricVisualizer/state/lyricVisualizerStore');
-    if (mod?.useLyricVisualizerStore) {
-      attachVisualizerSubscription(mod.useLyricVisualizerStore);
-      return mod.useLyricVisualizerStore;
-    }
-  } catch {
-    // Ignore in isolated mock environments
+export function registerLyricVisualizerStore(vizStore: typeof UseLyricVisualizerStoreType): void {
+  if (!vizStore) return;
+  attachVisualizerSubscription(vizStore);
+  const current = useSettingsStore.getState().settings;
+  if (current) {
+    pushSettingsToVisualizer(current);
   }
-  return null;
+}
+
+async function ensureVizStore(): Promise<typeof UseLyricVisualizerStoreType | null> {
+  return cachedVizStore;
 }
 
 function pushTrayBehavior(updated: AppSettings): void {
   try {
-    const api =
-      typeof window !== 'undefined'
-        ? (window as any).electronAPI
-        : (globalThis as any).window?.electronAPI;
-    if (typeof api?.setTrayBehavior !== 'function') return;
+    if (!hasPlatformBridge('setTrayBehavior')) return;
 
     Promise.resolve(
-      api.setTrayBehavior({
+      getPlatformBridge().setTrayBehavior({
         minimizeToTray: Boolean(updated['ui.minimizeToTray']),
         closeToTray: Boolean(updated['ui.closeToTray']),
       })
@@ -127,11 +123,7 @@ function pushTrayBehavior(updated: AppSettings): void {
 
 function pushDiscordRpcConfig(updated: AppSettings): void {
   try {
-    const api =
-      typeof window !== 'undefined'
-        ? (window as any).electronAPI
-        : (globalThis as any).window?.electronAPI;
-    if (typeof api?.discordRpcConfigure !== 'function') return;
+    if (!hasPlatformBridge('discordRpcConfigure')) return;
 
     const rawClientId =
       typeof updated['scrobble.discordClientId'] === 'string'
@@ -140,7 +132,7 @@ function pushDiscordRpcConfig(updated: AppSettings): void {
     const showQualityAndButtons = Boolean(updated['scrobble.discordShowQualityAndButtons']);
 
     Promise.resolve(
-      api.discordRpcConfigure({
+      getPlatformBridge().discordRpcConfigure({
         enabled: Boolean(updated['scrobble.discordRpcEnabled']),
         clientId: rawClientId || defaultAppSettings['scrobble.discordClientId'],
         displayFormat:
@@ -398,9 +390,7 @@ const DEFAULT_UPDATE_STATE: AppUpdateState = {
 };
 
 function getElectronApi(): any {
-  return typeof window !== 'undefined'
-    ? (window as any).electronAPI
-    : (globalThis as any).window?.electronAPI;
+  return hasPlatformBridge() ? getPlatformBridge() : undefined;
 }
 
 let updaterInitialized = false;

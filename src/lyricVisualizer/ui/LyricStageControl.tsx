@@ -5,6 +5,7 @@
 // and right-click VisualizerContextMenu integration.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import { Sparkles } from 'lucide-react';
 import {
   type AudioFrameMetrics,
@@ -173,19 +174,18 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
   // Initialize LyricsPipeline with Electron IPC disk cache adapter
   useEffect(() => {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
     pipelineRef.current = new LyricsPipeline({
       enableLrclibFallback: true,
       cache: {
         getCachedLyrics: async (songKey: string) => {
-          if (typeof api?.lvGetLyricsCache === 'function') {
-            return (await api.lvGetLyricsCache(songKey)) ?? null;
+          if (hasPlatformBridge('lvGetLyricsCache')) {
+            return (await getPlatformBridge().lvGetLyricsCache(songKey)) ?? null;
           }
           return null;
         },
         setCachedLyrics: async (songKey: string, lyrics: Lyrics) => {
-          if (typeof api?.lvSetLyricsCache === 'function') {
-            await api.lvSetLyricsCache(songKey, lyrics);
+          if (hasPlatformBridge('lvSetLyricsCache')) {
+            await getPlatformBridge().lvSetLyricsCache(songKey, lyrics);
           }
         },
       },
@@ -194,8 +194,8 @@ export const LyricStageControl: React.FC<LyricStageControlProps> = ({
 
   // Subscribe to Electron platform events (lock-screen 0% GPU pause, game guard, idle ambient)
   useEffect(() => {
-    const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
-    if (typeof api?.onLvPlatformEvent !== 'function') return;
+    if (!hasPlatformBridge('onLvPlatformEvent')) return;
+    const api = getPlatformBridge();
 
     const unsub = api.onLvPlatformEvent((evt: { type: string; data?: any }) => {
       if (!evt || typeof evt !== 'object') return;

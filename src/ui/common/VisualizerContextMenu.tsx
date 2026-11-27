@@ -3,6 +3,7 @@
 // Viewport-clamped with flipSubmenuLeft, Escape/outside-click close, and cascading submenus.
 
 import React, { useEffect, useRef, useState } from 'react';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import {
   Activity,
   AlignCenter,
@@ -1202,8 +1203,8 @@ export const VisualizerContextMenu: React.FC<VisualizerContextMenuProps> = ({
                 resetAutoSyncOffsetMs();
                 setAutoSyncMessage(null);
                 const tKey = usePlayerStore.getState().currentTrack?.videoId || activeTrack?.id || '';
-                if (tKey) {
-                  void (window as any)?.electronAPI?.setCustomLyricsOffset?.(tKey, 0)?.catch?.(() => {});
+                if (tKey && hasPlatformBridge('setCustomLyricsOffset')) {
+                  void getPlatformBridge().setCustomLyricsOffset(tKey, 0).catch(() => {});
                 }
               }}
               className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors text-left cursor-pointer"

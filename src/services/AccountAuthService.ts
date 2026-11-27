@@ -1,5 +1,6 @@
-// Renderer-side API for YouTube Music / Spotify account login & playlist loading (Electron IPC; no-op on web).
+// Renderer-side API for YouTube Music / Spotify account login & playlist loading (PlatformBridge IPC; no-op on web).
 import type { Song } from '../models/Song';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export type AccountProvider = 'ytmusic' | 'spotify';
 export interface AccountStatus { connected: boolean; displayName?: string }
@@ -14,7 +15,7 @@ export interface SpotifyPlaylistItem {
   owner: string;
 }
 
-const api = () => (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
+const api = () => (hasPlatformBridge() ? getPlatformBridge() : undefined);
 const none: AccountAuthStatus = { ytmusic: { connected: false }, spotify: { connected: false } };
 let cachedSpotifyPlaylists: SpotifyPlaylistItem[] | null = null;
 

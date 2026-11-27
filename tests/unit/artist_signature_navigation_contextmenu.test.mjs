@@ -339,7 +339,7 @@ test('ContextMenu, LeftSidebar, DesktopTitleBar darwin traffic-light gating, Art
   assert.match(sb, /dark:text-white text-black/);
 
   const tb = r('src/ui/layout/DesktopTitleBar.tsx');
-  assert.match(tb, /window\.electronAPI\?\.platform === 'darwin'/);
+  assert.match(tb, /getPlatformBridge\(\)\.platform === 'darwin'/);
   assert.match(tb, /\{isMac && \(/);
   assert.match(tb, /h-10/);
   assert.match(tb, /w-7 h-7/);

@@ -23,6 +23,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import type { Song } from '../../models/Song';
+import { getPlatformBridge, hasPlatformBridge } from '../../platform/index';
 import { usePlayerStore } from '../../state/playerStore';
 import { useQueueStore, type QueueTierType } from '../../state/queueStore';
 import {
@@ -608,9 +609,9 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   };
 
   const handleShowInFolder = () => {
-    if (typeof window !== 'undefined' && (window as any).electronAPI?.showItemInFolder) {
+    if (hasPlatformBridge('showItemInFolder')) {
       const streamUrl = track.streamUrl || '';
-      (window as any).electronAPI.showItemInFolder(streamUrl);
+      void getPlatformBridge().showItemInFolder(streamUrl);
     }
     onClose();
   };

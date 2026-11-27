@@ -8,6 +8,7 @@ import {
   transliterateToLatin,
 } from '../utils/transliterate';
 import { isBlankOrInstrumentalLineText } from '../lyricVisualizer/core/lrcParser';
+import { getPlatformBridge, hasPlatformBridge } from '../platform/index';
 
 export interface LyricSyllable {
   text: string;
@@ -867,13 +868,10 @@ export class LyricsService {
         } catch {}
       }
 
-      const api =
-        typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
-
       // Tier 3: NetEase Cloud Music (synced LRC)
-      if (title && typeof api?.searchNetEaseLyrics === 'function') {
+      if (title && hasPlatformBridge('searchNetEaseLyrics')) {
         try {
-          const ne = await api.searchNetEaseLyrics({ title, artist, durationSec: rawDuration });
+          const ne = await getPlatformBridge().searchNetEaseLyrics({ title, artist, durationSec: rawDuration });
           if (ne?.syncedLyrics && /\[\d{1,3}:\d{2}/.test(ne.syncedLyrics)) {
             const built = buildSyncedLrc(ne.syncedLyrics, 'NetEase');
             if (built) return built;
@@ -884,9 +882,9 @@ export class LyricsService {
       }
 
       // Tier 4: Kugou Music (synced LRC)
-      if (title && typeof api?.searchKugouLyrics === 'function') {
+      if (title && hasPlatformBridge('searchKugouLyrics')) {
         try {
-          const kg = await api.searchKugouLyrics({ title, artist, durationSec: rawDuration });
+          const kg = await getPlatformBridge().searchKugouLyrics({ title, artist, durationSec: rawDuration });
           if (kg?.syncedLyrics && /\[\d{1,3}:\d{2}/.test(kg.syncedLyrics)) {
             const built = buildSyncedLrc(kg.syncedLyrics, 'KuGou');
             if (built) return built;

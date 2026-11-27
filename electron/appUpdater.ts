@@ -40,6 +40,7 @@ export interface AppUpdateState {
   updateStrategy?: 'direct_patch' | 'full_installer';
   deltaChangedCount?: number | null;
   deltaRemovedCount?: number | null;
+  updatedFromVersion?: string | null;
   dismissedThisSession: boolean;
   progress: AppUpdateProgress | null;
   error: string | null;
@@ -90,6 +91,8 @@ export interface DeltaUpdatePlan {
 export interface AppUpdaterControllerOptions {
   fetchFn?: typeof fetch;
   currentVersion: string;
+  updatedFromVersion?: string | null;
+  isPortable?: boolean;
   tempDir?: string;
   installDir?: string;
   relaunchExePath?: string;
@@ -106,6 +109,72 @@ export interface AppUpdaterControllerOptions {
   githubRepo?: string;
   checkTimeoutMs?: number;
   quitDelayMs?: number;
+}
+
+export interface InstalledAppVersionInfo {
+  version: string;
+  electronVersion: string | null;
+}
+
+export function readInstalledAppVersionInfo(
+  installDir?: string,
+  fallbackVersion = '0.0.0'
+): InstalledAppVersionInfo {
+  const resolvedInstallDir = installDir || path.dirname(process.execPath);
+  const candidates = [
+    path.join(resolvedInstallDir, 'resources', 'app-version.json'),
+    path.join(resolvedInstallDir, 'app-version.json'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const parsed = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+      const ver = typeof parsed?.version === 'string' ? parsed.version.trim().replace(/^[vV]/, '') : '';
+      const electronVersion =
+        typeof parsed?.electronVersion === 'string' && parsed.electronVersion.trim()
+          ? parsed.electronVersion.trim()
+          : null;
+      if (ver) {
+        return { version: ver, electronVersion };
+      }
+    } catch {
+      // Try next fallback
+    }
+  }
+
+  const pkgCandidates = [
+    path.join(resolvedInstallDir, 'resources', 'app.asar', 'package.json'),
+    path.join(resolvedInstallDir, 'resources', 'app', 'package.json'),
+    path.join(resolvedInstallDir, 'package.json'),
+  ];
+  for (const pkgPath of pkgCandidates) {
+    try {
+      if (!fs.existsSync(pkgPath)) continue;
+      const parsed = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      const ver = typeof parsed?.version === 'string' ? parsed.version.trim().replace(/^[vV]/, '') : '';
+      const electronVersion =
+        typeof parsed?.devDependencies?.electron === 'string'
+          ? parsed.devDependencies.electron.trim().replace(/^[\^~>=<\s]+/, '')
+          : process.versions?.electron || null;
+      if (ver) {
+        return { version: ver, electronVersion };
+      }
+    } catch {
+      // Try next fallback
+    }
+  }
+
+  return {
+    version: String(fallbackVersion || '0.0.0').trim().replace(/^[vV]/, '') || '0.0.0',
+    electronVersion: process.versions?.electron || null,
+  };
+}
+
+/**
+ * Returns authoritative installed version from resources/app-version.json -> app.asar/package.json -> fallbackVersion.
+ */
+export function getInstalledAppVersion(installDir?: string, fallbackVersion = '0.0.0'): string {
+  return readInstalledAppVersionInfo(installDir, fallbackVersion).version;
 }
 
 interface ParsedSemVer {
@@ -237,33 +306,89 @@ function normalizeWinManifestRelPath(relPath: string): string {
   return String(relPath || '').trim().replace(/\//g, '\\').replace(/^\\+/, '');
 }
 
+export interface ParsedInstallManifestMeta {
+  version: string | null;
+  electronVersion: string | null;
+  entries: Map<string, ManifestEntry>;
+}
+
 /**
- * Parses resources/install-manifest.tsv (`version\tsize\tsha256\trelPath`) into Map<relPath, ManifestEntry>.
+ * Parses resources/install-manifest.tsv (supports both 3-column `relPath\tsha256\tsize`
+ * and legacy 4-column `version\tsize\tsha256\trelPath`) with optional header metadata.
  */
-export function parseInstallManifest(tsv: string): Map<string, ManifestEntry> {
+export function parseInstallManifestMeta(tsv: string): ParsedInstallManifestMeta {
   const entries = new Map<string, ManifestEntry>();
-  if (typeof tsv !== 'string' || !tsv.trim()) return entries;
+  let version: string | null = null;
+  let electronVersion: string | null = null;
+  if (typeof tsv !== 'string' || !tsv.trim()) {
+    return { version, electronVersion, entries };
+  }
 
   for (const rawLine of tsv.split(/\r?\n/)) {
     const line = rawLine.trim();
-    if (!line || line.startsWith('#') || line.startsWith('version\t')) continue;
+    if (!line) continue;
+    if (line.startsWith('#')) {
+      const vm = /^#\s*version=(.+)$/i.exec(line);
+      if (vm) version = vm[1].trim();
+      const em = /^#\s*electronVersion=(.+)$/i.exec(line);
+      if (em) electronVersion = em[1].trim();
+      continue;
+    }
+    if (/^(version|relpath)\t/i.test(line)) continue;
+
     const cols = line.split('\t');
-    if (cols.length < 4) continue;
-    const size = Number.parseInt(cols[1], 10);
-    const sha256 = cols[2].trim().toLowerCase();
-    const relPath = normalizeWinManifestRelPath(cols.slice(3).join('\t'));
-    if (!relPath || !/^[a-f0-9]{64}$/.test(sha256) || !Number.isFinite(size) || size < 0) continue;
-    entries.set(relPath, { sha256, size });
+    if (cols.length >= 4 && /^[a-f0-9]{64}$/i.test(cols[2].trim())) {
+      const size = Number.parseInt(cols[1], 10);
+      const sha256 = cols[2].trim().toLowerCase();
+      const relPath = normalizeWinManifestRelPath(cols.slice(3).join('\t'));
+      if (relPath && Number.isFinite(size) && size >= 0) {
+        entries.set(relPath, { sha256, size });
+      }
+      continue;
+    }
+
+    if (cols.length >= 3 && /^[a-f0-9]{64}$/i.test(cols[1].trim())) {
+      const relPath = normalizeWinManifestRelPath(cols[0]);
+      const sha256 = cols[1].trim().toLowerCase();
+      const size = Number.parseInt(cols[2], 10);
+      if (relPath && Number.isFinite(size) && size >= 0) {
+        entries.set(relPath, { sha256, size });
+      }
+    }
   }
-  return entries;
+  return { version, electronVersion, entries };
+}
+
+/**
+ * Parses resources/install-manifest.tsv into Map<relPath, ManifestEntry>.
+ */
+export function parseInstallManifest(tsv: string): Map<string, ManifestEntry> {
+  return parseInstallManifestMeta(tsv).entries;
+}
+
+export interface PlanDeltaUpdateOptions {
+  localElectronVersion?: string | null;
+  remoteElectronVersion?: string | null;
+}
+
+function isIgnoredDeltaPath(rel: string): boolean {
+  const lower = rel.toLowerCase();
+  return (
+    lower === 'waveform.exe' ||
+    lower === 'resources\\install-manifest.tsv' ||
+    lower === 'resources\\app-version.json' ||
+    /^uninstall\s+.*\.exe$/.test(lower)
+  );
 }
 
 /**
  * Computes direct delta vs full installer strategy by comparing local vs remote install manifests.
+ * Ignores WaveForm.exe version-stamp hash diffs when Electron runtime DLLs and electronVersion match.
  */
 export function planDeltaUpdate(
   localManifest: Map<string, ManifestEntry>,
-  remoteManifest: Map<string, ManifestEntry>
+  remoteManifest: Map<string, ManifestEntry>,
+  opts: PlanDeltaUpdateOptions = {}
 ): DeltaUpdatePlan {
   if (!localManifest || localManifest.size === 0 || !remoteManifest || remoteManifest.size === 0) {
     return {
@@ -277,13 +402,28 @@ export function planDeltaUpdate(
 
   const changedFiles: string[] = [];
   const removedFiles: string[] = [];
-  let requiresBinaryUpgrade = false;
+  let requiresBinaryUpgrade = Boolean(
+    opts.localElectronVersion &&
+      opts.remoteElectronVersion &&
+      opts.localElectronVersion !== opts.remoteElectronVersion
+  );
   let estimatedBytes = 0;
 
   const isResourcePath = (rel: string): boolean => rel.toLowerCase().startsWith('resources\\');
 
-  for (const [relPath, remoteMeta] of remoteManifest.entries()) {
-    const localMeta = localManifest.get(relPath);
+  const localNormalized = new Map<string, ManifestEntry>();
+  for (const [rawKey, val] of localManifest.entries()) {
+    localNormalized.set(normalizeWinManifestRelPath(rawKey).toLowerCase(), val);
+  }
+  const remoteNormalized = new Map<string, { relPath: string; entry: ManifestEntry }>();
+  for (const [rawKey, val] of remoteManifest.entries()) {
+    const norm = normalizeWinManifestRelPath(rawKey);
+    remoteNormalized.set(norm.toLowerCase(), { relPath: norm, entry: val });
+  }
+
+  for (const [lowerKey, { relPath, entry: remoteMeta }] of remoteNormalized.entries()) {
+    if (isIgnoredDeltaPath(lowerKey)) continue;
+    const localMeta = localNormalized.get(lowerKey);
     if (!localMeta || localMeta.sha256 !== remoteMeta.sha256 || localMeta.size !== remoteMeta.size) {
       changedFiles.push(relPath);
       estimatedBytes += remoteMeta.size;
@@ -293,10 +433,14 @@ export function planDeltaUpdate(
     }
   }
 
-  for (const oldRelPath of localManifest.keys()) {
-    if (!remoteManifest.has(oldRelPath)) {
-      removedFiles.push(oldRelPath);
-      if (!isResourcePath(oldRelPath)) {
+  for (const [lowerKey, rawKey] of Array.from(localManifest.keys(), (k) => [
+    normalizeWinManifestRelPath(k).toLowerCase(),
+    normalizeWinManifestRelPath(k),
+  ])) {
+    if (isIgnoredDeltaPath(lowerKey)) continue;
+    if (!remoteNormalized.has(lowerKey)) {
+      removedFiles.push(rawKey);
+      if (!isResourcePath(rawKey)) {
         requiresBinaryUpgrade = true;
       }
     }
@@ -321,26 +465,27 @@ export interface DirectPatchScriptOptions {
   updateDir: string;
   relaunchExePath: string;
   targetVersion: string;
+  fromVersion?: string;
   changedFiles: readonly string[];
   removedFiles: readonly string[];
 }
 
 /**
- * Generates an atomic PowerShell patch applier with PID exit wait, per-file backup & rollback,
- * obsolete file cleanup, Registry DisplayVersion sync, temp cleanup, and direct relaunch (no NSIS).
+ * Generates an atomic PowerShell patch applier with UAC elevation fallback, logging, full install-dir
+ * child process cleanup, 12x retry copy/remove with backup & rollback, Registry DisplayVersion sync,
+ * and detached relaunch with `--updated-from`.
  */
 export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): string {
   const safeChanged = opts.changedFiles.map((f) => normalizeWinManifestRelPath(f));
   const safeRemoved = opts.removedFiles.map((f) => normalizeWinManifestRelPath(f));
-  const manifestRel = 'resources\\install-manifest.tsv';
-  const filesToCopy = safeChanged.includes(manifestRel)
-    ? safeChanged
-    : [...safeChanged, manifestRel];
+  const alwaysSync = ['resources\\app-version.json', 'resources\\install-manifest.tsv'];
+  const filesToCopy = Array.from(new Set([...safeChanged, ...alwaysSync]));
 
   const changedLiteral = filesToCopy.map((f) => `  ${psSingleQuote(f)}`).join(',\n');
   const removedLiteral = safeRemoved.map((f) => `  ${psSingleQuote(f)}`).join(',\n');
 
   return [
+    'param([switch]$Elevated)',
     '$ErrorActionPreference = "Stop"',
     `$TargetPid = ${Math.max(0, Math.floor(opts.targetPid || 0))}`,
     `$InstallDir = ${psSingleQuote(opts.installDir)}`,
@@ -349,15 +494,44 @@ export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): s
     `$BackupDir = Join-Path $UpdateDir "backup"`,
     `$RelaunchExe = ${psSingleQuote(opts.relaunchExePath)}`,
     `$TargetVersion = ${psSingleQuote(opts.targetVersion)}`,
-    `$ChangedFiles = @(\n${changedLiteral}\n)`,
-    `$RemovedFiles = @(\n${removedLiteral}\n)`,
+    `$FromVersion = ${psSingleQuote(opts.fromVersion || '')}`,
+    '$LogDir = Join-Path $env:LOCALAPPDATA "WaveForm"',
+    'New-Item -ItemType Directory -Force -Path $LogDir | Out-Null',
+    '$LogFile = Join-Path $LogDir "updater.log"',
+    'function Write-Log([string]$msg) {',
+    '  $line = "$(Get-Date -Format o) $msg"',
+    '  try { Add-Content -LiteralPath $LogFile -Value $line -ErrorAction SilentlyContinue } catch {}',
+    '}',
+    '$ChangedFiles = @(\n' + changedLiteral + '\n)',
+    '$RemovedFiles = @(\n' + removedLiteral + '\n)',
     '',
-    'if ($TargetPid -gt 0) {',
-    '  for ($i = 0; $i -lt 120; $i++) {',
-    '    $proc = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue',
-    '    if (-not $proc) { break }',
-    '    Start-Sleep -Milliseconds 250',
+    'Write-Log "Starting direct patch to v$TargetVersion (from v$FromVersion) in $InstallDir"',
+    'if (-not $Elevated) {',
+    '  $canWrite = $false',
+    '  try {',
+    '    $probe = Join-Path $InstallDir ".wf-write-probe-$([guid]::NewGuid().ToString(\'N\')).tmp"',
+    '    [System.IO.File]::WriteAllText($probe, "ok")',
+    '    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue',
+    '    $canWrite = $true',
+    '  } catch { $canWrite = $false }',
+    '  if (-not $canWrite) {',
+    '    Write-Log "InstallDir not writable; requesting UAC elevation"',
+    '    Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", $PSCommandPath, "-Elevated")',
+    '    exit 0',
     '  }',
+    '}',
+    '',
+    '$normInstallDir = $InstallDir.TrimEnd("\\").ToLowerInvariant()',
+    'for ($i = 0; $i -lt 24; $i++) {',
+    '  $mainAlive = $false',
+    '  if ($TargetPid -gt 0) { $mainAlive = $null -ne (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue) }',
+    '  $dirProcs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and $_.Path.ToLowerInvariant().StartsWith($normInstallDir + "\\") } catch { $false } })',
+    '  if (-not $mainAlive -and $dirProcs.Count -eq 0) { break }',
+    '  Start-Sleep -Milliseconds 250',
+    '}',
+    '$lingering = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and $_.Path.ToLowerInvariant().StartsWith($normInstallDir + "\\") } catch { $false } })',
+    'foreach ($lp in $lingering) {',
+    '  try { Stop-Process -Id $lp.Id -Force -ErrorAction SilentlyContinue; Write-Log "Stopped lingering process $($lp.ProcessName) ($($lp.Id))" } catch {}',
     '}',
     'Start-Sleep -Milliseconds 350',
     '',
@@ -366,25 +540,25 @@ export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): s
     '$CreatedNew = @()',
     '',
     'function Copy-WithRetry([string]$Src, [string]$Dst) {',
-    '  for ($attempt = 0; $attempt -lt 6; $attempt++) {',
+    '  for ($attempt = 0; $attempt -lt 12; $attempt++) {',
     '    try {',
     '      Copy-Item -LiteralPath $Src -Destination $Dst -Force',
     '      return',
     '    } catch {',
-    '      if ($attempt -ge 5) { throw }',
-    '      Start-Sleep -Milliseconds 350',
+    '      if ($attempt -ge 11) { throw }',
+    '      Start-Sleep -Milliseconds 500',
     '    }',
     '  }',
     '}',
     '',
     'function Remove-WithRetry([string]$TargetPath) {',
-    '  for ($attempt = 0; $attempt -lt 6; $attempt++) {',
+    '  for ($attempt = 0; $attempt -lt 12; $attempt++) {',
     '    try {',
     '      Remove-Item -LiteralPath $TargetPath -Force',
     '      return',
     '    } catch {',
-    '      if ($attempt -ge 5) { throw }',
-    '      Start-Sleep -Milliseconds 350',
+    '      if ($attempt -ge 11) { throw }',
+    '      Start-Sleep -Milliseconds 500',
     '    }',
     '  }',
     '}',
@@ -407,6 +581,7 @@ export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): s
     '      $CreatedNew += $rel',
     '    }',
     '    Copy-WithRetry $src $dst',
+    '    Write-Log "Updated $rel"',
     '  }',
     '  foreach ($rel in $RemovedFiles) {',
     '    if ([string]::IsNullOrWhiteSpace($rel)) { continue }',
@@ -418,6 +593,7 @@ export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): s
     '      Copy-WithRetry $dst $bak',
     '      $BackedUp += $rel',
     '      Remove-WithRetry $dst',
+    '      Write-Log "Removed $rel"',
     '    }',
     '  }',
     '  $UninstallRoots = @(',
@@ -432,6 +608,7 @@ export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): s
     '    }',
     '  }',
     '} catch {',
+    '  Write-Log "Patch failed: $($_.Exception.Message); rolling back"',
     '  foreach ($rel in $CreatedNew) {',
     '    $dst = Join-Path $InstallDir $rel',
     '    if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue }',
@@ -446,8 +623,15 @@ export function buildDirectPatchApplierScript(opts: DirectPatchScriptOptions): s
     '  exit 1',
     '}',
     '',
+    'Write-Log "Direct patch succeeded; relaunching $RelaunchExe"',
     'try { Remove-Item -LiteralPath $UpdateDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}',
-    'if (Test-Path -LiteralPath $RelaunchExe) { Start-Process -FilePath $RelaunchExe }',
+    'if (Test-Path -LiteralPath $RelaunchExe) {',
+    '  if (-not [string]::IsNullOrWhiteSpace($FromVersion)) {',
+    '    Start-Process -FilePath $RelaunchExe -ArgumentList @("--updated-from=$FromVersion")',
+    '  } else {',
+    '    Start-Process -FilePath $RelaunchExe',
+    '  }',
+    '}',
     '',
   ].join('\n');
 }
@@ -587,9 +771,14 @@ async function streamBodyToFile(
 
 export function createAppUpdaterController(options: AppUpdaterControllerOptions) {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
-  const currentVersion = String(options.currentVersion || '0.0.0').replace(/^[vV]/, '');
-  const tempDir = options.tempDir ?? os.tmpdir();
   const installDir = options.installDir ?? path.dirname(process.execPath);
+  const resolvedInfo = readInstalledAppVersionInfo(installDir, options.currentVersion || '0.0.0');
+  const currentVersion = String(
+    options.currentVersion ? options.currentVersion : resolvedInfo.version
+  ).replace(/^[vV]/, '');
+  const localElectronVersion = resolvedInfo.electronVersion;
+  const isPortable = options.isPortable ?? Boolean(process.env.PORTABLE_EXECUTABLE_FILE);
+  const tempDir = options.tempDir ?? os.tmpdir();
   const relaunchExePath = options.relaunchExePath ?? path.join(installDir, 'WaveForm.exe');
   const targetPid = options.pid ?? process.pid;
   const spawnFn = options.spawnFn ?? spawn;
@@ -649,6 +838,7 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
     updateStrategy: 'full_installer',
     deltaChangedCount: null,
     deltaRemovedCount: null,
+    updatedFromVersion: options.updatedFromVersion ?? null,
     dismissedThisSession: false,
     progress: null,
     error: null,
@@ -733,10 +923,10 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
           let removedCount: number | null = null;
 
           const localManifestPath = path.join(installDir, 'resources', 'install-manifest.tsv');
-          if (patchAsset && manifestAsset && fs.existsSync(localManifestPath)) {
+          if (!isPortable && patchAsset && manifestAsset && fs.existsSync(localManifestPath)) {
             try {
               const localText = fs.readFileSync(localManifestPath, 'utf-8');
-              const localMap = parseInstallManifest(localText);
+              const localMeta = parseInstallManifestMeta(localText);
               const manResp = await fetchFn(manifestAsset.url, {
                 headers: {
                   'User-Agent': `WaveForm-Desktop/${currentVersion}`,
@@ -746,12 +936,15 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
               });
               if (manResp.ok) {
                 const remoteText = await manResp.text();
-                const remoteMap = parseInstallManifest(remoteText);
-                const plan = planDeltaUpdate(localMap, remoteMap);
+                const remoteMeta = parseInstallManifestMeta(remoteText);
+                const plan = planDeltaUpdate(localMeta.entries, remoteMeta.entries, {
+                  localElectronVersion: localMeta.electronVersion ?? localElectronVersion,
+                  remoteElectronVersion: remoteMeta.electronVersion,
+                });
                 if (plan.strategy === 'direct_patch') {
                   chosenStrategy = 'direct_patch';
                   patchUrl = patchAsset.url;
-                  remoteManifestMap = remoteMap;
+                  remoteManifestMap = remoteMeta.entries;
                   plannedDelta = plan;
                   chosenName = patchAsset.name;
                   chosenSize = patchAsset.size ?? plan.estimatedBytes;
@@ -1038,6 +1231,7 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
           updateDir,
           relaunchExePath,
           targetVersion: state.latestVersion || currentVersion,
+          fromVersion: currentVersion,
           changedFiles: plannedDelta.changedFiles,
           removedFiles: plannedDelta.removedFiles,
         });
@@ -1181,11 +1375,22 @@ export function initAppUpdaterIpc({
   tempDir,
   installDir,
 }: InitAppUpdaterIpcDeps) {
+  const resolvedInstallDir = installDir ?? path.dirname(process.execPath);
+  const currentVersion = getInstalledAppVersion(
+    resolvedInstallDir,
+    app.getVersion?.() || '1.0.0'
+  );
+  const updatedFromArg = process.argv.find((arg) => arg.startsWith('--updated-from='));
+  const updatedFromVersion = updatedFromArg
+    ? updatedFromArg.slice('--updated-from='.length).trim() || null
+    : null;
+
   const controller = createAppUpdaterController({
-    currentVersion: app.getVersion?.() || '1.0.0',
+    currentVersion,
+    updatedFromVersion,
     fetchFn,
     tempDir,
-    installDir,
+    installDir: resolvedInstallDir,
     quitFn: () => app.quit?.(),
     openExternalFn: (url) => shell.openExternal(url),
     onStateChange: (nextState) => {

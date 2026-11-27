@@ -138,7 +138,7 @@ describe('Suite 3: Desktop 5-Zone Ergonomic Geometry & Layout', () => {
   const sidebarSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/LeftSidebar.tsx'), 'utf8');
   const viewportSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/MainViewport.tsx'), 'utf8');
   const playerBarSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/BottomPlayerBar.tsx'), 'utf8');
-  const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightInspector.tsx'), 'utf8');
+  const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightSidecar.tsx'), 'utf8');
 
   test('ZONE-01: Zone 1 TitleBar is constrained to 40px with native Win11 caption controls & Ctrl+K search pill', () => {
     assert.ok(titleBarSrc.includes('h-10'), 'TitleBar height must be 40px (h-10)');

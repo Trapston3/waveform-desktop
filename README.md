@@ -1,10 +1,10 @@
 <div align="center">
   <img src="build/icon.png" alt="WaveForm Desktop Logo" width="96" height="96" />
   <h1>WaveForm Desktop</h1>
-  <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, a Rust <code>napi-rs</code> Native Performance Core, Web Audio DSP, and 14 hardware-accelerated lyric visualizers.</strong></p>
+  <p><strong>Apple Music-inspired Liquid Glass desktop music player built with Electron, React 19, a Rust <code>napi-rs</code> Native Performance Core, Web Audio DSP, and 12 hardware-accelerated lyric visualizers.</strong></p>
 
   <p>
-    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.2"><img src="https://img.shields.io/badge/Release-v1.3.2-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.3.2" /></a>
+    <a href="https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.4"><img src="https://img.shields.io/badge/Release-v1.3.4-FA2D48?style=flat-square&logo=github&logoColor=white" alt="Release v1.3.4" /></a>
     <img src="https://img.shields.io/badge/Rust-napi--rs_Native_Core-DEA584?style=flat-square&logo=rust&logoColor=black" alt="Rust napi-rs Native Core" />
     <img src="https://img.shields.io/badge/Electron-30.5.1-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
     <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React 19" />
@@ -15,23 +15,23 @@
 
 ---
 
-## Screenshots (`v1.3.2`)
+## Screenshots (`v1.3.4`)
 
-| Now Playing & Apple Music Fluid Mesh | Kinetic Messages (`iosTextingMotion`) |
+| Now Playing & Apple Music Fluid Mesh | iOS Group Chat + Kinetic Glow (`iosTextingMotion`) |
 | :---: | :---: |
-| ![Now Playing & Apple Music Fluid Mesh](docs/screenshots/01-now-playing-apple-mesh.png) | ![Kinetic Messages](docs/screenshots/02-visualizer-ios-chat.png) |
+| ![Now Playing & Apple Music Fluid Mesh](docs/screenshots/01-now-playing-apple-mesh.png) | ![iOS Group Chat](docs/screenshots/02-visualizer-ios-chat.png) |
 
-| Lock Screen Alerts | City Walk Map (Apple Maps Route) |
+| 2.5D Three.js Apple Maps Navigation | Solari Split-Flap Departure Board |
 | :---: | :---: |
-| ![Lock Screen Alerts](docs/screenshots/07-visualizer-lock-screen.png) | ![City Walk Map](docs/screenshots/08-visualizer-city-walk-map.png) |
+| ![2.5D Navigation Map](docs/screenshots/08-visualizer-city-walk-map.png) | ![Solari Split-Flap](docs/screenshots/07-visualizer-solari-split-flap.png) |
 
-| Wallet / Payments Ledger | Motion Geometry — Constellation |
+| Studio DAW Multi-Track Timeline | Motion Geometry — Constellation |
 | :---: | :---: |
-| ![Wallet Payments](docs/screenshots/09-visualizer-wallet-payments.png) | ![Motion Geometry Constellation](docs/screenshots/10-visualizer-constellation.png) |
+| ![Studio DAW Timeline](docs/screenshots/09-visualizer-studio-daw.png) | ![Motion Geometry Constellation](docs/screenshots/10-visualizer-constellation.png) |
 
-| Code Editor Kinetic Visualizer | 3D Spaceship — Nose Splash & Asteroid Dodge |
+| Code Editor Kinetic Visualizer | Arcane Spaceship 3D (Blasting & Scribbles) |
 | :---: | :---: |
-| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![3D Spaceship — Nose Splash & Asteroid Dodge](docs/screenshots/04-visualizer-spaceship-3d.png) |
+| ![Code Editor Kinetic Visualizer](docs/screenshots/03-visualizer-code-kinetic.png) | ![Arcane Spaceship 3D](docs/screenshots/04-visualizer-spaceship-3d.png) |
 
 | Lyrics Focus Mode (Minimal Controls) | 3D Cover Flow & Library |
 | :---: | :---: |
@@ -67,18 +67,18 @@ irm https://raw.githubusercontent.com/Trapston3/waveform-desktop/main/scripts/in
 
 ### Direct `.exe` Download & Fast Delta Updater
 
-Grab [`WaveForm-Setup-1.3.2.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.2/WaveForm-Setup-1.3.2.exe) (NSIS installer) or [`WaveForm-Portable-1.3.2.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.2/WaveForm-Portable-1.3.2.exe) (standalone executable) from the [v1.3.2 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.2).
+Grab [`WaveForm-Setup-1.3.4.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.4/WaveForm-Setup-1.3.4.exe) (NSIS installer) or [`WaveForm-Portable-1.3.4.exe`](https://github.com/Trapston3/waveform-desktop/releases/download/v1.3.4/WaveForm-Portable-1.3.4.exe) (standalone executable) from the [v1.3.4 Releases page](https://github.com/Trapston3/waveform-desktop/releases/tag/v1.3.4).
 
 ### One-Click In-App Auto-Updater (`electron/appUpdater.ts`, `UpdatePromptModal.tsx`)
 
 - **Cold-Boot Update Reminder**: Automatically checks GitHub Releases ~2.5s after launch (silent on offline/network errors). Choosing **Remind Me Next Launch** dismisses the prompt only for the active session and keeps a subtle **Update Available** pill in the title bar.
-- **Direct Delta-File Self-Updater**: Compares `resources/install-manifest.tsv` against the remote release manifest. For app-only updates, WaveForm streams only `WaveForm-AppPatch-<version>.zip`, verifies SHA-256 digests on both the archive and every extracted file, applies the changed files atomically via a detached PowerShell applier with backup/rollback and `DisplayVersion` registry sync (skipping the NSIS wizard completely), and relaunches WaveForm directly. Falls back to verified silent `Setup.exe /S` whenever Electron native binaries change.
+- **Direct Delta-File Self-Updater**: Compares `resources/install-manifest.tsv` & `electronVersion` against the remote release manifest while ignoring `WaveForm.exe` version-stamp diffs when the Electron runtime matches. Streams `WaveForm-AppPatch-<version>.zip`, verifies SHA-256 digests on both archive and extracted files, atomically updates `resources/` including `resources/app-version.json` with 12x retry, backup/rollback, UAC elevation prompt when needed, and `--updated-from` confirmation toast on relaunch.
 
 ---
 
 ## Native Rust Performance Core (`native/waveform-core`)
 
-WaveForm v1.3.2 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
+WaveForm v1.3.4 compiles a native Windows x64 `napi-rs` addon (`waveform-core.win32-x64-msvc.node`, unpacked cleanly outside `app.asar`) with automatic pure-TypeScript fallback when running outside Electron:
 
 - **SQLite AutoEQ Engine (`src/autoeq.rs`, `rusqlite` bundled)**: Indexes all 17,703 rows (8,850 parametric `PaP\x01` profiles) into a normalized accent/punctuation-stripped 36-bit bitmask + trigram index for sub-millisecond fuzzy search (`sony whch-720n` → `Sony WH-CH720N`) and Boundary-07 parametric filter decoding.
 - **Multi-Core Parallel Media Scanner (`src/scanner.rs`, `lofty` + `rayon` + `walkdir` + `sha2`)**: Scans local folders incrementally against cached `(path, mtimeMs, size)` diffs across all CPU cores, extracts tags, synced/unsynced lyrics (`USLT`/`SYLT`/`©lyr`/`LYRICS`), and writes content-addressed deduplicated cover art into `userData/artwork-cache/`.
@@ -97,9 +97,10 @@ WaveForm v1.3.2 compiles a native Windows x64 `napi-rs` addon (`waveform-core.wi
 - **68-Bar Waveform & Live PCM Visualizer (`WaveformExtractor.ts`, `LiveVisualizer.ts`, `WaveformCanvasSeekbar.tsx`)**: Hardware-accelerated High-DPI canvas seekbar with optimistic seek latching.
 
 ### LyricVisualizer Subsystem (`src/lyricVisualizer/`, `electron/lyricVisualizerPlatform.ts`)
-- **Global Beat Camera Thump & 9 Native Phone UI Modes**: Toggleable neural downbeat/bass compositor zoom impulse (`beatCameraThump`, default ON across all 14 styles) plus all 9 restored `IosTextingMotion` variations (`Kinetic Messages` with zero future preview & `0.75x–1.85x` Zoom slider, `Cinema Edit`, `iOS Dark`, `Apple Glass`, `Classic SMS`, `Group Chat`, `Lock Screen Alerts`, `City Walk Map`, and `Wallet / Payments`).
-- **Overhauled Motion Geometry & Spaceship 3D**: High-contrast hero typography across `Constellation`, `Branches`, and `Web`, plus fixed Spaceship 3D corridor splashes (zero blinking/Y-snapping words, true nose-merge particle bursts, mid-corridor asteroid dodging, and song-wide beat-locked twin plasma laser attacks).
-- **Multi-Surface Windows Guards**: Embeds in `NowPlayingScreen`, multi-monitor click-through Desktop Overlays (`#/overlay`), and Fullscreen Ambient Mode (`#/ambient`) with `KeepAwake`, Windows fullscreen game suppression, and lock-screen `0%` GPU suspend. See [DECISIONS.md](DECISIONS.md).
+- **Creator Studio (`v1.3.4`) — 12 Consolidated Visualizers, 15s Clip Export & Word Micro-FX**: Exports 15s (`16:9` / `9:16` / `1:1`) WebM clips with synced audio via `MediaRecorder`, imports/exports JSON style presets, renders semantic `wordIconDictionary` icons & micro-animations across every theme, and ensures edge-safe Beat Camera Thump overscan.
+- **Flagship iOS Native Design (`IosTextingMotion`)**: Four flagship modes — `Messages` (with Kinetic Pop-up Mode & Zoom), `Liquid Glass`, `Group Chat` (colorful avatar PFPs + active luminescence), and Three.js `2.5D Navigation Map` with genre-aware biomes (`Cityscape` / `Highway` / `Countryside`) & time-of-day lighting.
+- **Arcane Spaceship 3D, Solari Split-Flap & Studio DAW**: Reworked 3D starfighter with same-altitude word spawns, multi-piece asteroid shattering revealing hidden lyrics, and Arcane neon scribble overlays, alongside OKLCH album-art-matched `Solari Split-Flap` and `Studio DAW Timeline`.
+- **Multi-Surface Windows Guards**: Embeds in `NowPlayingScreen` (with unified **Studio Tools** popover & decluttered context menu), multi-monitor click-through Desktop Overlays (`#/overlay`), and Fullscreen Ambient Mode (`#/ambient`) with `KeepAwake`, fullscreen game suppression, and lock-screen `0%` GPU suspend. See [DECISIONS.md](DECISIONS.md).
 
 ### Power Tools, Offline Pinning & Practice Suite (`v1.3.2`)
 - **Native Last.fm & ListenBrainz Scrobbling (`electron/scrobbler.ts`)**: Signed MD5 Last.fm (`track.updateNowPlaying` / `track.scrobble`) and ListenBrainz token validation + submission at `50%` or `240s` played, backed by a persistent `scrobble-queue.json` offline retry queue.

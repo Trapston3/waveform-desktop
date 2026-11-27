@@ -339,7 +339,7 @@ suite('Zone 4: BottomPlayerBar 3 Clusters, Audio Quality Badge & Truncation Stre
 // ADVERSARIAL SUITE 5: Zone 5 - RightInspector Width & GPU Compositor Slide Animation
 // -----------------------------------------------------------------------------
 suite('Zone 5: RightInspector 360px Sidecar & GPU translate3d Slide Transition', () => {
-  const file = path.join(ROOT, 'src/ui/layout/RightInspector.tsx');
+  const file = path.join(ROOT, 'src/ui/layout/RightSidecar.tsx');
   const src = fs.readFileSync(file, 'utf8');
 
   // Width: strictly 360px

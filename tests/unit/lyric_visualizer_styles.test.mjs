@@ -2041,6 +2041,22 @@ describe('LyricVisualizer Rendering & 12 Consolidated Visual Styles', () => {
     const groupArcs = canvas.ctx2d.ops.filter((op) => op === 'arc').length;
     assert.ok(groupArcs >= 2, `group-chat must render circular user avatar PFPs (got ${groupArcs} arcs)`);
 
+    // Liquid Glass iOS variation + Kinetic Pop-up renders frosted active bubble glow cleanly
+    renderer.setVariation('liquid-glass');
+    renderer.setVisualSettings({ iosKineticPopup: true, iosKineticZoom: 1.45 });
+    canvas.ctx2d.ops.length = 0;
+    assert.equal(renderer.renderFrame(1128), true, 'liquid-glass variation must render cleanly');
+    assert.ok(canvas.ctx2d.ops.length > 0);
+
+    // Solari Split-Flap & Studio DAW render cleanly with Album-Art Color Matching enabled
+    renderer.setVisualSettings({ albumArtColorMatch: true });
+    renderer.setStyle('SolariSplitFlap');
+    canvas.ctx2d.ops.length = 0;
+    assert.equal(renderer.renderFrame(1144), true, 'SolariSplitFlap with albumArtColorMatch must render');
+    renderer.setStyle('StudioDawTimeline');
+    canvas.ctx2d.ops.length = 0;
+    assert.equal(renderer.renderFrame(1160), true, 'StudioDawTimeline with albumArtColorMatch must render');
+
     // 4. Creator Studio crop rects, 9:16 uncut portrait composite layout & preset round-trip
     const crop9x16 = computeClipCropRect(1920, 1080, '9:16');
     assert.equal(crop9x16.outW, 720);

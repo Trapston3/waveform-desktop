@@ -93,10 +93,10 @@ function evaluateBezierYAtX(p1x, p1y, p2x, p2y, x) {
 // SUITE 1: ZONE 5 GPU COMPOSITOR THREAD TRANSLATION & LAYER PROMOTION
 // =============================================================================
 suite('1. GPU Compositor Thread Translation & Layer Promotion Verification', () => {
-  const inspectorPath = path.join(ROOT, 'src/ui/layout/RightInspector.tsx');
+  const inspectorPath = path.join(ROOT, 'src/ui/layout/RightSidecar.tsx');
   const sidecarPath = path.join(ROOT, 'src/ui/layout/RightSidecar.tsx');
 
-  assert(fs.existsSync(inspectorPath), 'RightInspector.tsx exists');
+  assert(fs.existsSync(inspectorPath), 'RightSidecar.tsx exists');
   assert(fs.existsSync(sidecarPath), 'RightSidecar.tsx exists');
 
   const inspectorSrc = fs.readFileSync(inspectorPath, 'utf8');
@@ -139,7 +139,7 @@ suite('1. GPU Compositor Thread Translation & Layer Promotion Verification', () 
 // SUITE 2: CALIBRATED MACOS SPRING CURVES & MATHEMATICAL EVALUATION
 // =============================================================================
 suite('2. Calibrated macOS Spring Curves & Mathematical Dynamics', () => {
-  const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightInspector.tsx'), 'utf8');
+  const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightSidecar.tsx'), 'utf8');
   const sidecarSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightSidecar.tsx'), 'utf8');
   const cssSrc = fs.readFileSync(path.join(ROOT, 'src/index.css'), 'utf8');
 
@@ -328,13 +328,13 @@ await asyncSuite('4. Rapid Drawer Toggle Stress & Inactive Ticker Suspension und
 // SUITE 5: CODEBASE INTEGRITY & ZERO SPOOFED COMMENTS AUDIT
 // =============================================================================
 suite('5. Codebase Integrity & Absence of Spoofed Comments Audit', () => {
-  const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightInspector.tsx'), 'utf8');
+  const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightSidecar.tsx'), 'utf8');
   const sidecarSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightSidecar.tsx'), 'utf8');
 
   // Verify file length is authentic (> 300 lines)
   const inspectorLines = inspectorSrc.split('\n').length;
   const sidecarLines = sidecarSrc.split('\n').length;
-  assert(inspectorLines >= 300, `RightInspector.tsx is full authentic component: ${inspectorLines} lines (>= 300)`);
+  assert(inspectorLines >= 300, `RightSidecar.tsx is full authentic component: ${inspectorLines} lines (>= 300)`);
   assert(sidecarLines >= 300, `RightSidecar.tsx is full authentic component: ${sidecarLines} lines (>= 300)`);
 
   // Verify absence of test assertion spoofing in comments

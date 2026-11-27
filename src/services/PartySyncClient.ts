@@ -441,8 +441,198 @@ export class MqttWsClient {
 
 // ---------- Core PartySyncClient (Preserving 100% of existing API & test contracts) ----------
 
+export type PartySyncZone = 'locked' | 'rate_catchup' | 'pause_wait' | 'hard_seek' | 'cooldown';
+
+export interface PartySyncTelemetry {
+  rttMs: number | null;
+  clockOffsetMs: number;
+  driftMs: number;
+  syncZone: PartySyncZone;
+  playbackRate: number;
+  isClockSynced: boolean;
+}
+
+export type PartyDriftAction =
+  | { action: 'none'; playbackRate: number; zone: PartySyncZone; driftMs: number }
+  | { action: 'rate'; playbackRate: number; zone: PartySyncZone; driftMs: number }
+  | { action: 'pause_wait'; playbackRate: number; zone: PartySyncZone; driftMs: number }
+  | { action: 'resume'; playbackRate: number; zone: PartySyncZone; driftMs: number }
+  | { action: 'seek'; targetPosMs: number; playbackRate: number; zone: PartySyncZone; driftMs: number };
+
+function medianNumber(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+/**
+ * 5-sample median NTP offset/RTT estimator + 3-zone zero-loop drift controller.
+ */
+export class PartyDriftController {
+  public static readonly NTP_WINDOW = 5;
+  public static readonly DEADZONE_MS = 150;
+  public static readonly SETTLE_MS = 80;
+  public static readonly RATE_MAX_DRIFT_MS = 2200;
+  public static readonly PAUSE_WAIT_MAX_AHEAD_MS = 4500;
+  public static readonly PAUSE_RESUME_TOLERANCE_MS = 120;
+  public static readonly LEAD_COMPENSATION_MS = 350;
+  public static readonly SEEK_COOLDOWN_MS = 4500;
+  public static readonly SLOW_RATE = 0.94;
+  public static readonly FAST_RATE = 1.06;
+
+  private rttSamples: number[] = [];
+  private offsetSamples: number[] = [];
+  private clockOffsetMs = 0;
+  private rttMs: number | null = null;
+  private isClockSynced = false;
+  private currentRate = 1.0;
+  private inPauseWait = false;
+  private seekCooldownUntilMs = 0;
+  private syncZone: PartySyncZone = 'locked';
+  private lastDriftMs = 0;
+
+  public reset(): void {
+    this.rttSamples = [];
+    this.offsetSamples = [];
+    this.clockOffsetMs = 0;
+    this.rttMs = null;
+    this.isClockSynced = false;
+    this.currentRate = 1.0;
+    this.inPauseWait = false;
+    this.seekCooldownUntilMs = 0;
+    this.syncZone = 'locked';
+    this.lastDriftMs = 0;
+  }
+
+  public recordPong(clientMs: number, serverMs: number, nowMs = Date.now()): PartySyncTelemetry {
+    const rtt = Math.max(0, Math.round(nowMs - clientMs));
+    const offset = Math.round(serverMs + rtt / 2 - nowMs);
+    this.rttSamples.push(rtt);
+    if (this.rttSamples.length > PartyDriftController.NTP_WINDOW) this.rttSamples.shift();
+    this.offsetSamples.push(offset);
+    if (this.offsetSamples.length > PartyDriftController.NTP_WINDOW) this.offsetSamples.shift();
+
+    this.rttMs = medianNumber(this.rttSamples);
+    this.clockOffsetMs = medianNumber(this.offsetSamples);
+    this.isClockSynced = true;
+    return this.getTelemetry();
+  }
+
+  public getClockOffsetMs(): number {
+    return this.clockOffsetMs;
+  }
+
+  public getIsClockSynced(): boolean {
+    return this.isClockSynced;
+  }
+
+  public getTelemetry(): PartySyncTelemetry {
+    return {
+      rttMs: this.rttMs,
+      clockOffsetMs: this.clockOffsetMs,
+      driftMs: this.lastDriftMs,
+      syncZone: this.syncZone,
+      playbackRate: this.currentRate,
+      isClockSynced: this.isClockSynced,
+    };
+  }
+
+  public evaluate(localPosMs: number, expectedHostPosMs: number, nowMs = Date.now()): PartyDriftAction {
+    const driftMs = Math.round(localPosMs - expectedHostPosMs);
+    const absDrift = Math.abs(driftMs);
+    this.lastDriftMs = driftMs;
+
+    if (this.inPauseWait) {
+      if (driftMs <= PartyDriftController.PAUSE_RESUME_TOLERANCE_MS) {
+        this.inPauseWait = false;
+        this.currentRate = 1.0;
+        this.syncZone = 'locked';
+        return { action: 'resume', playbackRate: 1.0, zone: 'locked', driftMs };
+      }
+      if (driftMs <= PartyDriftController.PAUSE_WAIT_MAX_AHEAD_MS + 1000) {
+        this.currentRate = 1.0;
+        this.syncZone = 'pause_wait';
+        return { action: 'pause_wait', playbackRate: 1.0, zone: 'pause_wait', driftMs };
+      }
+      this.inPauseWait = false;
+    }
+
+    if (nowMs < this.seekCooldownUntilMs) {
+      if (absDrift < PartyDriftController.DEADZONE_MS) {
+        const hadCustomRate = Math.abs(this.currentRate - 1.0) > 0.001;
+        this.currentRate = 1.0;
+        this.syncZone = 'cooldown';
+        return {
+          action: hadCustomRate ? 'rate' : 'none',
+          playbackRate: 1.0,
+          zone: 'cooldown',
+          driftMs,
+        };
+      }
+      if (
+        nowMs > this.seekCooldownUntilMs - 3500 &&
+        absDrift < PartyDriftController.RATE_MAX_DRIFT_MS
+      ) {
+        const targetRate = driftMs > 0 ? PartyDriftController.SLOW_RATE : PartyDriftController.FAST_RATE;
+        this.currentRate = targetRate;
+        this.syncZone = 'cooldown';
+        return { action: 'rate', playbackRate: targetRate, zone: 'cooldown', driftMs };
+      }
+      this.syncZone = 'cooldown';
+      return { action: 'none', playbackRate: this.currentRate, zone: 'cooldown', driftMs };
+    }
+
+    const isNudging = Math.abs(this.currentRate - 1.0) > 0.001;
+    const lockedLimit = isNudging
+      ? PartyDriftController.SETTLE_MS
+      : PartyDriftController.DEADZONE_MS;
+
+    if (absDrift < lockedLimit) {
+      this.currentRate = 1.0;
+      this.syncZone = 'locked';
+      return {
+        action: isNudging ? 'rate' : 'none',
+        playbackRate: 1.0,
+        zone: 'locked',
+        driftMs,
+      };
+    }
+
+    if (absDrift < PartyDriftController.RATE_MAX_DRIFT_MS) {
+      const targetRate = driftMs > 0 ? PartyDriftController.SLOW_RATE : PartyDriftController.FAST_RATE;
+      this.currentRate = targetRate;
+      this.syncZone = 'rate_catchup';
+      return { action: 'rate', playbackRate: targetRate, zone: 'rate_catchup', driftMs };
+    }
+
+    if (
+      driftMs >= PartyDriftController.RATE_MAX_DRIFT_MS &&
+      driftMs <= PartyDriftController.PAUSE_WAIT_MAX_AHEAD_MS
+    ) {
+      this.inPauseWait = true;
+      this.currentRate = 1.0;
+      this.syncZone = 'pause_wait';
+      return { action: 'pause_wait', playbackRate: 1.0, zone: 'pause_wait', driftMs };
+    }
+
+    this.seekCooldownUntilMs = nowMs + PartyDriftController.SEEK_COOLDOWN_MS;
+    this.currentRate = 1.0;
+    this.syncZone = 'hard_seek';
+    return {
+      action: 'seek',
+      targetPosMs: Math.max(0, Math.round(expectedHostPosMs + PartyDriftController.LEAD_COMPENSATION_MS)),
+      playbackRate: 1.0,
+      zone: 'hard_seek',
+      driftMs,
+    };
+  }
+}
+
 export interface PartyClientCallbacks {
   onSeek?: (targetMs: number) => void;
+  onPlaybackRateRequested?: (rate: number) => void;
+  onPauseWaitChanged?: (waiting: boolean) => void;
+  onSyncTelemetry?: (telemetry: PartySyncTelemetry) => void;
   onTrackChange?: (track: PartyTrack, positionMs: number) => void;
   onPlayStateChange?: (isPlaying: boolean) => void;
   onSnapshotUpdate?: (snapshot: PartySnapshot) => void;
@@ -476,19 +666,21 @@ export class PartySyncClient {
   private seenMessageIds = new Set<string>();
   private internetSendHook: ((frame: object) => void) | null = null;
 
-  // Drift and reconciliation thresholds conforming to spec_miner_survey_3
+  // Drift and 3-zone controller state
   public static readonly ALIGN_TOLERANCE_MS = 120;
-  public static readonly DRIFT_LIMIT_MS = 200; // ±200ms tight sync
+  public static readonly DRIFT_LIMIT_MS = 150;
   public static readonly DRIFT_STRIKES = 2;
-  public static readonly DRIFT_COOLDOWN_MS = 6000;
+  public static readonly DRIFT_COOLDOWN_MS = 4500;
 
+  private driftController = new PartyDriftController();
   private currentSeq = 0;
   private lastAlignedSeq = -1;
-  private driftStrikes = 0;
-  private driftCooldownUntilMs = 0;
   private reconcileQuietUntilMs = 0;
 
   private onSeekRequested: ((targetMs: number) => void) | null = null;
+  private onPlaybackRateRequested: ((rate: number) => void) | null = null;
+  private onPauseWaitChanged: ((waiting: boolean) => void) | null = null;
+  private onSyncTelemetry: ((telemetry: PartySyncTelemetry) => void) | null = null;
   private onTrackChanged: ((track: PartyTrack, positionMs: number) => void) | null = null;
   private onPlayStateChanged: ((isPlaying: boolean) => void) | null = null;
   private onSnapshotUpdated: ((snapshot: PartySnapshot) => void) | null = null;
@@ -506,6 +698,9 @@ export class PartySyncClient {
 
   public setCallbacks(cbs: PartyClientCallbacks): void {
     if (cbs.onSeek) this.onSeekRequested = cbs.onSeek;
+    if (cbs.onPlaybackRateRequested) this.onPlaybackRateRequested = cbs.onPlaybackRateRequested;
+    if (cbs.onPauseWaitChanged) this.onPauseWaitChanged = cbs.onPauseWaitChanged;
+    if (cbs.onSyncTelemetry) this.onSyncTelemetry = cbs.onSyncTelemetry;
     if (cbs.onTrackChange) this.onTrackChanged = cbs.onTrackChange;
     if (cbs.onPlayStateChange) this.onPlayStateChanged = cbs.onPlayStateChange;
     if (cbs.onSnapshotUpdate) this.onSnapshotUpdated = cbs.onSnapshotUpdate;
@@ -518,11 +713,17 @@ export class PartySyncClient {
   }
 
   public getClockOffsetMs(): number {
-    return this.clockOffsetMs;
+    return this.driftController.getIsClockSynced()
+      ? this.driftController.getClockOffsetMs()
+      : this.clockOffsetMs;
   }
 
   public getIsClockSynced(): boolean {
-    return this.isClockSynced;
+    return this.driftController.getIsClockSynced() || this.isClockSynced;
+  }
+
+  public getSyncTelemetry(): PartySyncTelemetry {
+    return this.driftController.getTelemetry();
   }
 
   public getMemberId(): string | null {
@@ -733,6 +934,9 @@ export class PartySyncClient {
     this.seenMessageIds.clear();
     this.lastAlignedSeq = -1;
     this.currentSeq = 0;
+    this.driftController.reset();
+    this.clockOffsetMs = 0;
+    this.isClockSynced = false;
   }
 
   private startClockSync(): void {
@@ -782,11 +986,10 @@ export class PartySyncClient {
 
       case 'pong': {
         if (typeof frame.clientMs !== 'number' || typeof frame.serverMs !== 'number') break;
-        const now = Date.now();
-        const rtt = Math.max(0, now - frame.clientMs);
-        const serverEstimate = frame.serverMs + Math.round(rtt / 2);
-        this.clockOffsetMs = serverEstimate - now;
-        this.isClockSynced = true;
+        const telemetry = this.driftController.recordPong(frame.clientMs, frame.serverMs, Date.now());
+        this.clockOffsetMs = telemetry.clockOffsetMs;
+        this.isClockSynced = telemetry.isClockSynced;
+        this.onSyncTelemetry?.(telemetry);
         break;
       }
 
@@ -843,10 +1046,10 @@ export class PartySyncClient {
     this.seenMessageIds.add(key);
   }
 
-  public getPartyPositionMs(playback: PartyPlayback): number {
+  public getPartyPositionMs(playback: PartyPlayback, nowMs = Date.now()): number {
     if (!playback) return 0;
     if (!playback.isPlaying) return playback.positionMs || 0;
-    const serverNow = Date.now() + this.clockOffsetMs;
+    const serverNow = nowMs + this.getClockOffsetMs();
     const anchor = playback.anchorMs || playback.updatedAtMs || serverNow;
     const elapsed = Math.round((serverNow - anchor) * (playback.speed || 1.0));
     return Math.max(0, (playback.positionMs || 0) + elapsed);
@@ -874,7 +1077,7 @@ export class PartySyncClient {
       this.onPlayStateChanged(playback.isPlaying);
     }
 
-    const partyPosMs = this.getPartyPositionMs(playback);
+    const partyPosMs = this.getPartyPositionMs(playback, now);
 
     if (targetSeq !== this.lastAlignedSeq) {
       this.lastAlignedSeq = targetSeq;
@@ -884,25 +1087,32 @@ export class PartySyncClient {
     }
   }
 
-  public checkDrift(localPosMs: number, playback: PartyPlayback): boolean {
-    if (!playback || !playback.isPlaying || !this.isClockSynced) return false;
-    const now = Date.now();
-    if (now < this.driftCooldownUntilMs) return false;
+  public checkDrift(localPosMs: number, playback: PartyPlayback, nowMs = Date.now()): boolean {
+    if (!playback || !playback.isPlaying || !this.getIsClockSynced()) return false;
 
-    const partyPosMs = this.getPartyPositionMs(playback);
-    const drift = Math.abs(localPosMs - partyPosMs);
+    const expectedHostPosMs = this.getPartyPositionMs(playback, nowMs);
+    const decision = this.driftController.evaluate(localPosMs, expectedHostPosMs, nowMs);
+    this.onSyncTelemetry?.(this.driftController.getTelemetry());
 
-    if (drift > PartySyncClient.DRIFT_LIMIT_MS) {
-      if (++this.driftStrikes >= PartySyncClient.DRIFT_STRIKES) {
-        this.driftStrikes = 0;
-        this.driftCooldownUntilMs = now + PartySyncClient.DRIFT_COOLDOWN_MS;
-        if (this.onSeekRequested) {
-          this.onSeekRequested(partyPosMs);
-        }
-        return true;
-      }
-    } else {
-      this.driftStrikes = 0;
+    if (decision.action === 'seek') {
+      this.onPauseWaitChanged?.(false);
+      this.onPlaybackRateRequested?.(1.0);
+      this.onSeekRequested?.(decision.targetPosMs);
+      return true;
+    }
+    if (decision.action === 'pause_wait') {
+      this.onPlaybackRateRequested?.(1.0);
+      this.onPauseWaitChanged?.(true);
+      return true;
+    }
+    if (decision.action === 'resume') {
+      this.onPlaybackRateRequested?.(1.0);
+      this.onPauseWaitChanged?.(false);
+      return true;
+    }
+    if (decision.action === 'rate') {
+      this.onPlaybackRateRequested?.(decision.playbackRate);
+      return true;
     }
     return false;
   }
@@ -986,6 +1196,10 @@ export interface PartyStoreState {
   p2pActive: boolean;
   clockOffsetMs: number;
   isClockSynced: boolean;
+  rttMs: number | null;
+  driftMs: number;
+  syncZone: PartySyncZone;
+  syncPlaybackRate: number;
   controlMode: PartyControlMode;
   participants: PartyMember[];
   currentTrack: PartyTrack | null;
@@ -1801,12 +2015,12 @@ async function attachPlayerStoreSync(client: PartySyncClient): Promise<void> {
 
     driftCheckTimer = setInterval(() => {
       const party = usePartyStore.getState();
-      if (party.status !== 'connected' || !party.playback) return;
+      if (party.status !== 'connected' || !party.playback || party.isHost) return;
       const pState = usePlayerStore.getState();
-      if (pState.playbackState !== 'PLAYING') return;
+      if (pState.playbackState !== 'PLAYING' && party.syncZone !== 'pause_wait') return;
       const enginePos = pState.audioEngine?.getCurrentPositionMs?.() ?? pState.positionMs;
       client.checkDrift(enginePos, party.playback);
-    }, 1500);
+    }, 1000);
   } catch {
     // Non-browser test environments without playerStore
   }
@@ -1823,11 +2037,56 @@ function detachPlayerStoreSync(): void {
   }
   lastPublishedTrackId = null;
   lastPublishedPlayState = null;
+  void import('../state/playerStore')
+    .then(({ usePlayerStore }) => {
+      usePlayerStore.getState().setPlaybackRate(1.0);
+    })
+    .catch(() => {});
 }
 
 function createClientWithStoreBindings(): PartySyncClient {
   const client = new PartySyncClient();
   client.setCallbacks({
+    onSyncTelemetry: (telemetry) => {
+      usePartyStore.setState({
+        rttMs: telemetry.rttMs,
+        driftMs: telemetry.driftMs,
+        syncZone: telemetry.syncZone,
+        syncPlaybackRate: telemetry.playbackRate,
+        clockOffsetMs: telemetry.clockOffsetMs,
+        isClockSynced: telemetry.isClockSynced,
+      });
+    },
+    onPlaybackRateRequested: async (rate) => {
+      try {
+        const { usePlayerStore } = await import('../state/playerStore');
+        usePlayerStore.getState().setPlaybackRate(rate);
+      } catch {
+        // Ignore in headless tests
+      }
+    },
+    onPauseWaitChanged: async (waiting) => {
+      let applied = false;
+      try {
+        const { usePlayerStore } = await import('../state/playerStore');
+        const pState = usePlayerStore.getState();
+        remoteApplyDepth++;
+        applied = true;
+        if (waiting && pState.playbackState === 'PLAYING') {
+          lastPublishedPlayState = 'PAUSED';
+          pState.pause();
+        } else if (!waiting && usePartyStore.getState().playback?.isPlaying && pState.playbackState !== 'PLAYING') {
+          lastPublishedPlayState = 'PLAYING';
+          pState.play();
+        }
+      } catch {
+        // Ignore in headless tests
+      } finally {
+        if (applied) {
+          remoteApplyDepth = Math.max(0, remoteApplyDepth - 1);
+        }
+      }
+    },
     onStatusChange: (status) => {
       usePartyStore.setState({
         status,
@@ -1992,6 +2251,10 @@ export const usePartyStore = create<PartyStore>((set, get) => ({
   p2pActive: false,
   clockOffsetMs: 0,
   isClockSynced: false,
+  rttMs: null,
+  driftMs: 0,
+  syncZone: 'locked',
+  syncPlaybackRate: 1.0,
   controlMode: 'host-only',
   participants: [],
   currentTrack: null,
@@ -2278,6 +2541,10 @@ export const usePartyStore = create<PartyStore>((set, get) => ({
       p2pActive: false,
       isClockSynced: false,
       clockOffsetMs: 0,
+      rttMs: null,
+      driftMs: 0,
+      syncZone: 'locked',
+      syncPlaybackRate: 1.0,
       participants: [],
       currentTrack: null,
       playback: null,

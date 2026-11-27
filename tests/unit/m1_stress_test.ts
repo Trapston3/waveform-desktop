@@ -293,7 +293,7 @@ describe('M1 Component Instantiation & Server Rendering Verification', async () 
   const { DesktopTitleBar } = await import('../../src/ui/layout/DesktopTitleBar.tsx');
   const { LeftSidebar } = await import('../../src/ui/layout/LeftSidebar.tsx');
   const { MainViewport } = await import('../../src/ui/layout/MainViewport.tsx');
-  const { RightInspector } = await import('../../src/ui/layout/RightInspector.tsx');
+  const { RightInspector } = await import('../../src/ui/layout/RightSidecar.tsx');
   const { BottomPlayerBar } = await import('../../src/ui/layout/BottomPlayerBar.tsx');
   const { default: App } = await import('../../src/App.tsx');
 

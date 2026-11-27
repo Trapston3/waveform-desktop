@@ -344,7 +344,7 @@ describe('Suite 2: Component Isolation & Zero Re-renders During Playback', () =>
   });
 
   test('C03: RightInspector suspends positionMs subscription when closed or on queue tab (0 re-renders)', () => {
-    // Exact selector from RightInspector.tsx line 49:
+    // Exact selector from RightSidecar.tsx line 49:
     // const positionMs = usePlayerStore((s) => (isOpen && activeTab === 'lyrics' ? s.positionMs : 0));
 
     // Case A: Inspector closed (isOpen = false)
@@ -425,7 +425,7 @@ describe('Suite 2: Component Isolation & Zero Re-renders During Playback', () =>
   test('C05: Source audit confirms 8 components use memo and do not reference unthrottled position', () => {
     const files = [
       'src/ui/layout/BottomPlayerBar.tsx',
-      'src/ui/layout/RightInspector.tsx',
+      'src/ui/layout/RightSidecar.tsx',
       'src/ui/views/HomeScreen.tsx',
       'src/ui/views/ExploreScreen.tsx',
       'src/ui/views/SearchScreen.tsx',
@@ -452,7 +452,7 @@ describe('Suite 2: Component Isolation & Zero Re-renders During Playback', () =>
       );
 
       // 3. For views and BottomPlayerBar, must not subscribe to s.positionMs
-      if (!file.includes('RightInspector.tsx')) {
+      if (!file.includes('RightSidecar.tsx')) {
         assert.strictEqual(
           /s\.positionMs/.test(text),
           false,

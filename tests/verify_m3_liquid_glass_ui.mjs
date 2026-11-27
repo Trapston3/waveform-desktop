@@ -113,8 +113,8 @@ suite('2. Desktop 5-Zone Ergonomic Architecture & Layout Metrics', () => {
   assert(playerBarSrc.includes('ATMOS') || playerBarSrc.includes('LOSSLESS') || playerBarSrc.includes('Hi-Res'), 'Zone 4: Single clean high-fidelity audio quality badge');
 
   // Zone 5: RightInspector
-  const inspectorPath = path.join(ROOT, 'src/ui/layout/RightInspector.tsx');
-  assert(fs.existsSync(inspectorPath), 'RightInspector.tsx exists');
+  const inspectorPath = path.join(ROOT, 'src/ui/layout/RightSidecar.tsx');
+  assert(fs.existsSync(inspectorPath), 'RightSidecar.tsx exists');
   const inspectorSrc = fs.readFileSync(inspectorPath, 'utf8');
   assert(inspectorSrc.includes('w-[360px]') || inspectorSrc.includes('w-90'), 'Zone 5: Right inspector sidecar has 360px width');
   assert(inspectorSrc.includes('translate3d') || inspectorSrc.includes('transition-transform'), 'Zone 5: Features hardware-accelerated slide animation');

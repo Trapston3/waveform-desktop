@@ -1,10 +1,22 @@
-// Renderer-side API for YouTube Music / Spotify account login (Electron IPC; no-op on web).
+// Renderer-side API for YouTube Music / Spotify account login & playlist loading (Electron IPC; no-op on web).
+import type { Song } from '../models/Song';
+
 export type AccountProvider = 'ytmusic' | 'spotify';
 export interface AccountStatus { connected: boolean; displayName?: string }
 export type AccountAuthStatus = Record<AccountProvider, AccountStatus>;
 
+export interface SpotifyPlaylistItem {
+  id: string;
+  title: string;
+  description: string;
+  thumbnailUrl: string | null;
+  trackCount: number;
+  owner: string;
+}
+
 const api = () => (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
 const none: AccountAuthStatus = { ytmusic: { connected: false }, spotify: { connected: false } };
+let cachedSpotifyPlaylists: SpotifyPlaylistItem[] | null = null;
 
 type AuthChangeListener = (detail: { provider: AccountProvider; connected: boolean }) => void;
 const authChangeListeners = new Set<AuthChangeListener>();
@@ -69,6 +81,7 @@ export const AccountAuthService = {
   getAccountAuthStatus: async (): Promise<AccountAuthStatus> => (await api()?.getAccountAuthStatus?.()) ?? none,
   logoutAccount: async (provider: AccountProvider): Promise<void> => {
     await api()?.logoutAccount?.(provider);
+    if (provider === 'spotify') cachedSpotifyPlaylists = null;
     emitAuthChanged(provider, false);
   },
   emitAuthChanged,
@@ -76,6 +89,50 @@ export const AccountAuthService = {
   getSpotifyPlaylists: async (): Promise<any[]> => (await (api() as any)?.getSpotifyPlaylists?.()) ?? [],
   getSpotifyPlaylistTracks: async (playlistId: string): Promise<any[]> =>
     (await (api() as any)?.getSpotifyPlaylistTracks?.(playlistId)) ?? [],
+  loadSpotifyPlaylists: async (forceRefresh = false): Promise<SpotifyPlaylistItem[]> => {
+    if (!forceRefresh && cachedSpotifyPlaylists) return cachedSpotifyPlaylists;
+    try {
+      const items = (await (api() as any)?.getSpotifyPlaylists?.()) ?? [];
+      cachedSpotifyPlaylists = Array.isArray(items) ? items : [];
+      return cachedSpotifyPlaylists;
+    } catch {
+      return [];
+    }
+  },
+  loadSpotifyPlaylistSongs: async (playlistId: string): Promise<Song[]> => {
+    try {
+      const tracks = (await (api() as any)?.getSpotifyPlaylistTracks?.(playlistId)) ?? [];
+      if (!Array.isArray(tracks)) return [];
+      return tracks.map((track: any): Song => {
+        const id = String(track.id || '');
+        const durationSec = typeof track.durationSec === 'number' ? track.durationSec : 0;
+        const artists = Array.isArray(track.artists)
+          ? track.artists.map((a: any) => ({ id: a.id ? String(a.id) : null, name: a.name || 'Unknown Artist' }))
+          : [{ id: null, name: track.artist || 'Unknown Artist' }];
+        return {
+          id: `sp_${id}`,
+          videoId: `sp_${id}`,
+          title: track.title || 'Untitled Track',
+          artist: track.artist || (artists[0]?.name ?? 'Unknown Artist'),
+          artists,
+          artistIds: artists.map((a: any) => a.id).filter(Boolean) as string[],
+          albumName: track.albumName || '',
+          album: track.albumName || '',
+          durationSec,
+          totalPlayTimeMs: durationSec * 1000,
+          playCount: 0,
+          thumbnailUrl: track.thumbnailUrl || null,
+          artworkUrl: track.thumbnailUrl || undefined,
+          streamUrl: '',
+          playbackSourceType: 'YOUTUBE',
+          liked: false,
+          isExplicit: false,
+        };
+      });
+    } catch {
+      return [];
+    }
+  },
 };
 
 export const {
@@ -85,4 +142,6 @@ export const {
   logoutAccount,
   getSpotifyPlaylists,
   getSpotifyPlaylistTracks,
+  loadSpotifyPlaylists,
+  loadSpotifyPlaylistSongs,
 } = AccountAuthService;

@@ -46,9 +46,24 @@ export function compareSemVer(a, b) {
 function shouldExcludeManifestPath(relPath) {
   const lower = relPath.toLowerCase();
   if (lower === 'resources\\install-manifest.tsv') return true;
+  if (lower === 'resources\\app-version.json') return true;
   if (/^uninstall\s+.*\.exe$/i.test(relPath)) return true;
   if (lower === 'uninstallericon.ico') return true;
   return false;
+}
+
+function readPackagedElectronVersion() {
+  try {
+    const pkgPath = path.join(rootDir, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const raw = pkg?.devDependencies?.electron || pkg?.dependencies?.electron;
+    if (typeof raw === 'string' && raw.trim()) {
+      return raw.trim().replace(/^[\^~>=<\s]+/, '');
+    }
+  } catch {
+    // Fallback below
+  }
+  return process.versions?.electron || null;
 }
 
 function walkFilesSorted(dirPath, baseDir = dirPath, out = []) {
@@ -79,12 +94,15 @@ export function computeFileSha256(filePath) {
 /**
  * Generates a deterministic sorted TSV manifest for all packaged files in appOutDir.
  */
-export function generateInstallManifest(appOutDir, version = '1.0.0') {
+export function generateInstallManifest(appOutDir, version = '1.0.0', electronVersion = null) {
   const files = walkFilesSorted(appOutDir);
   files.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
   const entries = [];
   const lines = [`# version=${version}`];
+  if (electronVersion) {
+    lines.push(`# electronVersion=${electronVersion}`);
+  }
 
   for (const f of files) {
     const { sha256, size } = computeFileSha256(f.fullPath);
@@ -94,27 +112,31 @@ export function generateInstallManifest(appOutDir, version = '1.0.0') {
 
   return {
     version,
+    electronVersion,
     entries,
     manifestText: `${lines.join('\n')}\n`,
   };
 }
 
 /**
- * Parses an install-manifest.tsv string into { version, entries: Map<relPath, { sha256, size }> }.
+ * Parses an install-manifest.tsv string into { version, electronVersion, entries: Map<relPath, { sha256, size }> }.
  */
 export function parseInstallManifest(tsvText) {
   const entries = new Map();
   let version = '';
+  let electronVersion = null;
   if (!tsvText || typeof tsvText !== 'string') {
-    return { version, entries };
+    return { version, electronVersion, entries };
   }
   const lines = tsvText.split(/\r?\n/);
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) continue;
     if (line.startsWith('#')) {
-      const m = /^#\s*version=(.+)$/i.exec(line);
-      if (m) version = m[1].trim();
+      const vm = /^#\s*version=(.+)$/i.exec(line);
+      if (vm) version = vm[1].trim();
+      const em = /^#\s*electronVersion=(.+)$/i.exec(line);
+      if (em) electronVersion = em[1].trim();
       continue;
     }
     const parts = line.split('\t');
@@ -125,7 +147,7 @@ export function parseInstallManifest(tsvText) {
     if (!relPath || !/^[a-f0-9]{64}$/.test(sha256) || !Number.isFinite(size)) continue;
     entries.set(relPath, { sha256, size });
   }
-  return { version, entries };
+  return { version, electronVersion, entries };
 }
 
 /**
@@ -221,10 +243,26 @@ export default async function afterPack(context) {
   if (context.electronPlatformName !== 'win32') return;
   const appOutDir = context.appOutDir;
   const version = context.packager?.appInfo?.version || '1.0.0';
+  const electronVersion = readPackagedElectronVersion();
   const resourcesDir = path.join(appOutDir, 'resources');
   fs.mkdirSync(resourcesDir, { recursive: true });
 
-  const { entries, manifestText } = generateInstallManifest(appOutDir, version);
+  const appVersionPath = path.join(resourcesDir, 'app-version.json');
+  fs.writeFileSync(
+    appVersionPath,
+    JSON.stringify(
+      {
+        version,
+        electronVersion,
+        builtAt: new Date().toISOString(),
+      },
+      null,
+      2
+    ) + '\n',
+    'utf-8'
+  );
+
+  const { entries, manifestText } = generateInstallManifest(appOutDir, version, electronVersion);
   const outManifestPath = path.join(resourcesDir, 'install-manifest.tsv');
   fs.writeFileSync(outManifestPath, manifestText, 'utf-8');
 
@@ -244,7 +282,7 @@ export default async function afterPack(context) {
     console.warn('[after-pack-manifest] Warning: 7za.exe not found; NSIS selective update will use full fallback.');
   }
 
-  // Build compact WaveForm-AppPatch-<version>.zip containing resources/** + install-manifest.tsv for direct delta updates
+  // Build compact WaveForm-AppPatch-<version>.zip containing resources/** + app-version.json + install-manifest.tsv for direct delta updates
   const patchZipPath = path.join(releaseDir, `WaveForm-AppPatch-${version}.zip`);
   try {
     fs.rmSync(patchZipPath, { force: true });
@@ -256,6 +294,9 @@ export default async function afterPack(context) {
   }
   if (fs.existsSync(path.join(resourcesDir, 'app.asar.unpacked'))) {
     patchTargets.push(path.join('resources', 'app.asar.unpacked'));
+  }
+  if (fs.existsSync(appVersionPath)) {
+    patchTargets.push(path.join('resources', 'app-version.json'));
   }
   if (fs.existsSync(outManifestPath)) {
     patchTargets.push(path.join('resources', 'install-manifest.tsv'));

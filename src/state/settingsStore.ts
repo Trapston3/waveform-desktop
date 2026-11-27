@@ -357,6 +357,7 @@ export interface AppUpdateState {
   updateStrategy?: 'direct_patch' | 'full_installer';
   deltaChangedCount?: number | null;
   deltaRemovedCount?: number | null;
+  updatedFromVersion?: string | null;
   dismissedThisSession: boolean;
   progress: AppUpdateProgress | null;
   error: string | null;
@@ -370,6 +371,7 @@ export interface UpdateStore {
   checkForUpdates: () => Promise<void>;
   downloadAndInstall: () => Promise<void>;
   dismissForSession: () => Promise<void>;
+  dismissUpdatedToast: () => void;
   openModal: () => void;
   closeModal: () => void;
   openReleasePage: () => Promise<void>;
@@ -377,7 +379,7 @@ export interface UpdateStore {
 
 const DEFAULT_UPDATE_STATE: AppUpdateState = {
   status: 'idle',
-  currentVersion: '1.2.5',
+  currentVersion: '1.3.4',
   latestVersion: null,
   releaseName: null,
   releaseNotes: null,
@@ -388,6 +390,7 @@ const DEFAULT_UPDATE_STATE: AppUpdateState = {
   updateStrategy: 'full_installer',
   deltaChangedCount: null,
   deltaRemovedCount: null,
+  updatedFromVersion: null,
   dismissedThisSession: false,
   progress: null,
   error: null,
@@ -501,6 +504,11 @@ const updateStoreApi = createStore<UpdateStore>((set, get) => {
         }
       }
     },
+
+    dismissUpdatedToast: () =>
+      set((prev) => ({
+        state: { ...prev.state, updatedFromVersion: null },
+      })),
 
     openModal: () => set({ isModalOpen: true }),
 

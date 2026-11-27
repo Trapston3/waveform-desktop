@@ -515,7 +515,7 @@ test('CHAL-PROD-02: Layout Geometry dimensions conformance', () => {
   const leftSidebarCode = fs.readFileSync(path.join(rootDir, 'src', 'ui', 'layout', 'LeftSidebar.tsx'), 'utf-8');
   assert.ok(leftSidebarCode.includes('w-60'), 'LeftSidebar must have standard width 240px (w-60)');
 
-  const rightInspectorCode = fs.readFileSync(path.join(rootDir, 'src', 'ui', 'layout', 'RightInspector.tsx'), 'utf-8');
+  const rightInspectorCode = fs.readFileSync(path.join(rootDir, 'src', 'ui', 'layout', 'RightSidecar.tsx'), 'utf-8');
   assert.ok(rightInspectorCode.includes('w-[360px]'), 'RightInspector must have standard collapsible width 360px');
 
   const bottomPlayerBarCode = fs.readFileSync(path.join(rootDir, 'src', 'ui', 'layout', 'BottomPlayerBar.tsx'), 'utf-8');

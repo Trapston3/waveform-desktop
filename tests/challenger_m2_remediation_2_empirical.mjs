@@ -2,10 +2,10 @@
 // Independent Empirical Adversarial Challenger Verification Harness
 // Role: challenger_m2_remediation_2
 // Objectives:
-// 1. Empirically verify that src/ui/layout/RightInspector.tsx suspends position updates during playback:
+// 1. Empirically verify that src/ui/layout/RightSidecar.tsx suspends position updates during playback:
 //    - When isOpen = false -> exactly 0 re-renders over 100+ audio tick cycles.
 //    - When activeTab = 'queue' -> exactly 0 re-renders over 100+ audio tick cycles.
-// 2. Empirically verify that RightInspector.tsx is wrapped in memo and contains zero wide usePlayerStore() calls.
+// 2. Empirically verify that RightSidecar.tsx is wrapped in memo and contains zero wide usePlayerStore() calls.
 // 3. Verify comments contain zero spoofed assertion tokens.
 // 4. Verify GPU-accelerated styling tokens, layout constraints, and spring curve metrics.
 
@@ -54,10 +54,10 @@ console.log('===================================================================
 // ============================================================================
 // SUITE 1: SOURCE AUDIT — ZERO WIDE SUBSCRIPTIONS & AUTHENTIC MEMOIZATION
 // ============================================================================
-suite('1. RightInspector.tsx Source Code Audit (Memoization & Subscription Hygiene)');
+suite('1. RightSidecar.tsx Source Code Audit (Memoization & Subscription Hygiene)');
 
-const inspectorPath = path.join(ROOT, 'src/ui/layout/RightInspector.tsx');
-assert.ok(fs.existsSync(inspectorPath), 'src/ui/layout/RightInspector.tsx must exist');
+const inspectorPath = path.join(ROOT, 'src/ui/layout/RightSidecar.tsx');
+assert.ok(fs.existsSync(inspectorPath), 'src/ui/layout/RightSidecar.tsx must exist');
 const inspectorSrc = fs.readFileSync(inspectorPath, 'utf8');
 
 check('File size confirms authentic component (>200 lines, non-stub)', () => {

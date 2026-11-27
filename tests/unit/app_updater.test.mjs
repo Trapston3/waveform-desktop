@@ -98,8 +98,10 @@ const {
   parseSha256Sums,
   selectReleaseAssets,
   parseInstallManifest,
+  parseInstallManifestMeta,
   planDeltaUpdate,
   buildDirectPatchApplierScript,
+  getInstalledAppVersion,
   verifyFileSha256,
   createAppUpdaterController,
   initAppUpdaterIpc,
@@ -610,32 +612,82 @@ describe('One-Click In-App Updater & Persistent Cold-Boot Reminder', () => {
     assert.deepEqual(deltaPlan.changedFiles, ['resources\\app.asar']);
     assert.deepEqual(deltaPlan.removedFiles, ['resources\\old-asset.txt']);
 
-    // Binary change forces full_installer
-    const remoteBinaryMap = parseInstallManifest([
+    // WaveForm.exe version-stamp hash diff alone must NOT force full_installer!
+    const remoteExeOnlyDiffMap = parseInstallManifest([
       'version\tsize\tsha256\trelPath',
       `1.3.1\t1024\t${hashOf('new-asar-payload')}\tresources\\app.asar`,
-      `1.3.1\t220\t${hashOf('new-exe')}\tWaveForm.exe`,
+      `1.3.1\t220\t${hashOf('new-exe-stamp')}\tWaveForm.exe`,
     ].join('\n'));
-    const fullPlan = planDeltaUpdate(localMap, remoteBinaryMap);
-    assert.equal(fullPlan.strategy, 'full_installer');
-    assert.equal(fullPlan.requiresBinaryUpgrade, true);
+    const exeOnlyPlan = planDeltaUpdate(localMap, remoteExeOnlyDiffMap, {
+      localElectronVersion: '30.5.1',
+      remoteElectronVersion: '30.5.1',
+    });
+    assert.equal(exeOnlyPlan.strategy, 'direct_patch');
+    assert.equal(exeOnlyPlan.requiresBinaryUpgrade, false);
+    assert.deepEqual(exeOnlyPlan.changedFiles, ['resources\\app.asar']);
 
-    // Script asserts PID wait, backup/rollback, registry DisplayVersion, zero NSIS invocation, direct exe launch
+    // 3-column after-pack-manifest.mjs format parsing + Electron runtime DLL / electronVersion mismatch forces full_installer
+    const tsv3Col = [
+      '# version=1.3.4',
+      '# electronVersion=31.0.0',
+      `resources\\app.asar\t${hashOf('new-asar-payload')}\t1024`,
+      `ffmpeg.dll\t${hashOf('new-ffmpeg')}\t900`,
+      `WaveForm.exe\t${hashOf('new-exe-stamp')}\t220`,
+    ].join('\n');
+    const meta3Col = parseInstallManifestMeta(tsv3Col);
+    assert.equal(meta3Col.version, '1.3.4');
+    assert.equal(meta3Col.electronVersion, '31.0.0');
+    assert.equal(meta3Col.entries.size, 3);
+    const runtimeDiffPlan = planDeltaUpdate(localMap, meta3Col.entries, {
+      localElectronVersion: '30.5.1',
+      remoteElectronVersion: meta3Col.electronVersion,
+    });
+    assert.equal(runtimeDiffPlan.strategy, 'full_installer');
+    assert.equal(runtimeDiffPlan.requiresBinaryUpgrade, true);
+
+    // getInstalledAppVersion reads resources/app-version.json first so patched builds never loop
+    const versionDir = path.join(tempRoot, 'versioned-install');
+    fs.mkdirSync(path.join(versionDir, 'resources'), { recursive: true });
+    fs.writeFileSync(
+      path.join(versionDir, 'resources', 'app-version.json'),
+      JSON.stringify({ version: '1.3.4', electronVersion: '30.5.1' })
+    );
+    assert.equal(getInstalledAppVersion(versionDir, '1.3.2'), '1.3.4');
+
+    // Script asserts UAC probe, logging, full dir process cleanup, 12x retry, backup/rollback, DisplayVersion, and --updated-from
     const script = buildDirectPatchApplierScript({
       targetPid: 4242,
       installDir: 'C:\\Program Files\\WaveForm',
       stagingDir: 'C:\\Temp\\staging',
       updateDir: 'C:\\Temp\\WaveForm-Update',
       relaunchExePath: 'C:\\Program Files\\WaveForm\\WaveForm.exe',
-      targetVersion: '1.3.1',
+      targetVersion: '1.3.4',
+      fromVersion: '1.3.2',
       changedFiles: ['resources\\app.asar'],
       removedFiles: ['resources\\old-asset.txt'],
     });
     assert.ok(script.includes('Get-Process -Id $TargetPid'));
+    assert.ok(script.includes('updater.log'));
+    assert.ok(script.includes('-Verb RunAs'));
+    assert.ok(script.includes('$attempt -lt 12'));
+    assert.ok(script.includes('Start-Sleep -Milliseconds 500'));
     assert.ok(script.includes('DisplayVersion'));
     assert.ok(script.includes('BackupDir'));
-    assert.ok(script.includes('Start-Process -FilePath $RelaunchExe'));
+    assert.ok(script.includes('--updated-from='));
     assert.equal(script.includes('/S'), false);
+
+    // UpdatePromptModal renders "Updated to v..." toast when updatedFromVersion is set and modal is closed
+    useUpdateStore.setState({
+      isModalOpen: false,
+      state: {
+        ...useUpdateStore.getState().state,
+        status: 'up-to-date',
+        currentVersion: '1.3.4',
+        updatedFromVersion: '1.3.2',
+      },
+    });
+    const toastHtml = renderToStaticMarkup(React.createElement(UpdatePromptModal));
+    assert.ok(toastHtml.includes('Updated to v1.3.4'));
 
     // Controller end-to-end direct patch run
     const installDir = path.join(tempRoot, 'install');

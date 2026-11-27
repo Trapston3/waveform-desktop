@@ -558,8 +558,8 @@ suite('Module 3: Drawer Toggle & Interaction Resilience (Lyrics & Queue Sidecar)
   assert(!drawer.isOpen(), 'closeAll() (handleCloseInspector) resets both drawers to closed');
 
   // 6. RightInspector re-export compatibility
-  const inspectorFile = path.join(ROOT, 'src/ui/layout/RightInspector.tsx');
-  assert(fs.existsSync(inspectorFile), 'RightInspector.tsx exists');
+  const inspectorFile = path.join(ROOT, 'src/ui/layout/RightSidecar.tsx');
+  assert(fs.existsSync(inspectorFile), 'RightSidecar.tsx exists');
   const inspectorSrc = fs.readFileSync(inspectorFile, 'utf8');
   assert(
     inspectorSrc.includes('export const RightInspector = RightSidecar') ||

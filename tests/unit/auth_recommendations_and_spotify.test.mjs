@@ -31,8 +31,10 @@ const {
   fetchSpotifyPlaylistTracks,
   clearSpotifyTokenCache,
 } = await import('../../electron/accountAuth.ts');
-const { AccountAuthService } = await import('../../src/services/AccountAuthService.ts');
-const { SpotifyPlaylistService } = await import('../../src/services/SpotifyPlaylistService.ts');
+const {
+  AccountAuthService,
+  loadSpotifyPlaylistSongs,
+} = await import('../../src/services/AccountAuthService.ts');
 
 // ---------------------------------------------------------------------------
 // 1. YouTube Music SAPISID Extraction & Hash Tests
@@ -233,7 +235,7 @@ test('AccountAuthService onAuthChanged fires upon login and logout', async () =>
   assert.equal(events.length, 2); // Unsubscribed
 });
 
-test('SpotifyPlaylistService maps tracks to playable Song objects with empty streamUrl and videoId prefix', async () => {
+test('AccountAuthService.loadSpotifyPlaylistSongs maps tracks to playable Song objects with empty streamUrl and sp_ prefix', async () => {
   // Mock window.electronAPI
   globalThis.window = {
     electronAPI: {
@@ -257,7 +259,7 @@ test('SpotifyPlaylistService maps tracks to playable Song objects with empty str
     removeEventListener: () => {},
   };
 
-  const songs = await SpotifyPlaylistService.loadSpotifyPlaylistSongs('any_pl');
+  const songs = await loadSpotifyPlaylistSongs('any_pl');
   assert.equal(songs.length, 1);
   const song = songs[0];
 

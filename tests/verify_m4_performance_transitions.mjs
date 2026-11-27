@@ -51,7 +51,7 @@ const targetScreens = [
   { name: 'ReleaseDetailView', path: 'src/ui/views/ReleaseDetailView.tsx' },
   { name: 'ArtistDetailView', path: 'src/ui/views/ArtistDetailView.tsx' },
   { name: 'BottomPlayerBar', path: 'src/ui/layout/BottomPlayerBar.tsx' },
-  { name: 'RightInspector', path: 'src/ui/layout/RightInspector.tsx' },
+  { name: 'RightInspector', path: 'src/ui/layout/RightSidecar.tsx' },
   { name: 'NowPlayingScreen', path: 'src/ui/player/NowPlayingScreen.tsx' },
   { name: 'MainViewport', path: 'src/ui/layout/MainViewport.tsx' },
 ];
@@ -332,7 +332,7 @@ suite('7. SyllableLyricsEngine Line-Level Memoization & Drawer Suspension');
 
 const lyricsEnginePath = path.join(ROOT, 'src/ui/player/SyllableLyricsEngine.tsx');
 const lyricsEngineContent = fs.readFileSync(lyricsEnginePath, 'utf8');
-const inspectorPath = path.join(ROOT, 'src/ui/layout/RightInspector.tsx');
+const inspectorPath = path.join(ROOT, 'src/ui/layout/RightSidecar.tsx');
 const inspectorContent = fs.readFileSync(inspectorPath, 'utf8');
 
 test('SyllableLyricsEngine: Implements memoized LyricLineRow with custom equality comparator', () => {

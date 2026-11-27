@@ -184,7 +184,7 @@ assert(playerBarSrc.includes('w-[280px]'), 'R1-28: Zone 4 Left cluster allocated
 assert(playerBarSrc.includes('w-[240px]'), 'R1-29: Zone 4 Right cluster allocated ~240px for volume & toggles');
 assert(playerBarSrc.includes('ATMOS') && playerBarSrc.includes('LOSSLESS'), 'R1-30: Zone 4 Renders single clean high-fidelity audio quality badge');
 
-const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightInspector.tsx'), 'utf8');
+const inspectorSrc = fs.readFileSync(path.join(ROOT, 'src/ui/layout/RightSidecar.tsx'), 'utf8');
 assert(inspectorSrc.includes('w-[360px]'), 'R1-31: Zone 5 Right Inspector sidecar constrained to 360px width');
 assert(inspectorSrc.includes('translate3d'), 'R1-32: Zone 5 Features hardware-accelerated slide animation');
 

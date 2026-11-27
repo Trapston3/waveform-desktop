@@ -151,6 +151,10 @@ export const RadioPartyView: React.FC = memo(() => {
   const p2pActive = usePartyStore((s) => s.p2pActive);
   const isClockSynced = usePartyStore((s) => s.isClockSynced);
   const clockOffsetMs = usePartyStore((s) => s.clockOffsetMs);
+  const rttMs = usePartyStore((s) => s.rttMs);
+  const driftMs = usePartyStore((s) => s.driftMs);
+  const syncZone = usePartyStore((s) => s.syncZone);
+  const syncPlaybackRate = usePartyStore((s) => s.syncPlaybackRate);
   const controlMode = usePartyStore((s) => s.controlMode);
   const participants = usePartyStore((s) => s.participants);
   const currentTrack = usePartyStore((s) => s.currentTrack);
@@ -320,9 +324,30 @@ export const RadioPartyView: React.FC = memo(() => {
                   </span>
 
                   {isClockSynced && (
-                    <span className="px-2.5 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-mono text-[#A1A1A6]">
-                      NTP {clockOffsetMs >= 0 ? `+${clockOffsetMs}` : clockOffsetMs}ms
-                    </span>
+                    <>
+                      <span className="px-2.5 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-mono text-[#A1A1A6]">
+                        NTP {clockOffsetMs >= 0 ? `+${clockOffsetMs}` : clockOffsetMs}ms
+                        {typeof rttMs === 'number' ? ` · RTT ${rttMs}ms` : ''}
+                      </span>
+                      <span
+                        data-testid="party-sync-telemetry"
+                        className={`px-2.5 py-1 rounded-full border text-[10px] font-semibold ${
+                          syncZone === 'locked'
+                            ? 'bg-emerald-500/15 border-emerald-400/30 text-emerald-300'
+                            : syncZone === 'rate_catchup'
+                            ? 'bg-cyan-500/15 border-cyan-400/30 text-cyan-300'
+                            : 'bg-amber-500/15 border-amber-400/30 text-amber-200'
+                        }`}
+                      >
+                        {syncZone === 'locked'
+                          ? `Synced · ±${Math.abs(Math.round(driftMs))}ms`
+                          : syncZone === 'rate_catchup'
+                          ? `Adjusting speed (${syncPlaybackRate.toFixed(2)}x)...`
+                          : syncZone === 'pause_wait'
+                          ? 'Syncing with host...'
+                          : 'Buffering sync...'}
+                      </span>
+                    </>
                   )}
                 </>
               )}

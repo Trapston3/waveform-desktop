@@ -831,35 +831,39 @@ describe('Feature 16: LyricsService, DiscordRpcService & PartySyncClient', () =>
     assert.ok(Math.abs(client.getClockOffsetMs() - 5000) < 150);
   });
 
-  test('F16-PT03: PartySyncClient checkDrift triggers seek after consecutive drift strikes', () => {
+  test('F16-PT03: PartySyncClient checkDrift uses 3-zone controller (lead-compensated seek + cooldown)', () => {
     const client = new PartySyncClient();
-    let seekRequestedTo = null;
+    const seeks = [];
     client.setCallbacks({
       onSeek: (targetMs) => {
-        seekRequestedTo = targetMs;
+        seeks.push(targetMs);
       },
     });
 
+    const now = Date.now();
     // Simulate clock synced with 0 offset
-    client.handleFrame({ type: 'pong', clientMs: Date.now(), serverMs: Date.now() });
+    client.handleFrame({ type: 'pong', clientMs: now, serverMs: now });
 
     const playback = {
       isPlaying: true,
       positionMs: 50000,
-      anchorMs: Date.now(),
+      anchorMs: now,
       speed: 1.0,
       currentTrack: null,
     };
 
-    // Strike 1: local player at 40000ms (10,000ms behind, > 200ms limit)
-    const strike1 = client.checkDrift(40000, playback);
-    assert.strictEqual(strike1, false);
-    assert.strictEqual(seekRequestedTo, null);
+    // Deadzone (<150ms): no seek
+    assert.strictEqual(client.checkDrift(50050, playback, now), false);
+    assert.strictEqual(seeks.length, 0);
 
-    // Strike 2: second consecutive check triggers correction
-    const strike2 = client.checkDrift(40000, playback);
-    assert.strictEqual(strike2, true);
-    assert.ok(seekRequestedTo !== null);
+    // Major behind desync (10s behind): single lead-compensated seek + 4.5s cooldown prevents loop
+    assert.strictEqual(client.checkDrift(40000, playback, now), true);
+    assert.strictEqual(seeks.length, 1);
+    assert.ok(seeks[0] >= 50300);
+
+    // Subsequent check inside cooldown window suppresses second hard seek
+    assert.strictEqual(client.checkDrift(40000, playback, now + 500), false);
+    assert.strictEqual(seeks.length, 1);
   });
 
   test('F16-PT04: MockPartyBroadcastServer tracks members and room state', () => {

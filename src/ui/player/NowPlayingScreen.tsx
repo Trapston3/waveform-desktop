@@ -1210,7 +1210,7 @@ export const NowPlayingScreen: React.FC<NowPlayingScreenProps> = memo(({ isOpen,
                   <div
                     data-testid="studio-tools-popover"
                     onClick={(e) => e.stopPropagation()}
-                    className="liquid-glass-capsule absolute bottom-11 left-0 w-80 max-h-[70vh] overflow-y-auto p-3.5 rounded-2xl bg-[#141620]/95 backdrop-blur-2xl border border-white/15 shadow-2xl text-white z-40 space-y-3"
+                    className="absolute bottom-11 left-0 w-80 max-h-[70vh] overflow-y-auto p-3.5 rounded-2xl bg-[#141620]/95 backdrop-blur-2xl border border-white/15 shadow-2xl text-white z-40 space-y-3"
                   >
                     <div className="flex items-center justify-between border-b border-white/10 pb-2">
                       <div className="flex items-center gap-2">

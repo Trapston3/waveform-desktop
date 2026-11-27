@@ -25,6 +25,7 @@ export const UpdatePromptModal: React.FC = () => {
   const isModalOpen = useUpdateStore((s) => s.isModalOpen);
   const downloadAndInstall = useUpdateStore((s) => s.downloadAndInstall);
   const dismissForSession = useUpdateStore((s) => s.dismissForSession);
+  const dismissUpdatedToast = useUpdateStore((s) => s.dismissUpdatedToast);
   const closeModal = useUpdateStore((s) => s.closeModal);
   const checkForUpdates = useUpdateStore((s) => s.checkForUpdates);
   const openReleasePage = useUpdateStore((s) => s.openReleasePage);
@@ -32,6 +33,14 @@ export const UpdatePromptModal: React.FC = () => {
   const isLocked = state.status === 'verifying' || state.status === 'installing';
   const isDownloading = state.status === 'downloading';
   const isError = state.status === 'error';
+
+  useEffect(() => {
+    if (!state.updatedFromVersion || isModalOpen) return;
+    const timer = setTimeout(() => {
+      dismissUpdatedToast();
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [state.updatedFromVersion, isModalOpen, dismissUpdatedToast]);
 
   const handleDismissOrMinimize = () => {
     if (isLocked) return;
@@ -57,7 +66,21 @@ export const UpdatePromptModal: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isModalOpen, isLocked, isDownloading]);
 
-  if (!isModalOpen) return null;
+  if (!isModalOpen) {
+    if (!state.updatedFromVersion) return null;
+    return (
+      <div
+        role="status"
+        data-testid="updated-confirmation-toast"
+        onClick={dismissUpdatedToast}
+        className="fixed bottom-24 right-6 z-[75] flex items-center gap-2.5 px-4 py-2.5 rounded-2xl liquid-glass-capsule border border-emerald-400/35 text-xs font-semibold text-white shadow-2xl cursor-pointer animate-in fade-in slide-in-from-bottom-2 duration-200"
+      >
+        <ShieldCheck size={15} className="text-emerald-400 shrink-0" />
+        <span>Updated to v{state.currentVersion}</span>
+        <X size={13} className="text-white/50 hover:text-white ml-1" />
+      </div>
+    );
+  }
 
   const latestLabel = state.latestVersion ? `v${state.latestVersion}` : 'Latest';
   const currentLabel = `v${state.currentVersion}`;

@@ -129,11 +129,10 @@ describe('Wave 2 Ticket C: Minimal Mini-Lyrics & 60fps Smooth Lyrics Engine', ()
     assert.equal(sidecarSrc.includes('w-[360px]'), true);
     assert.equal(sidecarSrc.includes('translate3d'), true);
 
-    const inspectorSrc = readSrc('src/ui/layout/RightInspector.tsx');
     assert.equal(
-      inspectorSrc.includes('./RightSidecar'),
+      sidecarSrc.includes('export const RightInspector = RightSidecar;'),
       true,
-      'src/ui/layout/RightInspector.tsx must delegate directly to RightSidecar'
+      'src/ui/layout/RightSidecar.tsx must export RightInspector compatibility alias'
     );
   });
 

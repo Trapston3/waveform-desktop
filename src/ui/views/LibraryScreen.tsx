@@ -48,11 +48,10 @@ import { PlayerPlayIcon } from '../common/WaveFormIcons';
 import { DesktopTrackTable } from '../components/DesktopTrackTable';
 import { LocalMediaView } from './LocalMediaView';
 import { RadioPartyView } from './RadioPartyView';
-import { AccountAuthService } from '../../services/AccountAuthService';
 import {
-  SpotifyPlaylistService,
+  AccountAuthService,
   type SpotifyPlaylistItem,
-} from '../../services/SpotifyPlaylistService';
+} from '../../services/AccountAuthService';
 import type { Song } from '../../models/Song';
 import type { OpenContextMenuFn } from '../hooks/useContextMenu';
 
@@ -132,7 +131,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
           setSelectedSpotifyPlaylist(null);
           setSpotifyPlaylistTracks([]);
         } else {
-          SpotifyPlaylistService.loadSpotifyPlaylists(true)
+          AccountAuthService.loadSpotifyPlaylists(true)
             .then((pls) => {
               if (isMounted) setSpotifyPlaylists(pls);
             })
@@ -150,7 +149,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
   useEffect(() => {
     let isMounted = true;
     if (activeTab === 'Playlists' && spotifyConnected) {
-      SpotifyPlaylistService.loadSpotifyPlaylists()
+      AccountAuthService.loadSpotifyPlaylists()
         .then((pls) => {
           if (isMounted) setSpotifyPlaylists(pls);
         })
@@ -1233,7 +1232,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = memo(({
                         setSelectedSpotifyPlaylist(pl);
                         setLoadingSpotifyTracks(true);
                         try {
-                          const tracks = await SpotifyPlaylistService.loadSpotifyPlaylistSongs(pl.id);
+                          const tracks = await AccountAuthService.loadSpotifyPlaylistSongs(pl.id);
                           setSpotifyPlaylistTracks(tracks);
                         } catch {
                           setSpotifyPlaylistTracks([]);

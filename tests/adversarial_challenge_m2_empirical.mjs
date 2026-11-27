@@ -346,11 +346,8 @@ await asyncSuite('4. Sidecar Drawer Slide Transitions & Inactive Ticker Suspensi
   assert(sidecarSrc.includes('cubic-bezier(0.22,1,0.36,1)'), 'Sidecar drawer transition uses macOS spring cubic-bezier(0.22,1,0.36,1)');
   assert(sidecarSrc.includes('pointer-events-none'), 'Sidecar drawer disables pointer events when closed');
 
-  // 4.2 RightInspector compatibility alias verification
-  const inspectorPath = path.join(ROOT, 'src/ui/layout/RightInspector.tsx');
-  assert(fs.existsSync(inspectorPath), 'src/ui/layout/RightInspector.tsx compatibility alias exists');
-  const inspectorSrc = fs.readFileSync(inspectorPath, 'utf8');
-  assert(inspectorSrc.includes('export const RightInspector = RightSidecar;'), 'RightInspector re-exports RightSidecar identically');
+  // 4.2 RightInspector compatibility alias verification (exported directly by RightSidecar.tsx)
+  assert(sidecarSrc.includes('export const RightInspector = RightSidecar;'), 'RightSidecar exports RightInspector alias');
 
   // 4.3 Inactive ticker suspension logic verification
   assert(
